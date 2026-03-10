@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Alert, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { useRouter } from "expo-router";
 import { supabase } from "../../../lib/supabase";
 import { CategoriesContent } from "./categories";
@@ -11,12 +11,10 @@ import {
   convertDistance,
   convertPaceSecondsPerUnit,
   distanceUnitLabel,
-  loadDistanceUnit,
   paceUnitLongLabel,
-  saveDistanceUnit,
   type DistanceUnit,
 } from "../../../lib/units";
-import { athleteDisplayName, loadRoster, type AthleteProfile } from "../../../lib/roster";
+import { getSortableRoster, type TeamRosterAthlete } from "../../../lib/teamRoster";
 import {
   createGroupId,
   loadCustomAthleteGroups,
@@ -35,14 +33,19 @@ import {
   type PracticeTimeDefaults,
 } from "../../../lib/practiceDefaults";
 import { normalizeWorkoutTimeInput } from "../../../lib/time";
-import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
 import {
-  loadCategoryRoutineDefaults,
-  normalizeCategoryRoutineKey,
-  saveCategoryRoutineDefaults,
-  type CategoryRoutineDefaults,
-} from "../../../lib/categoryRoutineDefaults";
-import { CATEGORIES_KEY, normalizeCategories } from "../../../lib/categories";
+  createAuxiliaryRoutine,
+  deleteAuxiliaryRoutine,
+  loadAuxiliaryRoutines,
+  updateAuxiliaryRoutine,
+  type AuxiliaryRoutine,
+} from "../../../lib/auxiliaryRoutines";
+import {
+  COACH_SETTINGS_SAVE_SOURCE,
+  loadCoachCategoriesFromTeamKV,
+  loadCoachSettings,
+  saveCoachSettings,
+} from "../../../lib/settings";
 import {
   loadFeedbackFlagSettings,
   saveFeedbackFlagSettings,
@@ -152,6 +155,8 @@ function convertWorkoutDistances(rawWorkouts: any[], from: DistanceUnit, to: Dis
 
 export default function CoachSettingsTab() {
   const router = useRouter();
+  const { width } = useWindowDimensions();
+  const isDesktopWeb = Platform.OS === "web" && width >= 1100;
   const [paceText, setPaceText] = useState("");
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
@@ -168,10 +173,9 @@ export default function CoachSettingsTab() {
   const [weekStartMenuOpen, setWeekStartMenuOpen] = useState(false);
   const [paceMenuOpen, setPaceMenuOpen] = useState(false);
 
-  const [roster, setRoster] = useState<AthleteProfile[]>([]);
+  const [roster, setRoster] = useState<TeamRosterAthlete[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [auxiliaryRoutines, setAuxiliaryRoutines] = useState<AuxiliaryRoutine[]>([]);
-  const [categoryRoutineDefaults, setCategoryRoutineDefaults] = useState<CategoryRoutineDefaults>({});
   const [groups, setGroups] = useState<CustomAthleteGroup[]>([]);
   const [practiceDefaults, setPracticeDefaults] = useState<PracticeTimeDefaults>(emptyPracticeTimeDefaults());
   const [athletePaceOverrides, setAthletePaceOverrides] = useState<AthletePaceOverrides>({});
@@ -179,47 +183,61 @@ export default function CoachSettingsTab() {
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [groupNameText, setGroupNameText] = useState("");
   const [draftAthleteIds, setDraftAthleteIds] = useState<string[]>([]);
+  const [selectedAuxiliaryRoutineId, setSelectedAuxiliaryRoutineId] = useState<string | null>(null);
+  const [auxiliaryTitleDraft, setAuxiliaryTitleDraft] = useState("");
+  const [auxiliaryDetailsDraft, setAuxiliaryDetailsDraft] = useState("");
+  const [auxiliaryPreCategoryNamesDraft, setAuxiliaryPreCategoryNamesDraft] = useState<string[]>([]);
+  const [auxiliaryPostCategoryNamesDraft, setAuxiliaryPostCategoryNamesDraft] = useState<string[]>([]);
+  const [auxiliaryAutosaveStatus, setAuxiliaryAutosaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const auxiliaryAutosaveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAuxiliarySavedSnapshotRef = React.useRef("");
+  const suppressAuxiliaryAutosaveRef = React.useRef(false);
 
   useEffect(() => {
     (async () => {
-      const [paceSec, unit, loadedRoster, loadedGroups, loadedOverrides, weekStart, storedCategories, loadedRoutines, loadedCategoryDefaults, feedbackFlagSettings] = await Promise.all([
-        loadPaceSecondsPerMile(),
-        loadDistanceUnit(),
-        loadRoster(),
-        loadCustomAthleteGroups(),
-        loadAthletePaceOverrides(),
-        loadJSON<WeekStartDay>(WEEK_START_KEY, 1),
-        loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
-        loadAuxiliaryRoutines(),
-        loadCategoryRoutineDefaults(),
-        loadFeedbackFlagSettings(),
-      ]);
-      const defaults = await loadPracticeTimeDefaults();
-      setPaceText(formatPace(paceSec));
-      setDistanceUnit(unit);
-      setWeekStartsOn((weekStart ?? 1) as WeekStartDay);
-      setRoster(loadedRoster);
-      setCategories(normalizeCategories(storedCategories));
-      setAuxiliaryRoutines(loadedRoutines);
-      setCategoryRoutineDefaults(loadedCategoryDefaults);
-      setFeedbackFlagsEnabled(!!feedbackFlagSettings.enabled);
-      setFeedbackWarningMode(feedbackFlagSettings.mode ?? "all");
-      setFeedbackStartDateText(String(feedbackFlagSettings.startDateISO ?? ""));
-      setGroups(loadedGroups);
-      setAthletePaceOverrides(loadedOverrides);
-      setPracticeDefaults(defaults);
+      try {
+        const [paceSec, coachSettings, loadedCategories, loadedRoster, loadedGroups, loadedOverrides, weekStart, loadedRoutines, feedbackFlagSettings] = await Promise.all([
+          loadPaceSecondsPerMile(),
+          loadCoachSettings(),
+          loadCoachCategoriesFromTeamKV(),
+          getSortableRoster(),
+          loadCustomAthleteGroups(),
+          loadAthletePaceOverrides(),
+          loadJSON<WeekStartDay>(WEEK_START_KEY, 1),
+          loadAuxiliaryRoutines(),
+          loadFeedbackFlagSettings(),
+        ]);
+        const defaults = await loadPracticeTimeDefaults();
+        const loadedCategoryOptions = loadedCategories;
+        setPaceText(formatPace(paceSec));
+        setDistanceUnit(coachSettings.distanceUnit);
+        setWeekStartsOn((weekStart ?? 1) as WeekStartDay);
+        setRoster(loadedRoster);
+        setCategories(loadedCategoryOptions);
+        setAuxiliaryRoutines(loadedRoutines);
+        setFeedbackFlagsEnabled(!!feedbackFlagSettings.enabled);
+        setFeedbackWarningMode(feedbackFlagSettings.mode ?? "all");
+        setFeedbackStartDateText(String(feedbackFlagSettings.startDateISO ?? ""));
+        setGroups(loadedGroups);
+        setAthletePaceOverrides(loadedOverrides);
+        setPracticeDefaults(defaults);
 
-      const textById: Record<string, string> = {};
-      for (const athlete of loadedRoster) {
-        const value = loadedOverrides?.[athlete.id];
-        textById[athlete.id] = Number.isFinite(value) ? formatPace(value) : "";
+        const textById: Record<string, string> = {};
+        for (const athlete of loadedRoster) {
+          const value = loadedOverrides?.[athlete.id];
+          textById[athlete.id] = Number.isFinite(value) ? formatPace(value) : "";
+        }
+        setAthletePaceTextById(textById);
+      } catch (error: any) {
+        const message = error instanceof Error ? error.message : String(error ?? "Unknown settings load error");
+        console.error("[settings-screen] load failed", error);
+        Alert.alert("Settings load failed", message);
       }
-      setAthletePaceTextById(textById);
     })();
   }, []);
 
   const rosterById = useMemo(() => {
-    const map = new Map<string, AthleteProfile>();
+    const map = new Map<string, TeamRosterAthlete>();
     for (const athlete of roster) map.set(athlete.id, athlete);
     return map;
   }, [roster]);
@@ -230,7 +248,7 @@ export default function CoachSettingsTab() {
       if (byLast !== 0) return byLast;
       const byFirst = (a.firstName ?? "").localeCompare(b.firstName ?? "");
       if (byFirst !== 0) return byFirst;
-      return athleteDisplayName(a).localeCompare(athleteDisplayName(b));
+      return String(a.displayName ?? "").localeCompare(String(b.displayName ?? ""));
     });
   }, [roster]);
 
@@ -248,20 +266,214 @@ export default function CoachSettingsTab() {
     [auxiliaryRoutines]
   );
 
-  async function toggleCategoryAutoRoutine(categoryName: string, routineId: string) {
-    const key = normalizeCategoryRoutineKey(categoryName);
-    const current = Array.isArray(categoryRoutineDefaults[key]) ? categoryRoutineDefaults[key] : [];
-    const nextIds = current.includes(routineId)
-      ? current.filter((id) => id !== routineId)
-      : [...current, routineId];
-    const nextDefaults: CategoryRoutineDefaults = {
-      ...categoryRoutineDefaults,
-      [key]: nextIds,
-    };
-    if (nextIds.length === 0) delete nextDefaults[key];
-    setCategoryRoutineDefaults(nextDefaults);
-    await saveCategoryRoutineDefaults(nextDefaults);
+  const selectedAuxiliaryRoutine = useMemo(
+    () => sortedAuxiliaryRoutines.find((routine) => routine.id === selectedAuxiliaryRoutineId) ?? null,
+    [sortedAuxiliaryRoutines, selectedAuxiliaryRoutineId]
+  );
+
+  function buildAuxiliaryDraftSnapshot() {
+    return JSON.stringify({
+      id: selectedAuxiliaryRoutineId,
+      title: String(auxiliaryTitleDraft ?? "").trim(),
+      details: String(auxiliaryDetailsDraft ?? "").trim(),
+      pre: [...auxiliaryPreCategoryNamesDraft].sort(),
+      post: [...auxiliaryPostCategoryNamesDraft].sort(),
+    });
   }
+
+  function loadAuxiliaryRoutineIntoDrafts(routine: AuxiliaryRoutine | null) {
+    suppressAuxiliaryAutosaveRef.current = true;
+
+    if (!routine) {
+      setAuxiliaryTitleDraft("");
+      setAuxiliaryDetailsDraft("");
+      setAuxiliaryPreCategoryNamesDraft([]);
+      setAuxiliaryPostCategoryNamesDraft([]);
+      lastAuxiliarySavedSnapshotRef.current = "";
+      setAuxiliaryAutosaveStatus("idle");
+      setTimeout(() => {
+        suppressAuxiliaryAutosaveRef.current = false;
+      }, 0);
+      return;
+    }
+    setAuxiliaryTitleDraft(String(routine.title ?? ""));
+    setAuxiliaryDetailsDraft(String(routine.details ?? ""));
+    setAuxiliaryPreCategoryNamesDraft(Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : []);
+    setAuxiliaryPostCategoryNamesDraft(Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : []);
+
+    lastAuxiliarySavedSnapshotRef.current = JSON.stringify({
+      id: routine.id,
+      title: String(routine.title ?? "").trim(),
+      details: String(routine.details ?? "").trim(),
+      pre: [...(Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : [])].sort(),
+      post: [...(Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : [])].sort(),
+    });
+
+    setAuxiliaryAutosaveStatus("idle");
+
+    setTimeout(() => {
+      suppressAuxiliaryAutosaveRef.current = false;
+    }, 0);
+  }
+
+  function selectAuxiliaryRoutineById(routineId: string | null) {
+    setSelectedAuxiliaryRoutineId(routineId);
+    const routine = sortedAuxiliaryRoutines.find((item) => item.id === routineId) ?? null;
+    loadAuxiliaryRoutineIntoDrafts(routine);
+  }
+
+  async function reloadAuxiliaryRoutines(preferredRoutineId?: string | null) {
+    const loaded = await loadAuxiliaryRoutines();
+    const sorted = [...loaded].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
+    setAuxiliaryRoutines(sorted);
+    const targetId = preferredRoutineId ?? selectedAuxiliaryRoutineId;
+    const selected = sorted.find((routine) => routine.id === targetId) ?? null;
+    if (selected) {
+      setSelectedAuxiliaryRoutineId(selected.id);
+      loadAuxiliaryRoutineIntoDrafts(selected);
+      return;
+    }
+    setSelectedAuxiliaryRoutineId(null);
+    loadAuxiliaryRoutineIntoDrafts(null);
+  }
+
+  function toggleDraftCategory(
+    setList: React.Dispatch<React.SetStateAction<string[]>>,
+    categoryName: string
+  ) {
+    const key = String(categoryName ?? "").trim();
+    if (!key) return;
+
+    setList((prev) =>
+      prev.includes(key) ? prev.filter((name) => name !== key) : [...prev, key]
+    );
+  }
+
+  async function createNewAuxiliaryRoutine() {
+    const created = await createAuxiliaryRoutine({
+      title: "New Routine",
+      details: "",
+      preCategoryNames: [],
+      postCategoryNames: [],
+    });
+    await reloadAuxiliaryRoutines(created.id);
+    setAuxiliaryAutosaveStatus("idle");
+    setCategoryAutoRoutinesOpen(true);
+  }
+
+  async function saveSelectedAuxiliaryRoutine() {
+    if (!selectedAuxiliaryRoutineId) {
+      Alert.alert("Select a routine", "Choose or create a routine to edit.");
+      return;
+    }
+
+    const title = String(auxiliaryTitleDraft ?? "").trim();
+    if (!title) {
+      Alert.alert("Title required", "Enter a routine title.");
+      return;
+    }
+
+    const pre = Array.from(new Set(auxiliaryPreCategoryNamesDraft.map((name) => String(name ?? "").trim()).filter(Boolean)));
+    const post = Array.from(new Set(auxiliaryPostCategoryNamesDraft.map((name) => String(name ?? "").trim()).filter(Boolean)));
+
+    await updateAuxiliaryRoutine(selectedAuxiliaryRoutineId, {
+      title,
+      details: String(auxiliaryDetailsDraft ?? "").trim(),
+      preCategoryNames: pre,
+      postCategoryNames: post,
+      categoryNames: Array.from(new Set([...pre, ...post])),
+    });
+    await reloadAuxiliaryRoutines(selectedAuxiliaryRoutineId);
+  }
+
+  function confirmDeleteSelectedAuxiliaryRoutine() {
+    if (!selectedAuxiliaryRoutineId) {
+      Alert.alert("Select a routine", "Choose a routine to delete.");
+      return;
+    }
+
+    const routineId = selectedAuxiliaryRoutineId;
+    Alert.alert("Delete routine?", "This removes the selected auxiliary routine.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          const index = sortedAuxiliaryRoutines.findIndex((routine) => routine.id === routineId);
+          await deleteAuxiliaryRoutine(routineId);
+          const refreshed = await loadAuxiliaryRoutines();
+          const sorted = [...refreshed].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
+          setAuxiliaryRoutines(sorted);
+          const fallback = sorted[index] ?? sorted[index - 1] ?? sorted[0] ?? null;
+          if (fallback) {
+            setSelectedAuxiliaryRoutineId(fallback.id);
+            loadAuxiliaryRoutineIntoDrafts(fallback);
+          } else {
+            setSelectedAuxiliaryRoutineId(null);
+            loadAuxiliaryRoutineIntoDrafts(null);
+          }
+        },
+      },
+    ]);
+  }
+
+  useEffect(() => {
+    if (!selectedAuxiliaryRoutineId) return;
+    if (suppressAuxiliaryAutosaveRef.current) return;
+
+    const title = String(auxiliaryTitleDraft ?? "").trim();
+    if (!title) {
+      setAuxiliaryAutosaveStatus("idle");
+      return;
+    }
+
+    const snapshot = buildAuxiliaryDraftSnapshot();
+    if (snapshot === lastAuxiliarySavedSnapshotRef.current) return;
+
+    if (auxiliaryAutosaveTimerRef.current) {
+      clearTimeout(auxiliaryAutosaveTimerRef.current);
+    }
+
+    setAuxiliaryAutosaveStatus("saving");
+
+    auxiliaryAutosaveTimerRef.current = setTimeout(async () => {
+      try {
+        const pre = Array.from(
+          new Set(auxiliaryPreCategoryNamesDraft.map((name) => String(name ?? "").trim()).filter(Boolean))
+        );
+        const post = Array.from(
+          new Set(auxiliaryPostCategoryNamesDraft.map((name) => String(name ?? "").trim()).filter(Boolean))
+        );
+
+        await updateAuxiliaryRoutine(selectedAuxiliaryRoutineId, {
+          title,
+          details: String(auxiliaryDetailsDraft ?? "").trim(),
+          preCategoryNames: pre,
+          postCategoryNames: post,
+          categoryNames: Array.from(new Set([...pre, ...post])),
+        });
+
+        lastAuxiliarySavedSnapshotRef.current = snapshot;
+        setAuxiliaryAutosaveStatus("saved");
+        await reloadAuxiliaryRoutines(selectedAuxiliaryRoutineId);
+      } catch (error) {
+        console.error("[settings-aux] autosave failed", error);
+        setAuxiliaryAutosaveStatus("error");
+      }
+    }, 500);
+
+    return () => {
+      if (auxiliaryAutosaveTimerRef.current) {
+        clearTimeout(auxiliaryAutosaveTimerRef.current);
+      }
+    };
+  }, [
+    selectedAuxiliaryRoutineId,
+    auxiliaryTitleDraft,
+    auxiliaryDetailsDraft,
+    auxiliaryPreCategoryNamesDraft,
+    auxiliaryPostCategoryNamesDraft,
+  ]);
 
   async function switchDistanceUnit(nextUnit: DistanceUnit) {
     if (nextUnit === distanceUnit) return;
@@ -297,13 +509,31 @@ export default function CoachSettingsTab() {
       })
       .filter(Boolean) as Array<{ id: string; patch: Partial<TeamWorkoutRow> }>;
 
-    await Promise.all([
-      saveJSON(MILEAGE_PLANS_KEY, nextPlans),
-      workoutPatches.length > 0 ? bulkUpdateTeamWorkouts(workoutPatches) : Promise.resolve(),
-      savePaceSecondsPerMile(nextPace),
-      saveDistanceUnit(nextUnit),
-      saveAthletePaceOverrides(nextOverrides),
-    ]);
+    console.log("[settings-screen] save payload", {
+      action: "switchDistanceUnit",
+      source: COACH_SETTINGS_SAVE_SOURCE,
+      distanceUnit: nextUnit,
+      workoutPatchCount: workoutPatches.length,
+    });
+
+    try {
+      await Promise.all([
+        saveJSON(MILEAGE_PLANS_KEY, nextPlans),
+        workoutPatches.length > 0 ? bulkUpdateTeamWorkouts(workoutPatches) : Promise.resolve(),
+        savePaceSecondsPerMile(nextPace),
+        saveAthletePaceOverrides(nextOverrides),
+        saveCoachSettings({ distanceUnit: nextUnit }),
+      ]);
+      console.log("[settings-screen] save response", {
+        action: "switchDistanceUnit",
+        status: "success",
+      });
+    } catch (error: any) {
+      const message = error instanceof Error ? error.message : String(error ?? "Unknown settings save error");
+      console.error("[settings-screen] save failed", { action: "switchDistanceUnit", error });
+      Alert.alert("Settings save failed", message);
+      throw error;
+    }
 
     setDistanceUnit(nextUnit);
     setPaceText(formatPace(nextPace));
@@ -331,7 +561,7 @@ export default function CoachSettingsTab() {
       if (!raw) continue;
       const parsed = parsePace(raw);
       if (parsed == null) {
-        invalidNames.push(athleteDisplayName(athlete));
+        invalidNames.push(String(athlete.displayName ?? "Athlete"));
         continue;
       }
       next[athlete.id] = parsed;
@@ -444,9 +674,29 @@ export default function CoachSettingsTab() {
       return;
     }
 
-    await savePracticeTimeDefaults(next);
-    setPracticeDefaults(next);
-    Alert.alert("Saved", "Default practice times updated.");
+    console.log("[settings-screen] save payload", {
+      action: "savePracticeDefaults",
+      source: COACH_SETTINGS_SAVE_SOURCE,
+      defaultTimesCount: Object.values(next).reduce((count, day) => {
+        const am = String(day?.am ?? "").trim();
+        const pm = String(day?.pm ?? "").trim();
+        return count + (am ? 1 : 0) + (pm ? 1 : 0);
+      }, 0),
+    });
+
+    try {
+      await savePracticeTimeDefaults(next);
+      setPracticeDefaults(next);
+      console.log("[settings-screen] save response", {
+        action: "savePracticeDefaults",
+        status: "success",
+      });
+      Alert.alert("Saved", "Default practice times updated.");
+    } catch (error: any) {
+      const message = error instanceof Error ? error.message : String(error ?? "Unknown settings save error");
+      console.error("[settings-screen] save failed", { action: "savePracticeDefaults", error });
+      Alert.alert("Settings save failed", message);
+    }
   }
 
   function resetGroupEditor() {
@@ -550,7 +800,8 @@ export default function CoachSettingsTab() {
         keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
         keyboardShouldPersistTaps="handled"
       >
-        <View style={styles.card}>
+        <View style={isDesktopWeb ? styles.desktopWorkspace : undefined}>
+        <View style={[styles.card, isDesktopWeb && styles.desktopCard]}>
           <Text style={styles.cardTitle}>General</Text>
           <Text style={styles.cardHint}>Core planning preferences used across the app.</Text>
 
@@ -694,7 +945,7 @@ export default function CoachSettingsTab() {
                                   backgroundColor: "#fff",
                                 }}
                               >
-                                <Text style={{ fontWeight: "800", color: "#111" }}>{athleteDisplayName(athlete)}</Text>
+                                <Text style={{ fontWeight: "800", color: "#111" }}>{athlete.displayName}</Text>
                                 <Text style={{ marginTop: 2, marginBottom: 6, fontSize: 11, color: "#666", fontWeight: "700" }}>
                                   {hasOverride
                                     ? `Override: ${formatPace(athletePaceOverrides[athlete.id])} per ${paceUnitLongLabel(distanceUnit)}`
@@ -799,7 +1050,7 @@ export default function CoachSettingsTab() {
           </View>
         </View>
 
-        <View style={[styles.card, { marginTop: 12 }]}> 
+        <View style={[styles.card, { marginTop: 12 }, isDesktopWeb && styles.desktopCard]}> 
           <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setPracticeDefaultsOpen((prev) => !prev)}>
             <Text style={styles.cardTitle}>Default Practice Times</Text>
             <View style={styles.chevronTapTarget}>
@@ -864,7 +1115,7 @@ export default function CoachSettingsTab() {
           ) : null}
         </View>
 
-        <View style={[styles.card, { marginTop: 12 }]}> 
+        <View style={[styles.card, { marginTop: 12 }, isDesktopWeb && styles.desktopCard]}> 
           <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setWorkoutTypesOpen((prev) => !prev)}>
             <Text style={styles.cardTitle}>Workout Types</Text>
             <View style={styles.chevronTapTarget}>
@@ -893,69 +1144,159 @@ export default function CoachSettingsTab() {
           ) : null}
         </View>
 
-        <View style={[styles.card, { marginTop: 12 }]}>
+        <View style={[styles.card, { marginTop: 12 }, isDesktopWeb && styles.desktopCard]}>
           <Pressable
             style={styles.sectionHeader}
             hitSlop={10}
             onPress={() => setCategoryAutoRoutinesOpen((prev) => !prev)}
           >
-            <Text style={styles.cardTitle}>Category Auto Routines</Text>
+            <Text style={styles.cardTitle}>Auxiliary Routines</Text>
             <View style={styles.chevronTapTarget}>
               <Text style={styles.chev}>{categoryAutoRoutinesOpen ? "▾" : "▸"}</Text>
             </View>
           </Pressable>
-          <Text style={styles.cardHint}>Auto-add pre-run routines in Planner when categories are selected.</Text>
+          <Text style={styles.cardHint}>Create and assign pre/post-run routines for Planner auto-application.</Text>
 
           {categoryAutoRoutinesOpen ? (
             <View style={styles.collapsibleBody}>
-              <View style={styles.placeholder}>
-                {sortedCategories.map((category, categoryIdx) => {
-                  const key = normalizeCategoryRoutineKey(category.name);
-                  const selected = Array.isArray(categoryRoutineDefaults[key]) ? categoryRoutineDefaults[key] : [];
-                  return (
-                    <View
-                      key={`category-routine-default-${category.id}`}
-                      style={{
-                        borderBottomWidth: categoryIdx === sortedCategories.length - 1 ? 0 : 1,
-                        borderBottomColor: "#f0f0f0",
-                        paddingBottom: 10,
-                        marginBottom: 10,
-                      }}
-                    >
-                      <Text style={styles.label}>{category.name}</Text>
-                      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                        {sortedAuxiliaryRoutines.map((routine) => {
-                          const active = selected.includes(routine.id);
+              <View style={[styles.placeholder, isDesktopWeb && styles.auxWorkspaceDesktop]}>
+                <View style={[styles.auxListPane, isDesktopWeb && styles.auxListPaneDesktop]}>
+                  <View style={styles.auxListHeader}>
+                    <Text style={styles.auxListTitle}>Auxiliary Routines</Text>
+                    <Pressable onPress={createNewAuxiliaryRoutine} style={styles.groupActionBtn}>
+                      <Text style={styles.groupActionBtnText}>New Routine</Text>
+                    </Pressable>
+                  </View>
+
+                  <View style={styles.auxListBody}>
+                    {sortedAuxiliaryRoutines.length === 0 ? (
+                      <Text style={styles.cardHint}>No routines yet. Create one to get started.</Text>
+                    ) : (
+                      sortedAuxiliaryRoutines.map((routine) => {
+                        const preCount = Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames.length : 0;
+                        const postCount = Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames.length : 0;
+                        const active = routine.id === selectedAuxiliaryRoutineId;
+                        return (
+                          <Pressable
+                            key={routine.id}
+                            onPress={() => selectAuxiliaryRoutineById(routine.id)}
+                            style={[styles.auxListRow, active && styles.auxListRowActive]}
+                          >
+                            <Text style={[styles.auxListRowTitle, active && styles.auxListRowTitleActive]}>
+                              {routine.title || "Routine"}
+                            </Text>
+                            <Text style={styles.auxListRowMeta}>
+                              {preCount} pre • {postCount} post
+                            </Text>
+                          </Pressable>
+                        );
+                      })
+                    )}
+                  </View>
+                </View>
+
+                <View style={[styles.auxEditorPane, isDesktopWeb && styles.auxEditorPaneDesktop]}>
+                  {selectedAuxiliaryRoutine ? (
+                    <>
+                      <Text style={styles.auxEditorTitle}>Routine Editor</Text>
+                      <Text style={styles.label}>Title</Text>
+                      <TextInput
+                        value={auxiliaryTitleDraft}
+                        onChangeText={setAuxiliaryTitleDraft}
+                        placeholder="Routine name"
+                        style={styles.input}
+                      />
+
+                      <Text style={[styles.label, { marginTop: 10 }]}>Details</Text>
+                      <TextInput
+                        value={auxiliaryDetailsDraft}
+                        onChangeText={setAuxiliaryDetailsDraft}
+                        placeholder="Notes or instructions"
+                        style={[styles.input, { minHeight: 90, textAlignVertical: "top" }]}
+                        multiline
+                      />
+
+                      <Text style={[styles.label, { marginTop: 10 }]}>Pre-run categories</Text>
+                      <View style={styles.auxChipWrap}>
+                        {sortedCategories.map((category) => {
+                          const active = auxiliaryPreCategoryNamesDraft.includes(category.name);
                           return (
                             <Pressable
-                              key={`category-routine-${category.id}-${routine.id}`}
-                              onPress={() => {
-                                toggleCategoryAutoRoutine(category.name, routine.id).catch(() => {});
-                              }}
+                              key={`aux-pre-${selectedAuxiliaryRoutine.id}-${category.id}`}
+                              onPress={() =>
+                                toggleDraftCategory(
+                                  setAuxiliaryPreCategoryNamesDraft,
+                                  category.name
+                                )
+                              }
                               style={[styles.autoRoutineChip, active && styles.autoRoutineChipActive]}
                             >
                               <Text style={[styles.autoRoutineChipText, active && styles.autoRoutineChipTextActive]}>
-                                {routine.title}
+                                {category.name}
                               </Text>
                             </Pressable>
                           );
                         })}
                       </View>
+
+                      <Text style={[styles.label, { marginTop: 10 }]}>Post-run categories</Text>
+                      <View style={styles.auxChipWrap}>
+                        {sortedCategories.map((category) => {
+                          const active = auxiliaryPostCategoryNamesDraft.includes(category.name);
+                          return (
+                            <Pressable
+                              key={`aux-post-${selectedAuxiliaryRoutine.id}-${category.id}`}
+                              onPress={() =>
+                                toggleDraftCategory(
+                                  setAuxiliaryPostCategoryNamesDraft,
+                                  category.name
+                                )
+                              }
+                              style={[styles.autoRoutineChip, active && styles.autoRoutineChipActive]}
+                            >
+                              <Text style={[styles.autoRoutineChipText, active && styles.autoRoutineChipTextActive]}>
+                                {category.name}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+
+                      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
+                        <Text style={{ fontSize: 12, fontWeight: "800", color: auxiliaryAutosaveStatus === "error" ? "#b00020" : "#666" }}>
+                          {auxiliaryAutosaveStatus === "saving"
+                            ? "Saving..."
+                            : auxiliaryAutosaveStatus === "saved"
+                            ? "Saved"
+                            : auxiliaryAutosaveStatus === "error"
+                            ? "Autosave failed"
+                            : "Autosave enabled"}
+                        </Text>
+
+                        <Pressable
+                          onPress={confirmDeleteSelectedAuxiliaryRoutine}
+                          style={[styles.groupDeleteBtn, { alignItems: "center", justifyContent: "center" }]}
+                        >
+                          <Text style={styles.groupDeleteBtnText}>Delete</Text>
+                        </Pressable>
+                      </View>
+                    </>
+                  ) : (
+                    <View style={styles.auxEmpty}>
+                      <Text style={styles.cardTitle}>No routine selected</Text>
+                      <Text style={styles.cardHint}>Select a routine on the left, or create a new routine to begin editing.</Text>
+                      <Pressable onPress={createNewAuxiliaryRoutine} style={[styles.groupActionBtn, { alignSelf: "flex-start" }]}>
+                        <Text style={styles.groupActionBtnText}>Create Routine</Text>
+                      </Pressable>
                     </View>
-                  );
-                })}
-                {sortedCategories.length === 0 ? (
-                  <Text style={styles.cardHint}>No categories yet. Add workout types first.</Text>
-                ) : null}
-                {sortedAuxiliaryRoutines.length === 0 ? (
-                  <Text style={styles.cardHint}>No auxiliary routines yet. Create one in Saved.</Text>
-                ) : null}
+                  )}
+                </View>
               </View>
             </View>
           ) : null}
         </View>
 
-        <View style={[styles.card, { marginTop: 12 }]}> 
+        <View style={[styles.card, { marginTop: 12 }, isDesktopWeb && styles.desktopCard]}> 
           <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setCustomGroupsOpen((prev) => !prev)}>
             <Text style={styles.cardTitle}>Custom Groups</Text>
             <View style={styles.chevronTapTarget}>
@@ -1018,7 +1359,7 @@ export default function CoachSettingsTab() {
                           }}
                         >
                           <Text style={{ fontWeight: "700", color: "#111", flex: 1, paddingRight: 8 }}>
-                            {athleteDisplayName(athlete)}
+                            {athlete.displayName}
                           </Text>
                           <Text style={{ fontWeight: "900", color: active ? "#111" : "#999" }}>
                             {active ? "✓" : "○"}
@@ -1041,8 +1382,8 @@ export default function CoachSettingsTab() {
                   sortedGroups.map((group) => {
                     const names = group.athleteIds
                       .map((id) => rosterById.get(id))
-                      .filter((a): a is AthleteProfile => !!a)
-                      .map((a) => athleteDisplayName(a))
+                      .filter((a): a is TeamRosterAthlete => !!a)
+                      .map((a) => a.displayName)
                       .slice(0, 3);
                     const extra = Math.max(0, group.athleteIds.length - names.length);
 
@@ -1080,12 +1421,14 @@ export default function CoachSettingsTab() {
             borderRadius: 12,
             alignItems: "center",
             marginTop: 30,
+            ...(isDesktopWeb ? { width: "100%" as const } : null),
           }}
         >
           <Text style={{ color: "white", fontWeight: "600", fontSize: 16 }}>
             Sign Out
           </Text>
         </Pressable>
+        </View>
       </ScrollView>
     </View>
   );
@@ -1095,6 +1438,17 @@ const styles = StyleSheet.create({
   container: { flex: 1, paddingHorizontal: 16, paddingTop: 14, backgroundColor: "#fff" },
   title: { fontSize: 22, fontWeight: "900", color: "#111" },
   subtitle: { marginTop: 4, color: "#666", fontWeight: "700" },
+  desktopWorkspace: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  desktopCard: {
+    flexBasis: "48%",
+    flexGrow: 1,
+    marginTop: 0,
+  },
 
   card: { borderWidth: 1, borderColor: "#eee", backgroundColor: "#fafafa", borderRadius: 14, padding: 12 },
   cardTitle: { fontSize: 16, fontWeight: "900", color: "#111" },
@@ -1151,6 +1505,89 @@ const styles = StyleSheet.create({
   chev: { fontSize: 16, fontWeight: "900", color: "#666" },
   chevronTapTarget: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
   collapsibleBody: { marginTop: 2 },
+  auxWorkspaceDesktop: {
+    flexDirection: "row",
+    alignItems: "stretch",
+    gap: 12,
+  },
+  auxListPane: {
+    borderWidth: 1,
+    borderColor: "#e8e8e8",
+    borderRadius: 12,
+    backgroundColor: "#fff",
+    padding: 10,
+    marginBottom: 10,
+  },
+  auxListPaneDesktop: {
+    flex: 1,
+    marginBottom: 0,
+    minHeight: 420,
+  },
+  auxEditorPane: {
+    borderWidth: 1,
+    borderColor: "#e8e8e8",
+    borderRadius: 12,
+    backgroundColor: "#fff",
+    padding: 10,
+  },
+  auxEditorPaneDesktop: {
+    flex: 1.3,
+    minHeight: 420,
+  },
+  auxListHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  auxListTitle: {
+    fontSize: 15,
+    fontWeight: "900",
+    color: "#111",
+  },
+  auxListBody: {
+    gap: 8,
+  },
+  auxListRow: {
+    borderWidth: 1,
+    borderColor: "#ececec",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    backgroundColor: "#fafafa",
+  },
+  auxListRowActive: {
+    borderColor: "#111",
+    backgroundColor: "#f0f0f0",
+  },
+  auxListRowTitle: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#111",
+  },
+  auxListRowTitleActive: {
+    color: "#000",
+  },
+  auxListRowMeta: {
+    marginTop: 2,
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#666",
+  },
+  auxEditorTitle: {
+    fontSize: 15,
+    fontWeight: "900",
+    color: "#111",
+    marginBottom: 8,
+  },
+  auxChipWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  auxEmpty: {
+    paddingVertical: 20,
+  },
 
   placeholder: { borderRadius: 12, borderWidth: 1, borderColor: "#e8e8e8", backgroundColor: "#fff", padding: 12 },
   label: { fontSize: 12, fontWeight: "900", color: "#666", marginBottom: 6 },

@@ -12,7 +12,7 @@ import {
   Platform,
 } from "react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import type { AthleteWorkout } from "../../../lib/types";
+import type { AthleteWorkout, WeekStartDay } from "../../../lib/types";
 import {
   buildMileageFeedbackId,
   getMileageFeedbackById,
@@ -24,6 +24,14 @@ import { loadAuxiliaryRoutines } from "../../../lib/auxiliaryRoutines";
 import { getCurrentTeamId } from "../../../lib/team";
 import { loadRosterNameMapForTeam } from "../../../lib/rosterNameMap";
 import { getTeamWorkoutById, listTeamWorkoutsInRange, updateTeamWorkoutById, type TeamWorkoutRow } from "../../../lib/teamWorkoutsCloud";
+import { teamDataStore } from "../../../lib/teamDataStore";
+import { loadJSON } from "../../../lib/storage";
+import {
+  WEEK_START_KEY,
+  getWeekIndex,
+  getWeekStartISO,
+} from "../../../lib/mileagePlan";
+import { formatParsedWorkoutEntry, parseWorkoutEntryValue } from "../../../lib/workoutEntryParser";
 
 const IOS_ACCESSORY_ID = "athlete-workout-accessory";
 
@@ -87,6 +95,42 @@ function toAthleteWorkout(row: TeamWorkoutRow, rosterMap: Map<string, string>): 
   };
 }
 
+function resolvePrescribedText(
+  state: {
+    mileageCellsByWeek: ReturnType<typeof teamDataStore.use>["mileageCellsByWeek"];
+  },
+  athleteId: string,
+  dateISO: string,
+  session: "AM" | "PM",
+  weekStartsOn: WeekStartDay
+) {
+  const athlete = String(athleteId ?? "").trim();
+  if (!athlete || !dateISO) return "";
+
+  const weekStartISO = getWeekStartISO(dateISO, weekStartsOn);
+  const dayIdx = getWeekIndex(dateISO, weekStartISO);
+
+  if (!Number.isFinite(dayIdx) || dayIdx < 0 || dayIdx > 6) return "";
+
+  const cells = state.mileageCellsByWeek[weekStartISO] ?? [];
+  const cell = cells.find(
+    (row) => row.athlete_profile_id === athlete && row.day_idx === dayIdx && row.session === session
+  );
+
+  if (!cell) return "";
+
+  const parsed = parseWorkoutEntryValue(cell.value);
+  if (parsed) {
+    return formatParsedWorkoutEntry(parsed);
+  }
+
+  if (typeof (cell as any).value === "string") {
+    return String((cell as any).value).trim();
+  }
+
+  return "";
+}
+
 export default function AthleteWorkoutDetail() {
   const {
     id,
@@ -123,6 +167,8 @@ export default function AthleteWorkoutDetail() {
   const [additionalFeedbackText, setAdditionalFeedbackText] = useState("");
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [loading, setLoading] = useState(true);
+  const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
+  const store = teamDataStore.use();
 
   function dismissKeyboard() {
     distanceRef.current?.blur();
@@ -143,13 +189,15 @@ export default function AthleteWorkoutDetail() {
 
   useEffect(() => {
     (async () => {
-      const [rosterMap, unit, routines] = await Promise.all([
+      const [rosterMap, unit, routines, storedWeekStart] = await Promise.all([
         loadRosterAny(),
         loadDistanceUnit(),
         loadAuxiliaryRoutines(),
+        loadJSON<WeekStartDay>(WEEK_START_KEY, 1),
       ]);
       setDistanceUnit(unit);
       setRoutineTitleById(new Map(routines.map((routine) => [routine.id, routine.title] as const)));
+      setWeekStartsOn((storedWeekStart ?? 1) as WeekStartDay);
 
       const foundRow = await getTeamWorkoutById(String(id));
       const found = foundRow ? toAthleteWorkout(foundRow, rosterMap) : null;
@@ -185,6 +233,12 @@ export default function AthleteWorkoutDetail() {
           setGroupMateNames(names);
         } else {
           setGroupMateNames([]);
+        }
+
+        if (found?.athleteId && found?.dateISO) {
+          void teamDataStore.actions.loadMileageWeek(
+            getWeekStartISO(String(found.dateISO), (storedWeekStart ?? 1) as WeekStartDay)
+          );
         }
       }
 
@@ -312,6 +366,10 @@ export default function AthleteWorkoutDetail() {
 
   const groupMatePreview = groupMateNames.slice(0, 4).join(", ");
   const hiddenGroupMateCount = Math.max(0, groupMateNames.length - 4);
+  const prescribedFromMileage = workout
+    ? resolvePrescribedText(store, String(workout.athleteId ?? ""), String(workout.dateISO), String(workout.session ?? "PM") as "AM" | "PM", weekStartsOn)
+    : "";
+  const prescribedFromLegacy = workout?.plannedMiles != null ? `${workout.plannedMiles}mi` : "";
   const preRoutines = Array.from(
     new Set(
       (Array.isArray(workout?.preRoutineIds) ? workout?.preRoutineIds : [])
@@ -369,6 +427,9 @@ export default function AthleteWorkoutDetail() {
             <>
               <Text style={{ marginTop: 12, fontWeight: "700" }}>{workout?.title || "Workout"}</Text>
               <Text style={{ marginTop: 8 }}>{workout?.details}</Text>
+              <Text style={{ marginTop: 8 }}>
+                {prescribedFromMileage ? `Prescribed: ${prescribedFromMileage}` : prescribedFromLegacy ? `Prescribed: ${prescribedFromLegacy}` : "Prescribed from mileage plan"}
+              </Text>
               {preRoutines.length > 0 ? (
                 <Text style={{ marginTop: 8, color: "#333", fontWeight: "700" }}>Pre-run: {preRoutines.join(", ")}</Text>
               ) : null}

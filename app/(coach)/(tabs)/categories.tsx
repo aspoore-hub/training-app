@@ -2,10 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { Alert, FlatList, Pressable, Text, TextInput, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
-import { loadJSON, saveJSON } from "../../../lib/storage";
 import type { WorkoutCategory } from "../../../lib/types";
-import { CATEGORY_COLOR_PALETTE, CATEGORIES_KEY, normalizeCategories, newId, pickUnusedCategoryColor } from "../../../lib/categories";
+import { CATEGORY_COLOR_PALETTE, newId, pickUnusedCategoryColor } from "../../../lib/categories";
+import {
+  COACH_CATEGORIES_KEY,
+  COACH_CATEGORIES_SOURCE,
+  loadCoachCategoriesFromTeamKV,
+  saveCoachCategoriesToTeamKV,
+} from "../../../lib/settings";
 import { bulkUpdateTeamWorkouts, listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../../lib/teamWorkoutsCloud";
+import { getCurrentTeamId } from "../../../lib/team";
 
 function ensureOther(list: WorkoutCategory[]) {
   const exists = list.some((c) => c.name.toLowerCase() === "other");
@@ -107,19 +113,65 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
   const [chooserOpen, setChooserOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
   const [colorPickerForId, setColorPickerForId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [renamingCategory, setRenamingCategory] = useState<{ id: string; currentName: string } | null>(null);
+  const [debugTeamId, setDebugTeamId] = useState("(loading)");
+  const [debugLoadSource, setDebugLoadSource] = useState(COACH_CATEGORIES_SOURCE);
+  const [debugLoadedCount, setDebugLoadedCount] = useState(0);
+  const [debugLastSaveStatus, setDebugLastSaveStatus] = useState("idle");
+  const [debugLastSaveError, setDebugLastSaveError] = useState("");
 
   useEffect(() => {
     (async () => {
-      const stored = await loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []);
-      setCategories(normalizeCategories(stored));
+      try {
+        const [teamId, list] = await Promise.all([
+          getCurrentTeamId().catch((error) => `error: ${error instanceof Error ? error.message : String(error)}`),
+          loadCoachCategoriesFromTeamKV(),
+        ]);
+        console.log("[settings-categories] load result", {
+          teamId,
+          source: COACH_CATEGORIES_SOURCE,
+          key: COACH_CATEGORIES_KEY,
+          categoriesCount: list.length,
+        });
+        setDebugTeamId(String(teamId ?? ""));
+        setDebugLoadSource(COACH_CATEGORIES_SOURCE);
+        setDebugLoadedCount(list.length);
+        setCategories(list);
+      } catch (error) {
+        console.error("[settings-categories] load failed", error);
+        Alert.alert("Settings load failed", error instanceof Error ? error.message : String(error ?? "Unknown error"));
+      }
     })();
   }, []);
 
   const ordered = useMemo(() => categories.slice(), [categories]);
 
   async function persist(next: WorkoutCategory[]) {
-    setCategories(next);
-    await saveJSON(CATEGORIES_KEY, next);
+    setDebugLastSaveStatus("saving");
+    setDebugLastSaveError("");
+    console.log("[settings-categories] save payload", {
+      teamId: debugTeamId,
+      source: COACH_CATEGORIES_SOURCE,
+      key: COACH_CATEGORIES_KEY,
+      categoriesCount: next.length,
+    });
+    try {
+      const saved = await saveCoachCategoriesToTeamKV(next);
+      console.log("[settings-categories] save response", {
+        status: "success",
+        categoriesCount: saved.length,
+      });
+      setCategories(saved);
+      setDebugLoadedCount(saved.length);
+      setDebugLastSaveStatus("success");
+    } catch (error) {
+      console.error("[settings-categories] save failed", error);
+      setDebugLastSaveStatus("error");
+      setDebugLastSaveError(error instanceof Error ? error.message : String(error ?? "Unknown error"));
+      Alert.alert("Settings save failed", error instanceof Error ? error.message : String(error ?? "Unknown error"));
+      throw error;
+    }
   }
 
   async function moveCategory(id: string, dir: "up" | "down") {
@@ -169,26 +221,53 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
     await persist(next);
   }
 
-  async function renameCategory(id: string, currentName: string) {
-    Alert.prompt(
-      "Rename category",
-      "Enter a new name:",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Save",
-          onPress: async (text?: string) => {
-            const name = (text ?? "").trim();
-            if (!name) return;
+  function renameCategory(id: string, currentName: string) {
+    setRenamingCategory({ id, currentName });
+    setRenameDraft(currentName);
+  }
 
-            const next = categories.map((c) => (c.id === id ? { ...c, name } : c));
-            await persist(next);
-          },
-        },
-      ],
-      "plain-text",
-      currentName
+  async function saveRenameCategory() {
+    console.log("[rename] clicked", { renamingCategory, renameDraft, count: categories.length });
+
+    if (!renamingCategory) {
+      console.log("[rename] no renamingCategory");
+      return;
+    }
+
+    const name = renameDraft.trim();
+    console.log("[rename] trimmed", { name });
+    if (!name) {
+      console.log("[rename] empty name");
+      Alert.alert("Name required", "Enter a category name.");
+      return;
+    }
+
+    const exists = categories.some(
+      (c) =>
+        c.id !== renamingCategory.id &&
+        String(c.name ?? "").trim().toLowerCase() === name.toLowerCase()
     );
+    console.log("[rename] exists check", { exists });
+
+    if (exists) {
+      Alert.alert("Already exists", "That category already exists.");
+      return;
+    }
+
+    const next = categories.map((c) =>
+      c.id === renamingCategory.id ? { ...c, name } : c
+    );
+    console.log("[rename] before persist", { nextCount: next.length, targetId: renamingCategory.id });
+
+    await persist(next);
+    console.log("[rename] after persist");
+    setRenamingCategory(null);
+    setRenameDraft("");
+  }
+
+  function cancelRenameCategory() {
+    setRenamingCategory(null);
+    setRenameDraft("");
   }
 
   async function deleteCategory(id: string, name: string) {
@@ -212,7 +291,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
           text: "Leave as-is",
           onPress: async () => {
             const nextCats = categories.filter((c) => c.id !== id);
-            await persist(nextCats.length > 0 ? nextCats : normalizeCategories([]));
+            await persist(nextCats.length > 0 ? nextCats : []);
           },
         },
 
@@ -233,7 +312,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
               })
               .filter(Boolean) as Array<{ id: string; patch: any }>;
             if (patches.length > 0) await bulkUpdateTeamWorkouts(patches);
-            await persist(nextCats.length > 0 ? nextCats : normalizeCategories([]));
+            await persist(nextCats.length > 0 ? nextCats : []);
           },
         },
 
@@ -280,7 +359,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
                       })
                       .filter(Boolean) as Array<{ id: string; patch: any }>;
                     if (patches.length > 0) await bulkUpdateTeamWorkouts(patches);
-                    await persist(nextCats.length > 0 ? nextCats : normalizeCategories([]));
+                    await persist(nextCats.length > 0 ? nextCats : []);
                   },
                 },
               ],
@@ -295,7 +374,6 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
   return (
     <View style={{ flex: useVirtualizedList ? 1 : undefined, padding: 16, backgroundColor: "#fff" }}>
       <Text style={{ fontSize: 20, fontWeight: "900", marginBottom: 10 }}>Workout Categories</Text>
-
       <View style={{ flexDirection: "row", gap: 10, marginBottom: 12 }}>
         <TextInput
           value={draft}
@@ -323,6 +401,71 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
         </Pressable>
       </View>
 
+      {renamingCategory ? (
+        <View
+          style={{
+            borderWidth: 1,
+            borderColor: "#eee",
+            borderRadius: 12,
+            padding: 12,
+            marginBottom: 12,
+            backgroundColor: "#fff",
+          }}
+        >
+          <Text style={{ fontWeight: "900", marginBottom: 8 }}>
+            Rename "{renamingCategory.currentName}"
+          </Text>
+
+          <TextInput
+            value={renameDraft}
+            onChangeText={setRenameDraft}
+            placeholder="Category name"
+            style={{
+              borderWidth: 1,
+              borderColor: "#ddd",
+              borderRadius: 12,
+              paddingHorizontal: 12,
+              paddingVertical: 10,
+              marginBottom: 10,
+            }}
+            autoCapitalize="words"
+            autoFocus
+          />
+
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <Pressable
+              onPress={saveRenameCategory}
+              style={{
+                flex: 1,
+                borderWidth: 1,
+                borderColor: "#111",
+                borderRadius: 10,
+                paddingVertical: 10,
+                alignItems: "center",
+                backgroundColor: "#111",
+              }}
+            >
+              <Text style={{ fontWeight: "900", color: "#fff" }}>Save</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={cancelRenameCategory}
+              style={{
+                flex: 1,
+                borderWidth: 1,
+                borderColor: "#ddd",
+                borderRadius: 10,
+                paddingVertical: 10,
+                alignItems: "center",
+                backgroundColor: "#fff",
+              }}
+            >
+              <Text style={{ fontWeight: "900" }}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
       {chooserOpen && pendingDelete ? (
         <View style={{ borderWidth: 1, borderColor: "#eee", borderRadius: 12, padding: 12, marginBottom: 12, backgroundColor: "#fff" }}>
           <Text style={{ fontWeight: "900", marginBottom: 8 }}>
@@ -346,7 +489,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
                     })
                     .filter(Boolean) as Array<{ id: string; patch: any }>;
                   if (patches.length > 0) await bulkUpdateTeamWorkouts(patches);
-                  await persist(nextCats.length > 0 ? nextCats : normalizeCategories([]));
+                  await persist(nextCats.length > 0 ? nextCats : []);
 
                   setChooserOpen(false);
                   setPendingDelete(null);
