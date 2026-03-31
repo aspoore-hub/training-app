@@ -272,6 +272,24 @@ export async function deleteTeamWorkout(id: string) {
   if (error) throw error;
 }
 
+export async function deleteTeamWorkoutsByIds(ids: string[]): Promise<number> {
+  const teamId = await requireTeamId();
+  const cleanIds = Array.from(
+    new Set((Array.isArray(ids) ? ids : []).map((id) => String(id ?? "").trim()).filter(Boolean))
+  );
+  if (cleanIds.length === 0) return 0;
+
+  const { data, error } = await supabase
+    .from("team_workouts")
+    .delete()
+    .eq("team_id", teamId)
+    .in("id", cleanIds)
+    .select("id");
+
+  if (error) throw error;
+  return Array.isArray(data) ? data.length : 0;
+}
+
 export async function deleteWorkoutBatch(batchId: string): Promise<number> {
   const teamId = await requireTeamId();
   const cleanBatchId = String(batchId ?? "").trim();

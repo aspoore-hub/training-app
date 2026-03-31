@@ -98,7 +98,7 @@ function convertWorkoutDistances(rawWorkouts: any[], from: DistanceUnit, to: Dis
 export default function CoachSettingsTab() {
   const router = useRouter();
   const { width } = useWindowDimensions();
-  const isDesktopWeb = Platform.OS === "web" && width >= 1100;
+  const isDesktopWeb = Platform.OS === "web";
   const [paceText, setPaceText] = useState("");
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [weekStartSetting, setWeekStartSetting] = useState<WeekStartSetting>("monday");

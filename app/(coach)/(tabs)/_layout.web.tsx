@@ -59,6 +59,15 @@ export default function CoachTabs() {
         }}
       />
       <Tabs.Screen
+        name="workout-catalog"
+        options={{
+          title: "Workout Catalog",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="library-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="categories"
         options={{
           href: null,

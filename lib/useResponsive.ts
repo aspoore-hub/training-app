@@ -4,7 +4,7 @@ export function useResponsive() {
   const { width, height } = useWindowDimensions();
 
   const isWeb = Platform.OS === "web";
-  const isDesktop = isWeb && width >= 1024;
+  const isDesktop = isWeb;
   const isWide = isWeb && width >= 1280;
   const isShort = height < 700;
 

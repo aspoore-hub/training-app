@@ -1026,7 +1026,7 @@ export default function CoachCalendarMonth() {
   const inFlightCalendarFetchRef = useRef<Promise<void> | null>(null);
   const inFlightCalendarFetchKeyRef = useRef<string | null>(null);
 
-  const isWebDesktop = Platform.OS === "web" && SCREEN_W >= 960;
+  const isWebDesktop = Platform.OS === "web";
   const todayISO = useMemo(() => toISODate(new Date()), []);
 
   useEffect(() => {

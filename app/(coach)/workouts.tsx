@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type SetStateAction } from "react";
 import { Alert, Modal, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { GridCell } from "../../components/grid/GridCell";
 import { GridTable } from "../../components/grid/GridTable";
 import { useGridEngine } from "../../components/grid/useGridEngine";
@@ -28,8 +29,10 @@ import {
 } from "../../lib/teamRoster";
 import {
   createTeamWorkoutBatch,
+  deleteTeamWorkoutsByIds,
   deleteTeamWorkout,
   deleteWorkoutBatch,
+  listTeamWorkoutsByBatch,
   listTeamWorkoutsInRange,
   type TeamWorkoutRow,
   updateTeamWorkoutsByBatchId,
@@ -192,6 +195,32 @@ const BATCH_HEADER_CAPTION_BG = "#e8eff8";
 const GROUP_HEADER_BG = "#f7fafd";
 const GROUP_SUBHEADER_BG = "#fbfdff";
 const GROUP_HEADER_BORDER = "#e4ebf4";
+const COACH_WORKOUTS_DAY_DRAFT_CACHE_KEY = "coach_workouts_day_draft_cache_v1";
+
+type PersistedDayDraftState = {
+  batchDrafts: Record<string, BatchDraft>;
+  batchDirtyFields: Record<string, Partial<Record<BatchEditableField, true>>>;
+  athleteDrafts: Record<string, AthleteDraft>;
+  updatedAt: number;
+};
+
+async function loadPersistedDayDraftCache(): Promise<Record<string, PersistedDayDraftState>> {
+  try {
+    const raw = await AsyncStorage.getItem(COACH_WORKOUTS_DAY_DRAFT_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as Record<string, PersistedDayDraftState>;
+  } catch {
+    return {};
+  }
+}
+
+async function savePersistedDayDraftCache(next: Record<string, PersistedDayDraftState>): Promise<void> {
+  try {
+    await AsyncStorage.setItem(COACH_WORKOUTS_DAY_DRAFT_CACHE_KEY, JSON.stringify(next));
+  } catch {}
+}
 
 function buildMileageLookupKey(
   athleteId: string,
@@ -975,7 +1004,7 @@ function formatDisplayDate(iso: string) {
   if (!y || !m || !d) return String(iso ?? "");
   const dt = new Date(y, m - 1, d);
   if (Number.isNaN(dt.getTime())) return String(iso ?? "");
-  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  return dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 }
 
 function addDaysISO(dateISO: string, delta: number): string {
@@ -1285,6 +1314,7 @@ export default function CoachWorkoutsDay() {
   const [pendingRemovedAthleteKeys, setPendingRemovedAthleteKeys] = useState<Set<string>>(new Set());
   const [athletePickerQuery, setAthletePickerQuery] = useState("");
   const [addingAthleteId, setAddingAthleteId] = useState<string | null>(null);
+  const [athleteSelectionSyncByBatchKey, setAthleteSelectionSyncByBatchKey] = useState<Record<string, boolean>>({});
   const [creatingBatch, setCreatingBatch] = useState(false);
   const [saveSignalTick, setSaveSignalTick] = useState(0);
   const [lastSavedAtMs, setLastSavedAtMs] = useState<number | null>(null);
@@ -1294,6 +1324,7 @@ export default function CoachWorkoutsDay() {
   const batchHeaderRootRef = useRef<any>(null);
   const headerBlurTimerRef = useRef<any>(null);
   const loadVersionRef = useRef(0);
+  const autoFlushAttemptedDayRef = useRef<string | null>(null);
 
   const bumpSaveSignal = useCallback(() => {
     setSaveSignalTick((prev) => prev + 1);
@@ -1445,18 +1476,19 @@ export default function CoachWorkoutsDay() {
         return true;
       }
 
-      const [workoutRows, rosterRows] = await Promise.all([
+      const [workoutRows, rosterRows, persistedDraftCache] = await Promise.all([
         listTeamWorkoutsInRange(targetDateISO, targetDateISO),
         loadTeamRoster(teamId),
+        loadPersistedDayDraftCache(),
       ]);
       if (!isLatestRequest()) {
         console.log("[workouts] loadDay:staleSkipped", { targetDateISO, requestVersion });
         return false;
       }
 
-      const nextRows = workoutRows;
+      const persistedForDay = persistedDraftCache[targetDateISO];
+      let nextRows = workoutRows;
       console.log("[workouts] loadDay:rows", { count: nextRows.length });
-      setRowsRaw(nextRows);
 
       setRosterNameById(toRosterMapById(rosterRows));
       setRosterOptions(rosterRows);
@@ -1500,10 +1532,73 @@ export default function CoachWorkoutsDay() {
         nextAthleteDrafts[String(w.id)] = toAthleteDraftFromRow(w);
       });
 
+      let nextBatchDirtyFields: Record<string, Partial<Record<BatchEditableField, true>>> = {};
+      if (persistedForDay) {
+        const persistedBatchDrafts = persistedForDay.batchDrafts ?? {};
+        const persistedAthleteDrafts = persistedForDay.athleteDrafts ?? {};
+        const persistedBatchDirtyFields = persistedForDay.batchDirtyFields ?? {};
+
+        Object.entries(persistedBatchDrafts).forEach(([batchKey, draft]) => {
+          if (!nextBatchDrafts[batchKey]) return;
+          nextBatchDrafts[batchKey] = {
+            ...nextBatchDrafts[batchKey],
+            ...draft,
+            session: normalizeSession(String((draft as any)?.session ?? nextBatchDrafts[batchKey].session ?? "AM")),
+            categories: sanitizeBatchCategoriesForPatch((draft as any)?.categories ?? nextBatchDrafts[batchKey].categories),
+          };
+        });
+
+        Object.entries(persistedAthleteDrafts).forEach(([workoutId, draft]) => {
+          if (!nextAthleteDrafts[workoutId]) return;
+          nextAthleteDrafts[workoutId] = {
+            ...nextAthleteDrafts[workoutId],
+            ...draft,
+            session: normalizeSession(String((draft as any)?.session ?? nextAthleteDrafts[workoutId].session ?? "AM")),
+            categories: sanitizeAthleteCategories((draft as any)?.categories ?? nextAthleteDrafts[workoutId].categories),
+          };
+        });
+
+        nextRows = workoutRows.map((row) => {
+          const workoutId = String(row.id);
+          const batchKey = getBatchKey(row);
+          const batchDraft = nextBatchDrafts[batchKey];
+          const athleteDraft = nextAthleteDrafts[workoutId];
+          if (!batchDraft && !athleteDraft) return row;
+
+          const merged: TeamWorkoutRow = { ...row };
+          if (batchDraft) {
+            merged.session = normalizeSession(String(batchDraft.session ?? merged.session));
+            merged.date_iso = String(batchDraft.date_iso ?? merged.date_iso ?? "");
+            merged.location = String(batchDraft.location ?? "").trim() || null;
+            merged.time_text = String(batchDraft.time_text ?? "").trim() || null;
+            merged.title = String(batchDraft.title ?? "").trim() || "Workout";
+            merged.details = String(batchDraft.details ?? "").trim() || null;
+            merged.primary_category = String(batchDraft.primary_category ?? "").trim() || null;
+            merged.categories = sanitizeBatchCategoriesForPatch(batchDraft.categories);
+          }
+          if (athleteDraft) {
+            merged.session = normalizeSession(String(athleteDraft.session ?? merged.session));
+            merged.location = String(athleteDraft.location ?? "").trim() || null;
+            merged.time_text = String(athleteDraft.time_text ?? "").trim() || null;
+            merged.details = String(athleteDraft.details ?? "").trim() || null;
+            merged.primary_category = String(athleteDraft.primary_category ?? "").trim() || null;
+            merged.categories = sanitizeAthleteCategories(athleteDraft.categories);
+          }
+          return merged;
+        });
+
+        Object.entries(persistedBatchDirtyFields).forEach(([batchKey, dirty]) => {
+          if (!nextBatchDrafts[batchKey]) return;
+          nextBatchDirtyFields[batchKey] = { ...(dirty ?? {}) };
+        });
+      }
+
+      setRowsRaw(nextRows);
+
       setBatchDrafts(nextBatchDrafts);
       batchDraftsRef.current = nextBatchDrafts;
-      setBatchDirtyFields({});
-      batchDirtyFieldsRef.current = {};
+      setBatchDirtyFields(nextBatchDirtyFields);
+      batchDirtyFieldsRef.current = nextBatchDirtyFields;
       setBatchSaveState({});
       setAthleteDrafts(nextAthleteDrafts);
       athleteDraftsRef.current = nextAthleteDrafts;
@@ -1511,7 +1606,11 @@ export default function CoachWorkoutsDay() {
         batchDraftCount: Object.keys(nextBatchDrafts).length,
         athleteDraftCount: Object.keys(nextAthleteDrafts).length,
       });
-      savedAthleteDraftsRef.current = nextAthleteDrafts;
+      const nextSavedAthleteDrafts: Record<string, AthleteDraft> = {};
+      workoutRows.forEach((w) => {
+        nextSavedAthleteDrafts[String(w.id)] = toAthleteDraftFromRow(w);
+      });
+      savedAthleteDraftsRef.current = nextSavedAthleteDrafts;
       setAthleteSaveState({});
       setMoveMode(null);
       return true;
@@ -1594,7 +1693,7 @@ export default function CoachWorkoutsDay() {
       try {
         const previousDayISO = previousDayISORef.current;
         if (previousDayISO && previousDayISO !== dayISO) {
-          await flushPendingEditsRef.current();
+          void flushPendingEditsRef.current();
         }
         setLoading(true);
         await refreshDayGuarded(dayISO);
@@ -2382,6 +2481,21 @@ export default function CoachWorkoutsDay() {
 
   const showPendingEdits = hasPendingBatchChanges || hasPendingAthleteChanges || hasQueuedDebounceSaves;
 
+  useEffect(() => {
+    if (!dayISO) return;
+    if (!showPendingEdits) {
+      if (autoFlushAttemptedDayRef.current === dayISO) autoFlushAttemptedDayRef.current = null;
+      return;
+    }
+    if (loading) return;
+    if (autoFlushAttemptedDayRef.current === dayISO) return;
+    autoFlushAttemptedDayRef.current = dayISO;
+    const timer = setTimeout(() => {
+      void flushPendingEditsRef.current();
+    }, 220);
+    return () => clearTimeout(timer);
+  }, [dayISO, loading, showPendingEdits]);
+
   const pendingChangeCount = useMemo(() => {
     const pendingBatchCount = Object.values(batchDirtyFields).filter((dirty) => Object.keys(dirty ?? {}).length > 0).length;
     let pendingAthleteCount = 0;
@@ -2393,6 +2507,32 @@ export default function CoachWorkoutsDay() {
     }
     return pendingBatchCount + pendingAthleteCount;
   }, [athleteDrafts, batchDirtyFields, athleteSaveState]);
+
+  useEffect(() => {
+    if (!dayISO) return;
+    const timer = setTimeout(() => {
+      void (async () => {
+        const cache = await loadPersistedDayDraftCache();
+        const next = { ...cache };
+        if (!showPendingEdits) {
+          if (next[dayISO]) {
+            delete next[dayISO];
+            await savePersistedDayDraftCache(next);
+          }
+          return;
+        }
+        next[dayISO] = {
+          batchDrafts,
+          batchDirtyFields,
+          athleteDrafts,
+          updatedAt: Date.now(),
+        };
+        await savePersistedDayDraftCache(next);
+      })();
+    }, 280);
+
+    return () => clearTimeout(timer);
+  }, [athleteDrafts, batchDirtyFields, batchDrafts, dayISO, showPendingEdits]);
 
   const lastSavedLabel = useMemo(() => {
     if (!lastSavedAtMs) return "";
@@ -2781,7 +2921,7 @@ export default function CoachWorkoutsDay() {
 
   const goToDate = useCallback((targetDateISO: string) => {
     void (async () => {
-      await flushPendingEditsRef.current();
+      void flushPendingEditsRef.current();
       router.replace({ pathname: "/(coach)/workouts", params: { date: targetDateISO } });
     })();
   }, [router]);
@@ -3251,39 +3391,247 @@ export default function CoachWorkoutsDay() {
     [addAthleteToBatch, handleRemoveAthleteFromBatch]
   );
 
+  const replaceBatchRows = useCallback((rows: TeamWorkoutRow[], batchId: string, nextBatchRows: TeamWorkoutRow[]) => {
+    let inserted = false;
+    const next: TeamWorkoutRow[] = [];
+    rows.forEach((row) => {
+      const rowBatchId = String(row.batch_id ?? "").trim();
+      if (rowBatchId !== batchId) {
+        next.push(row);
+        return;
+      }
+      if (!inserted) {
+        next.push(...nextBatchRows);
+        inserted = true;
+      }
+    });
+    if (!inserted) next.push(...nextBatchRows);
+    return next;
+  }, []);
+
+  const applyBatchAthleteSelectionOptimistic = useCallback(
+    (batchRow: WorksheetBatchRow, targetAthleteIds: string[]) => {
+      const batchId = String(batchRow.batchId ?? "").trim();
+      if (!batchId) return;
+      const targetSet = new Set(targetAthleteIds.map((id) => String(id ?? "").trim()).filter(Boolean));
+      if (targetSet.size === 0) return;
+
+      setRowsRaw((prev) => {
+        const currentBatchRows = prev.filter((row) => String(row.batch_id ?? "").trim() === batchId);
+        const existingByAthleteId = new Map<string, TeamWorkoutRow>();
+        currentBatchRows.forEach((row) => {
+          const athleteId = String(row.athlete_profile_id ?? "").trim();
+          if (!athleteId || existingByAthleteId.has(athleteId)) return;
+          existingByAthleteId.set(athleteId, row);
+        });
+
+        const sample = currentBatchRows[0] ?? batchRow.sample;
+        const batchDraft =
+          batchDrafts[batchRow.key] ??
+          ({
+            session: normalizeSession(sample.session),
+            date_iso: String(sample.date_iso ?? ""),
+            location: String(sample.location ?? ""),
+            time_text: String(sample.time_text ?? ""),
+            title: String(sample.title ?? "Workout"),
+            details: String(sample.details ?? ""),
+            primary_category: String(sample.primary_category ?? ""),
+            categories: (
+              Array.isArray(sample.categories) ? sample.categories : []
+            )
+              .map((c) => String(c ?? "").trim())
+              .filter((c) => !!c && c.toLowerCase() !== "other"),
+            pre_routine_ids: (Array.isArray(sample.pre_routine_ids) ? sample.pre_routine_ids : [])
+              .map((id) => String(id ?? "").trim())
+              .filter(Boolean),
+            post_routine_ids: (Array.isArray(sample.post_routine_ids) ? sample.post_routine_ids : [])
+              .map((id) => String(id ?? "").trim())
+              .filter(Boolean),
+          } as BatchDraft);
+        let targetGroupId = currentBatchRows.find((row) => !!String(row.group_id ?? "").trim())?.group_id ?? null;
+        if (!targetGroupId) targetGroupId = batchRow.groupedAthletes.find((g) => !!g.groupId)?.groupId ?? null;
+        if (!targetGroupId) targetGroupId = makeNewGroupId();
+
+        const nextBatchRows: TeamWorkoutRow[] = targetAthleteIds
+          .map((rawAthleteId) => String(rawAthleteId ?? "").trim())
+          .filter(Boolean)
+          .map((athleteId) => {
+            const existing = existingByAthleteId.get(athleteId);
+            if (existing) return existing;
+            const nowIso = new Date().toISOString();
+            return {
+              ...sample,
+              id: `optimistic:${batchId}:${athleteId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+              athlete_profile_id: athleteId,
+              date_iso: dayISO,
+              session: normalizeSession(batchDraft.session),
+              location: String(batchDraft.location ?? "").trim() || null,
+              time_text: String(batchDraft.time_text ?? "").trim() || null,
+              title: String(batchDraft.title ?? "").trim() || "Workout",
+              details: String(batchDraft.details ?? "").trim() || null,
+              primary_category: String(batchDraft.primary_category ?? "").trim() || null,
+              categories: (Array.isArray(batchDraft.categories) ? batchDraft.categories : [])
+                .map((c) => String(c ?? "").trim())
+                .filter((c) => !!c && c.toLowerCase() !== "other"),
+              batch_id: batchId,
+              group_id: targetGroupId,
+              created_at: nowIso,
+              updated_at: nowIso,
+            } as TeamWorkoutRow;
+          });
+
+        return replaceBatchRows(prev, batchId, nextBatchRows);
+      });
+    },
+    [batchDrafts, dayISO, replaceBatchRows]
+  );
+
+  const syncBatchAthleteSelection = useCallback(
+    async (batchRow: WorksheetBatchRow, targetAthleteIds: string[], previousRowsSnapshot: TeamWorkoutRow[]) => {
+      const batchId = String(batchRow.batchId ?? "").trim();
+      if (!batchId) return;
+      const targetSet = new Set(targetAthleteIds.map((id) => String(id ?? "").trim()).filter(Boolean));
+      if (targetSet.size === 0) return;
+
+      const previousBatchRows = previousRowsSnapshot.filter((row) => String(row.batch_id ?? "").trim() === batchId);
+      const existingByAthleteId = new Map<string, TeamWorkoutRow>();
+      previousBatchRows.forEach((row) => {
+        const athleteId = String(row.athlete_profile_id ?? "").trim();
+        if (!athleteId || existingByAthleteId.has(athleteId)) return;
+        existingByAthleteId.set(athleteId, row);
+      });
+      const previousAthleteIds = new Set(existingByAthleteId.keys());
+      const toAdd = Array.from(targetSet).filter((athleteId) => !previousAthleteIds.has(athleteId));
+      const toRemoveAthleteIds = Array.from(previousAthleteIds).filter((athleteId) => !targetSet.has(athleteId));
+
+      const sample = previousBatchRows[0] ?? batchRow.sample;
+      const batchDraft =
+        batchDrafts[batchRow.key] ??
+        ({
+          session: normalizeSession(sample.session),
+          date_iso: String(sample.date_iso ?? ""),
+          location: String(sample.location ?? ""),
+          time_text: String(sample.time_text ?? ""),
+          title: String(sample.title ?? "Workout"),
+          details: String(sample.details ?? ""),
+          primary_category: String(sample.primary_category ?? ""),
+          categories: (
+            Array.isArray(sample.categories) ? sample.categories : []
+          )
+            .map((c) => String(c ?? "").trim())
+            .filter((c) => !!c && c.toLowerCase() !== "other"),
+          pre_routine_ids: (Array.isArray(sample.pre_routine_ids) ? sample.pre_routine_ids : [])
+            .map((id) => String(id ?? "").trim())
+            .filter(Boolean),
+          post_routine_ids: (Array.isArray(sample.post_routine_ids) ? sample.post_routine_ids : [])
+            .map((id) => String(id ?? "").trim())
+            .filter(Boolean),
+        } as BatchDraft);
+      let targetGroupId = previousBatchRows.find((row) => !!String(row.group_id ?? "").trim())?.group_id ?? null;
+      if (!targetGroupId) targetGroupId = batchRow.groupedAthletes.find((g) => !!g.groupId)?.groupId ?? null;
+      if (!targetGroupId) targetGroupId = makeNewGroupId();
+
+      if (toAdd.length > 0) {
+        const payload = toAdd.map((athleteId) => ({
+          team_id: sample.team_id,
+          athlete_profile_id: athleteId,
+          created_by: sample.created_by ?? null,
+          date_iso: dayISO,
+          session: normalizeSession(batchDraft.session),
+          location: String(batchDraft.location ?? "").trim() || null,
+          time_text: String(batchDraft.time_text ?? "").trim() || null,
+          title: String(batchDraft.title ?? "").trim() || "Workout",
+          details: String(batchDraft.details ?? "").trim() || null,
+          primary_category: String(batchDraft.primary_category ?? "").trim() || null,
+          categories: (Array.isArray(batchDraft.categories) ? batchDraft.categories : [])
+            .map((c) => String(c ?? "").trim())
+            .filter((c) => !!c && c.toLowerCase() !== "other"),
+          batch_id: batchId,
+          group_id: targetGroupId,
+          pre_routine_ids: sample.pre_routine_ids ?? null,
+          post_routine_ids: sample.post_routine_ids ?? null,
+          planned_distance: sample.planned_distance ?? null,
+          planned_distance_unit: sample.planned_distance_unit ?? null,
+        }));
+        await createTeamWorkoutBatch(payload);
+      }
+
+      if (toRemoveAthleteIds.length > 0) {
+        const removeIdSet = new Set(toRemoveAthleteIds);
+        const rowIdsToDelete = previousBatchRows
+          .filter((row) => removeIdSet.has(String(row.athlete_profile_id ?? "").trim()))
+          .map((row) => String(row.id))
+          .filter((id) => !String(id).startsWith("optimistic:"));
+        if (rowIdsToDelete.length > 0) {
+          await deleteTeamWorkoutsByIds(rowIdsToDelete);
+        }
+      }
+
+      const serverRows = await listTeamWorkoutsByBatch(batchId);
+      setRowsRaw((prev) => replaceBatchRows(prev, batchId, serverRows));
+    },
+    [batchDrafts, dayISO, replaceBatchRows]
+  );
+
   const selectAllAthletesForBatch = useCallback(
     async (batchRow: WorksheetBatchRow) => {
-      const selectedIds = new Set(
-        (batchRow.workouts ?? [])
-          .map((w) => String(w.athlete_profile_id ?? "").trim())
-          .filter(Boolean)
-      );
+      const batchId = String(batchRow.batchId ?? "").trim();
+      if (!batchId) return;
+      if (athleteSelectionSyncByBatchKey[batchRow.key]) return;
       const allRosterIds = rosterOptions
         .map((r) => String((r as any)?.id ?? "").trim())
         .filter(Boolean);
-      for (const athleteId of allRosterIds) {
-        if (selectedIds.has(athleteId)) continue;
-        await addAthleteToBatch(batchRow, athleteId);
+      if (allRosterIds.length === 0) return;
+
+      const targetAthleteIds = Array.from(new Set(allRosterIds));
+      const previousRowsSnapshot = rowsRaw;
+      applyBatchAthleteSelectionOptimistic(batchRow, targetAthleteIds);
+      setAthleteSelectionSyncByBatchKey((prev) => ({ ...prev, [batchRow.key]: true }));
+      try {
+        await syncBatchAthleteSelection(batchRow, targetAthleteIds, previousRowsSnapshot);
+      } catch (e: any) {
+        setRowsRaw(previousRowsSnapshot);
+        patchAppRuntime({ lastSaveError: String(e?.message ?? e ?? "Could not select all athletes for batch.") });
+        Alert.alert("Select all failed", e?.message ?? "Could not select all athletes for batch.");
+      } finally {
+        setAthleteSelectionSyncByBatchKey((prev) => ({ ...prev, [batchRow.key]: false }));
       }
     },
-    [rosterOptions]
+    [applyBatchAthleteSelectionOptimistic, athleteSelectionSyncByBatchKey, patchAppRuntime, rosterOptions, rowsRaw, syncBatchAthleteSelection]
   );
 
   const clearAthletesForBatch = useCallback(
     async (batchRow: WorksheetBatchRow) => {
-      const selectedIds = Array.from(
-        new Set(
-          (batchRow.workouts ?? [])
-            .map((w) => String(w.athlete_profile_id ?? "").trim())
-            .filter(Boolean)
-        )
-      );
-      const removable = selectedIds.slice(0, Math.max(0, selectedIds.length - 1));
-      for (const athleteId of removable) {
-        await handleRemoveAthleteFromBatch(batchRow, athleteId);
+      const batchId = String(batchRow.batchId ?? "").trim();
+      if (!batchId) return;
+      if (athleteSelectionSyncByBatchKey[batchRow.key]) return;
+
+      const selectedIds = Array.from(new Set(
+        rowsRaw
+          .filter((row) => String(row.batch_id ?? "").trim() === batchId)
+          .map((row) => String(row.athlete_profile_id ?? "").trim())
+          .filter(Boolean)
+      ));
+      if (selectedIds.length <= 1) return;
+
+      const keeperAthleteId = selectedIds[0];
+      if (!keeperAthleteId) return;
+      const targetAthleteIds = [keeperAthleteId];
+
+      const previousRowsSnapshot = rowsRaw;
+      applyBatchAthleteSelectionOptimistic(batchRow, targetAthleteIds);
+      setAthleteSelectionSyncByBatchKey((prev) => ({ ...prev, [batchRow.key]: true }));
+      try {
+        await syncBatchAthleteSelection(batchRow, targetAthleteIds, previousRowsSnapshot);
+      } catch (e: any) {
+        setRowsRaw(previousRowsSnapshot);
+        patchAppRuntime({ lastSaveError: String(e?.message ?? e ?? "Could not clear athletes for batch.") });
+        Alert.alert("Clear failed", e?.message ?? "Could not clear athletes for batch.");
+      } finally {
+        setAthleteSelectionSyncByBatchKey((prev) => ({ ...prev, [batchRow.key]: false }));
       }
     },
-    [handleRemoveAthleteFromBatch]
+    [applyBatchAthleteSelectionOptimistic, athleteSelectionSyncByBatchKey, patchAppRuntime, rowsRaw, syncBatchAthleteSelection]
   );
 
   const performMoveWorkout = useCallback(
@@ -3537,6 +3885,7 @@ export default function CoachWorkoutsDay() {
               };
 
               const athletePickerOpen = openAthletePickerBatchKey === batchRow.key;
+              const athleteSelectionSyncing = !!athleteSelectionSyncByBatchKey[batchRow.key];
               const groupCategoryPickerOpenForBatch =
                 typeof openGroupCategoryPickerKey === "string" &&
                 openGroupCategoryPickerKey.startsWith(`${batchRow.key}::`);
@@ -3824,20 +4173,26 @@ export default function CoachWorkoutsDay() {
                             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
                               <Pressable
                                 onPress={() => void selectAllAthletesForBatch(batchRow)}
+                                disabled={athleteSelectionSyncing}
                                 style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: "#fff" }}
                               >
-                                <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>Select all</Text>
+                                <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>
+                                  {athleteSelectionSyncing ? "Working..." : "Select all"}
+                                </Text>
                               </Pressable>
                               <Pressable
                                 onPress={() => void clearAthletesForBatch(batchRow)}
+                                disabled={athleteSelectionSyncing}
                                 style={{ borderWidth: 1, borderColor: "#f2c4c4", backgroundColor: "#fff0f0", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 }}
                               >
-                                <Text style={{ fontSize: 11, fontWeight: "800", color: "#9f1239" }}>Clear</Text>
+                                <Text style={{ fontSize: 11, fontWeight: "800", color: "#9f1239" }}>
+                                  {athleteSelectionSyncing ? "Working..." : "Clear"}
+                                </Text>
                               </Pressable>
                             </View>
                             <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 250 }}>
                               {openAthletePickerOptions.map((item) => {
-                                const busy = addingAthleteId === item.athleteId || removingAthleteId === item.athleteId;
+                                const busy = athleteSelectionSyncing || addingAthleteId === item.athleteId || removingAthleteId === item.athleteId;
                                 return (
                                   <Pressable
                                     key={`athlete-toggle-${batchRow.key}-${item.athleteId}`}
