@@ -7,64 +7,31 @@ import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from 
 import { loadJSON } from "../../lib/storage";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../lib/pace";
 import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../lib/units";
-import type { AthleteWorkout, WeekStartDay, WeeklyMileagePlan } from "../../lib/types";
+import type { AthleteWorkout, MileageValue, WeekStartDay } from "../../lib/types";
 import { loadAuxiliaryRoutines } from "../../lib/auxiliaryRoutines";
 import { getCurrentTeamId, getMyClaimedAthleteProfileId } from "../../lib/team";
 import { loadRosterNameMapForTeam } from "../../lib/rosterNameMap";
 import { listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
+import { teamDataStore } from "../../lib/teamDataStore";
 import {
-  WEEK_START_KEY,
-  MILEAGE_PLANS_KEY,
   getWeekStartISO,
   getWeekIndex,
-  getDayTarget,
   sumMileage,
   formatSum,
   formatMileage,
+  parseMileageInput,
   parseISODate,
   toISODate,
 } from "../../lib/mileagePlan";
+import { loadWeekStartSetting } from "../../lib/settings";
+import { PrevNextNavButtons } from "../../components/shared/PrevNextNavButtons";
+import { SectionEmptyText, SectionLabel } from "../../components/shared/PlannedRecordedPrimitives";
 
 const KEY_SELECTED = "training_app_selected_athlete_v1";
 
-type SessionRowItem =
-  | { kind: "workout"; workout: AthleteWorkout }
-  | { kind: "planned"; session: "AM" | "PM"; prescribed: string };
-
 type ListRow =
   | { type: "header"; key: string; title: "AM" | "PM" }
-  | { type: "item"; key: string; item: SessionRowItem };
-
-function slugName(name: string) {
-  return String(name ?? "")
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, "_")
-    .replace(/[^a-z0-9_]/g, "");
-}
-
-function normalizeAthleteId(value: string | null | undefined) {
-  let v = String(value ?? "").trim().toLowerCase();
-  if (!v) return "";
-  if (v.startsWith("ath_")) v = v.slice(4);
-  v = v.replace(/_\d+$/, "");
-  return v;
-}
-
-function athletePlanMatches(planAthleteId: string, selectedAthleteId: string | null, selectedAthleteName: string | null) {
-  const planRaw = String(planAthleteId ?? "");
-  const selectedRaw = String(selectedAthleteId ?? "");
-  if (planRaw && selectedRaw && planRaw === selectedRaw) return true;
-
-  const planNorm = normalizeAthleteId(planRaw);
-  const selectedNorm = normalizeAthleteId(selectedRaw);
-  if (planNorm && selectedNorm && planNorm === selectedNorm) return true;
-
-  const selectedNameSlug = slugName(String(selectedAthleteName ?? ""));
-  if (planNorm && selectedNameSlug && planNorm === selectedNameSlug) return true;
-
-  return false;
-}
+  | { type: "item"; key: string; workout: AthleteWorkout };
 
 function normalizeGroupId(groupId?: string): string {
   const normalized = String(groupId ?? "").trim().toUpperCase();
@@ -99,13 +66,11 @@ function toAthleteWorkout(row: TeamWorkoutRow, nameByAthleteId: Map<string, stri
     categories: row.categories ?? undefined,
     title: row.title ?? "Workout",
     details: row.details ?? undefined,
-    plannedMiles: typeof row.planned_distance === "number" ? row.planned_distance : undefined,
     completedMiles: typeof (row as any).completed_miles === "number" ? (row as any).completed_miles : undefined,
     completedTime: String((row as any).completed_time_text ?? "").trim() || undefined,
     splitsOrPace: String((row as any).splits_or_pace ?? "").trim() || undefined,
     additionalFeedback: String((row as any).additional_feedback ?? "").trim() || undefined,
     feedback: String((row as any).additional_feedback ?? "").trim() || undefined,
-    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
   };
 }
 
@@ -117,8 +82,17 @@ function formatDisplayDate(iso: string) {
   return dt.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", year: "numeric" });
 }
 
+function toMileageValue(raw: unknown): MileageValue | undefined {
+  if (!raw) return undefined;
+  if (typeof raw === "string") return parseMileageInput(raw);
+  if (typeof raw === "number") return { kind: "exact", value: raw };
+  if (typeof raw === "object") return raw as MileageValue;
+  return undefined;
+}
+
 export default function AthleteDayScreen() {
   const router = useRouter();
+  const store = teamDataStore.use();
   const { date } = useLocalSearchParams<{ date: string }>();
   const [currentDateISO, setCurrentDateISO] = useState<string>(String(date ?? ""));
 
@@ -127,7 +101,6 @@ export default function AthleteDayScreen() {
   const [selectedAthleteName, setSelectedAthleteName] = useState<string | null>(null);
   const [selectedAthleteId, setSelectedAthleteId] = useState<string | null>(null);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
-  const [plans, setPlans] = useState<WeeklyMileagePlan[]>([]);
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
@@ -137,27 +110,47 @@ export default function AthleteDayScreen() {
     if (!currentDateISO || !selectedAthleteId) return null;
 
     const weekStartISO = getWeekStartISO(String(currentDateISO), weekStartsOn);
-    const plan = plans.find(
-      (p) =>
-        athletePlanMatches(String(p.athleteId), selectedAthleteId, selectedAthleteName) &&
-        String(p.weekStartISO) === String(weekStartISO)
-    );
-    if (!plan) return null;
-
     const idx = getWeekIndex(String(currentDateISO), weekStartISO);
     if (idx < 0 || idx > 6) return null;
 
-    const target = getDayTarget(plan, idx);
-    const total = sumMileage([target.am, target.pm], paceSecPerMile);
+    const cells = store.mileageCellsByWeek[weekStartISO] ?? [];
+    const flags = store.mileageFlagsByWeek[weekStartISO] ?? [];
+
+    const am = toMileageValue(
+      cells.find(
+        (row) =>
+          String(row.athlete_profile_id) === String(selectedAthleteId) &&
+          row.day_idx === idx &&
+          row.session === "AM"
+      )?.value
+    );
+    const pm = toMileageValue(
+      cells.find(
+        (row) =>
+          String(row.athlete_profile_id) === String(selectedAthleteId) &&
+          row.day_idx === idx &&
+          row.session === "PM"
+      )?.value
+    );
+    const ncaaOff =
+      flags.find(
+        (row) =>
+          String(row.athlete_profile_id) === String(selectedAthleteId) &&
+          row.day_idx === idx
+      )?.ncaa_off ?? false;
+
+    if (!am && !pm && !ncaaOff) return null;
+
+    const total = sumMileage([am, pm], paceSecPerMile);
 
     return {
       weekStartISO,
-      am: target.am,
-      pm: target.pm,
-      ncaaOff: !!(target as any).ncaaOff,
+      am,
+      pm,
+      ncaaOff,
       total,
     };
-  }, [currentDateISO, paceSecPerMile, plans, selectedAthleteId, selectedAthleteName, weekStartsOn]);
+  }, [currentDateISO, paceSecPerMile, selectedAthleteId, store.mileageCellsByWeek, store.mileageFlagsByWeek, weekStartsOn]);
 
   const groupMatesByWorkoutId = useMemo(() => {
     const out = new Map<string, string[]>();
@@ -189,35 +182,36 @@ export default function AthleteDayScreen() {
 
   const amWorkouts = useMemo(() => workouts.filter((w) => (w.session ?? "PM") === "AM"), [workouts]);
   const pmWorkouts = useMemo(() => workouts.filter((w) => (w.session ?? "PM") === "PM"), [workouts]);
+  const hasAmWorkout = amWorkouts.length > 0;
+  const hasPmWorkout = pmWorkouts.length > 0;
 
   const plannedAm = useMemo(() => (dayPlan ? formatMileage(dayPlan.am) : ""), [dayPlan]);
   const plannedPm = useMemo(() => (dayPlan ? formatMileage(dayPlan.pm) : ""), [dayPlan]);
 
+  const plannedSessions = useMemo(
+    () =>
+      [
+        plannedAm ? { session: "AM" as const, prescribed: plannedAm, showFeedbackEntry: !hasAmWorkout } : null,
+        plannedPm ? { session: "PM" as const, prescribed: plannedPm, showFeedbackEntry: !hasPmWorkout } : null,
+      ].filter((entry): entry is { session: "AM" | "PM"; prescribed: string; showFeedbackEntry: boolean } => Boolean(entry)),
+    [hasAmWorkout, hasPmWorkout, plannedAm, plannedPm]
+  );
+
   const rows = useMemo(() => {
     const out: ListRow[] = [];
 
-    const amItems: SessionRowItem[] = amWorkouts.map((workout) => ({ kind: "workout", workout }));
-    if (amItems.length === 0 && plannedAm) {
-      amItems.push({ kind: "planned", session: "AM", prescribed: plannedAm });
-    }
-
-    const pmItems: SessionRowItem[] = pmWorkouts.map((workout) => ({ kind: "workout", workout }));
-    if (pmItems.length === 0 && plannedPm) {
-      pmItems.push({ kind: "planned", session: "PM", prescribed: plannedPm });
-    }
-
-    if (amItems.length > 0) {
+    if (amWorkouts.length > 0) {
       out.push({ type: "header", key: "h-am", title: "AM" });
-      amItems.forEach((item, index) => out.push({ type: "item", key: `am-${item.kind}-${index}`, item }));
+      amWorkouts.forEach((workout, index) => out.push({ type: "item", key: `am-workout-${index}`, workout }));
     }
 
-    if (pmItems.length > 0) {
+    if (pmWorkouts.length > 0) {
       out.push({ type: "header", key: "h-pm", title: "PM" });
-      pmItems.forEach((item, index) => out.push({ type: "item", key: `pm-${item.kind}-${index}`, item }));
+      pmWorkouts.forEach((workout, index) => out.push({ type: "item", key: `pm-workout-${index}`, workout }));
     }
 
     return out;
-  }, [amWorkouts, plannedAm, plannedPm, pmWorkouts]);
+  }, [amWorkouts, pmWorkouts]);
 
   const plannedLine = useMemo(() => {
     if (!dayPlan) return "Off";
@@ -237,17 +231,20 @@ export default function AthleteDayScreen() {
 
   useEffect(() => {
     async function load() {
-      const [selected, ws, storedPlans, pace, unit, routines] = await Promise.all([
+      const [selected, ws, pace, unit, routines] = await Promise.all([
         loadJSON<string | null>(KEY_SELECTED, null),
-        loadJSON<WeekStartDay>(WEEK_START_KEY, 1),
-        loadJSON<WeeklyMileagePlan[]>(MILEAGE_PLANS_KEY, []),
+        loadWeekStartSetting(),
         loadPaceSecondsPerMile(),
         loadDistanceUnit(),
         loadAuxiliaryRoutines(),
       ]);
 
-      setWeekStartsOn((ws ?? 1) as WeekStartDay);
-      setPlans(storedPlans ?? []);
+      const resolvedWeekStart: WeekStartDay = ws.normalized === "sunday" ? 0 : 1;
+      console.log("[athlete-day] week start loaded via shared helper", {
+        raw: ws.raw,
+        normalized: resolvedWeekStart,
+      });
+      setWeekStartsOn(resolvedWeekStart);
       setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
       setDistanceUnit(unit);
       setRoutineById(
@@ -273,6 +270,9 @@ export default function AthleteDayScreen() {
 
       setSelectedAthleteName(resolvedName);
       setSelectedAthleteId(resolvedId);
+
+      const weekStartISO = getWeekStartISO(String(currentDateISO), resolvedWeekStart);
+      await teamDataStore.actions.loadMileageWeek(weekStartISO);
 
       if (!currentDateISO || (!resolvedName && !resolvedId)) {
         setAllWorkouts([]);
@@ -366,20 +366,11 @@ export default function AthleteDayScreen() {
 
   return (
     <View style={{ flex: 1, padding: 20 }}>
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <Pressable
-          onPress={() => navigateDay(-1)}
-          style={{ width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: "#ddd", alignItems: "center", justifyContent: "center", backgroundColor: "#fafafa" }}
-        >
-          <Text style={{ fontWeight: "900", color: "#111" }}>◀</Text>
-        </Pressable>
+      <View style={{ marginBottom: 8, position: "relative", justifyContent: "center", minHeight: 36 }}>
+        <View style={{ position: "absolute", left: 0, right: 0, top: 0 }}>
+          <PrevNextNavButtons onPrev={() => navigateDay(-1)} onNext={() => navigateDay(1)} size={36} spread />
+        </View>
         <Text style={{ fontSize: 20, fontWeight: "700" }}>{formatDisplayDate(String(currentDateISO ?? ""))}</Text>
-        <Pressable
-          onPress={() => navigateDay(1)}
-          style={{ width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: "#ddd", alignItems: "center", justifyContent: "center", backgroundColor: "#fafafa" }}
-        >
-          <Text style={{ fontWeight: "900", color: "#111" }}>▶</Text>
-        </Pressable>
       </View>
 
       <GestureDetector gesture={pan}>
@@ -412,45 +403,43 @@ export default function AthleteDayScreen() {
 
       <Text style={{ marginTop: 10, marginBottom: 12, opacity: 0.7 }}>{selectedAthleteName}</Text>
 
-      {rows.length === 0 && <Text>No workouts for this day</Text>}
-
-      <FlatList
-        data={rows}
-        keyExtractor={(item) => item.key}
-        contentContainerStyle={{ paddingBottom: 24 }}
-        renderItem={({ item }) => {
-          if (item.type === "header") {
-            return (
-              <Text style={{ marginTop: 6, marginBottom: 8, fontWeight: "900", color: "#333" }}>
-                {item.title}
-              </Text>
-            );
-          }
-
-          if (item.item.kind === "planned") {
-            const planned = item.item;
-            return (
-              <View
-                style={{
-                  padding: 14,
-                  borderRadius: 12,
-                  backgroundColor: "#fff",
-                  marginBottom: 12,
-                  borderWidth: 1,
-                  borderColor: "#e5e5e5",
-                }}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontWeight: "900", fontSize: 16 }}>{planned.session} Session</Text>
-                  </View>
-
+      <View
+        style={{
+          padding: 12,
+          borderRadius: 12,
+          backgroundColor: "#f8fafc",
+          borderWidth: 1,
+          borderColor: "#dbeafe",
+          marginBottom: 12,
+        }}
+      >
+        <SectionLabel style={{ color: "#0f172a", marginTop: 0, marginBottom: 8 }}>Planned Work</SectionLabel>
+        {plannedSessions.length === 0 ? (
+          <SectionEmptyText style={{ color: "#475569", fontWeight: "600", marginTop: 0 }}>
+            No planned sessions for this day.
+          </SectionEmptyText>
+        ) : (
+          plannedSessions.map((planned) => (
+            <View
+              key={`planned-${planned.session}`}
+              style={{
+                borderWidth: 1,
+                borderColor: "#e2e8f0",
+                borderRadius: 10,
+                backgroundColor: "#fff",
+                padding: 10,
+                marginBottom: 8,
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                <Text style={{ fontWeight: "900", color: "#111827" }}>{planned.session} Plan</Text>
+                {planned.showFeedbackEntry ? (
                   <Pressable
                     onPress={() =>
                       router.push({
                         pathname: "/(athlete)/workout/[id]",
                         params: {
-                          id: `planned-${String(date)}-${planned.session}`,
+                          id: `planned-${String(currentDateISO)}-${planned.session}`,
                           synthetic: "1",
                           date: String(currentDateISO),
                           session: planned.session,
@@ -473,16 +462,37 @@ export default function AthleteDayScreen() {
                   >
                     <Ionicons name="chatbubble-ellipses-outline" size={18} color="#111" />
                   </Pressable>
-                </View>
-
-                <Text style={{ marginTop: 8, color: "#222", fontWeight: "800" }}>
-                  Prescribed: {planned.prescribed}
-                </Text>
+                ) : null}
               </View>
+              <Text style={{ marginTop: 6, color: "#1f2937", fontWeight: "800" }}>
+                Prescribed: {planned.prescribed}
+              </Text>
+            </View>
+          ))
+        )}
+      </View>
+
+      <SectionLabel style={{ color: "#0f172a", marginTop: 0, marginBottom: 10 }}>Recorded Workouts</SectionLabel>
+      {rows.length === 0 && (
+        <SectionEmptyText style={{ marginTop: 0, marginBottom: 12, color: "#475569", fontWeight: "600" }}>
+          No workouts for this day
+        </SectionEmptyText>
+      )}
+
+      <FlatList
+        data={rows}
+        keyExtractor={(item) => item.key}
+        contentContainerStyle={{ paddingBottom: 24 }}
+        renderItem={({ item }) => {
+          if (item.type === "header") {
+            return (
+              <Text style={{ marginTop: 6, marginBottom: 8, fontWeight: "900", color: "#333" }}>
+                {item.title}
+              </Text>
             );
           }
 
-          const workout = item.item.workout;
+          const workout = item.workout;
           const preRoutineIds = Array.isArray(workout.preRoutineIds) ? workout.preRoutineIds : [];
           const postRoutineIds = Array.isArray(workout.postRoutineIds) ? workout.postRoutineIds : [];
           const peers = groupMatesByWorkoutId.get(workout.id) ?? [];

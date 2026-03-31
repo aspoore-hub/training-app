@@ -1,5 +1,4 @@
 import { loadJSON, saveJSON } from "./storage";
-import { MILEAGE_PLANS_KEY } from "./mileagePlan";
 import type { DailyMileageTarget, MileageValue, WeeklyMileagePlan } from "./types";
 import { migrateRosterToV2Once } from "./roster";
 
@@ -131,34 +130,9 @@ function normalizePlan(plan: WeeklyMileagePlan): { plan: WeeklyMileagePlan; chan
   return { plan: nextPlan as WeeklyMileagePlan, changed: true };
 }
 
-async function runMileageNormalizationMigration(done: Done): Promise<Done> {
-  if (done[MIGRATION_ID]) return done;
-
-  const rawPlans = await loadJSON<any>(MILEAGE_PLANS_KEY, []);
-  const plansArr: WeeklyMileagePlan[] = Array.isArray(rawPlans)
-    ? rawPlans
-    : typeof rawPlans === "object" && rawPlans
-      ? (Object.values(rawPlans) as WeeklyMileagePlan[])
-      : [];
-
-  let anyChanged = false;
-  const nextPlans = plansArr.map((p) => {
-    const { plan, changed } = normalizePlan(p);
-    if (changed) anyChanged = true;
-    return plan;
-  });
-
-  if (anyChanged) {
-    await saveJSON(MILEAGE_PLANS_KEY, nextPlans);
-  }
-
-  return { ...done, [MIGRATION_ID]: true };
-}
-
 export async function runMigrations() {
   let done = await loadJSON<Done>(MIGRATIONS_KEY, {});
 
-  done = await runMileageNormalizationMigration(done);
   await migrateRosterToV2Once();
 
   await saveJSON(MIGRATIONS_KEY, done);

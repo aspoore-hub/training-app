@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type SetStateAction } from "react";
 import { Alert, Modal, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { GridCell } from "../../components/grid/GridCell";
@@ -6,9 +6,16 @@ import { GridTable } from "../../components/grid/GridTable";
 import { useGridEngine } from "../../components/grid/useGridEngine";
 import { NotesCellEditor } from "../../components/grid/editors/NotesCellEditor";
 import { TextCellEditor } from "../../components/grid/editors/TextCellEditor";
+import { InlineSaveStatus } from "../../components/shared/InlineSaveStatus";
 
 import { loadCoachCategories } from "../../lib/coachCategories";
 import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
+import {
+  emptyPracticeTimeDefaults,
+  getDefaultPracticeTime,
+  loadPracticeTimeDefaults,
+  type PracticeTimeDefaults,
+} from "../../lib/practiceDefaults";
 import { getCurrentTeamId } from "../../lib/team";
 import { fetchMileageCellsForWeek, type TeamMileageCellRow } from "../../lib/mileageCloud";
 import { formatMileageForSheet, getWeekIndex, getWeekStartISO } from "../../lib/mileagePlan";
@@ -16,7 +23,6 @@ import {
   compareAthleteDisplayNamesByLastName,
   loadTeamRoster,
   resolveAthleteDisplayName,
-  searchRoster,
   toRosterMapById,
   type TeamRosterAthlete,
 } from "../../lib/teamRoster";
@@ -37,6 +43,12 @@ type SaveStatus = "idle" | "saving" | "saved" | "error";
 type SaveState = {
   status: SaveStatus;
   message?: string;
+};
+
+type HeaderSaveDisplayState = {
+  kind: "idle" | "pending" | "saving" | "saved" | "error";
+  message?: string;
+  detail?: string;
 };
 
 type BatchEditableField = "session" | "location" | "time_text" | "date_iso" | "title" | "details" | "primary_category" | "categories";
@@ -95,6 +107,34 @@ type GroupGridApi = {
   fillAll: () => void;
 };
 
+type GroupAthletePropSlices = {
+  workoutIds: string[];
+  athleteDrafts: Record<string, AthleteDraft>;
+  athleteSaveState: Record<string, SaveState>;
+  prescribedDistanceByWorkoutId: Record<string, string>;
+};
+
+type WebDragMoveState = {
+  workoutId: string;
+  batchKey: string;
+  batchId: string;
+  fromGroupId: string | null;
+};
+
+type WebDragGhostState = {
+  workoutId: string;
+  batchKey: string;
+  athleteName: string;
+  location: string;
+  timeText: string;
+  distanceText: string;
+  details: string;
+  categoriesText: string;
+  width: number;
+  x: number;
+  y: number;
+};
+
 const COL = {
   rowSelect: 30,
   toggle: 42,
@@ -108,7 +148,6 @@ const COL = {
   athletes: 90,
   actions: 180,
   athleteName: 220,
-  athleteSession: 90,
   athleteLocation: 150,
   athleteTime: 100,
   distance: 100,
@@ -141,6 +180,19 @@ const batchSheetLabelText = {
   marginBottom: 3,
 } as const;
 
+const BATCH_GROUP_CORE_BG = "#ffffff";
+const BATCH_GROUP_SECONDARY_BG = "#f8fafc";
+const BATCH_GROUP_UTILITY_BG = "#f1f5f9";
+const BATCH_GROUP_DIVIDER = "#cbd5e1";
+const BATCH_GROUP_CAPTION = "#64748b";
+const BATCH_START_BORDER = "#9fb2c9";
+const BATCH_START_HIGHLIGHT_BORDER = "#fb923c";
+const BATCH_HEADER_SECTION_BG = "#f2f6fc";
+const BATCH_HEADER_CAPTION_BG = "#e8eff8";
+const GROUP_HEADER_BG = "#f7fafd";
+const GROUP_SUBHEADER_BG = "#fbfdff";
+const GROUP_HEADER_BORDER = "#e4ebf4";
+
 function buildMileageLookupKey(
   athleteId: string,
   weekStartISO: string,
@@ -163,40 +215,10 @@ const BATCH_COLUMNS: Array<{ key: string; label: string; width: number }> = [
   { key: "actions", label: "Actions", width: COL.actions },
 ];
 
-const ATHLETE_EDIT_FIELDS: AthleteEditableField[] = ["location", "time_text", "details", "primary_category"];
+const ATHLETE_EDIT_FIELDS: AthleteEditableField[] = ["location", "time_text", "details"];
 
 function normalizeCategoryLabel(value: string): string {
   return String(value ?? "").trim().toLowerCase();
-}
-
-function serializeCategories(categories: string[]): string {
-  const cleaned = (Array.isArray(categories) ? categories : [])
-    .map((v) => String(v ?? "").trim())
-    .filter(Boolean)
-    .filter((v) => normalizeCategoryLabel(v) !== "other");
-  return cleaned.join(", ");
-}
-
-function parseCategoryClipboard(text: string, validOptions: string[]): string[] {
-  const canonicalByNorm = new Map<string, string>();
-  (Array.isArray(validOptions) ? validOptions : []).forEach((opt) => {
-    const raw = String(opt ?? "").trim();
-    if (!raw) return;
-    if (normalizeCategoryLabel(raw) === "other") return;
-    canonicalByNorm.set(normalizeCategoryLabel(raw), raw);
-  });
-
-  const out: string[] = [];
-  String(text ?? "")
-    .split(",")
-    .map((part) => String(part ?? "").trim())
-    .filter(Boolean)
-    .forEach((part) => {
-      const canonical = canonicalByNorm.get(normalizeCategoryLabel(part));
-      if (!canonical) return;
-      if (!out.includes(canonical)) out.push(canonical);
-    });
-  return out;
 }
 
 function normalizeCategoryArrayForGrid(raw: string[]): string[] {
@@ -214,63 +236,119 @@ function buildGroupKey(batchKey: string, groupId: string | null): string {
   return `${batchKey}::${groupId ?? "__UNGROUPED__"}`;
 }
 
-function GroupAthleteRows({
+function areOrderedGroupRowsUnchanged(
+  prevRows: TeamWorkoutRow[] | undefined,
+  nextRows: TeamWorkoutRow[]
+): boolean {
+  if (!prevRows) return false;
+  if (prevRows.length !== nextRows.length) return false;
+  for (let i = 0; i < nextRows.length; i += 1) {
+    const prevRow = prevRows[i];
+    const nextRow = nextRows[i];
+    if (!prevRow || String(prevRow.id) !== String(nextRow.id)) return false;
+    if (prevRow !== nextRow) return false;
+  }
+  return true;
+}
+
+function areOrderedWorkoutIdsUnchanged(prevIds: string[] | undefined, nextIds: string[]): boolean {
+  if (!prevIds) return false;
+  if (prevIds.length !== nextIds.length) return false;
+  for (let i = 0; i < nextIds.length; i += 1) {
+    if (prevIds[i] !== nextIds[i]) return false;
+  }
+  return true;
+}
+
+function resolvePrescribedForSlice(
+  prescribedDistanceByWorkoutId: Record<string, string>,
+  workoutId: string
+): string | undefined {
+  const prescribed = prescribedDistanceByWorkoutId[workoutId];
+  if (typeof prescribed !== "string" || !prescribed) return undefined;
+  return prescribed;
+}
+
+function areGroupAthleteSlicesUnchanged(
+  previous: GroupAthletePropSlices | undefined,
+  workoutIds: string[],
+  athleteDrafts: Record<string, AthleteDraft>,
+  athleteSaveState: Record<string, SaveState>,
+  prescribedDistanceByWorkoutId: Record<string, string>
+): boolean {
+  if (!previous) return false;
+  if (!areOrderedWorkoutIdsUnchanged(previous.workoutIds, workoutIds)) return false;
+  for (const workoutId of workoutIds) {
+    if (athleteDrafts[workoutId] !== previous.athleteDrafts[workoutId]) return false;
+    if (athleteSaveState[workoutId] !== previous.athleteSaveState[workoutId]) return false;
+    if (
+      resolvePrescribedForSlice(prescribedDistanceByWorkoutId, workoutId) !==
+      previous.prescribedDistanceByWorkoutId[workoutId]
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const GroupAthleteRows = memo(function GroupAthleteRows({
+  groupKey,
   batchRowKey,
   batchId,
   group,
-  rowElByWorkoutId,
   rosterNameById,
   athleteDrafts,
   athleteSaveState,
-  categoryNames,
   prescribedDistanceByWorkoutId,
   deletingKey,
-  draggingWorkoutId,
   justMovedWorkoutId,
   onEditAthleteField,
-  onEditAthleteSession,
-  onEditAthleteCategories,
   onDeleteSingleWorkout,
-  setDraggingWorkoutId,
-  setDragOverTargetGroupId,
   setMoveMode,
+  webDragMove,
+  setWebDragMove,
+  setWebDragGhost,
+  setWebDragGhostClone,
+  dragOverGroupKey,
+  setDragOverGroupKey,
   activeGridId,
   setActiveGridId,
   onSelectionMetaChange,
   onRegisterGridApi,
   batchHeaderActiveRef,
 }: {
+  groupKey: string;
   batchRowKey: string;
   batchId: string | null;
   group: GroupedAthleteRows;
-  rowElByWorkoutId: MutableRefObject<Record<string, HTMLElement | null>>;
   rosterNameById: Map<string, string>;
   athleteDrafts: Record<string, AthleteDraft>;
   athleteSaveState: Record<string, SaveState>;
-  categoryNames: string[];
   prescribedDistanceByWorkoutId: Record<string, string>;
   deletingKey: string | null;
-  draggingWorkoutId: string | null;
   justMovedWorkoutId: string | null;
   onEditAthleteField: (workoutId: string, field: AthleteEditableField, value: string) => void;
-  onEditAthleteSession: (workoutId: string, session: "AM" | "PM") => void;
-  onEditAthleteCategories: (workoutId: string, categories: string[]) => void;
-  onDeleteSingleWorkout: (workoutId: string) => void;
-  setDraggingWorkoutId: (id: string | null) => void;
-  setDragOverTargetGroupId: (id: string | null) => void;
+  onDeleteSingleWorkout: (workoutId: string) => void | Promise<void>;
   setMoveMode: (v: any) => void;
+  webDragMove: WebDragMoveState | null;
+  setWebDragMove: (v: WebDragMoveState | null) => void;
+  setWebDragGhost: (v: SetStateAction<WebDragGhostState | null>) => void;
+  setWebDragGhostClone: (clone: HTMLElement | null) => void;
+  dragOverGroupKey: string | null;
+  setDragOverGroupKey: (v: string | null) => void;
   activeGridId: string | null;
   setActiveGridId: (id: string | null) => void;
-  onSelectionMetaChange: (meta: GroupSelectionMeta) => void;
-  onRegisterGridApi: (gridId: string, api: GroupGridApi | null) => void;
+  onSelectionMetaChange: (groupKey: string, meta: GroupSelectionMeta) => void;
+  onRegisterGridApi: (groupKey: string, api: GroupGridApi | null) => void;
   batchHeaderActiveRef: MutableRefObject<boolean>;
 }) {
-  const gridId = useMemo(() => buildGroupKey(batchRowKey, group.groupId), [batchRowKey, group.groupId]);
+  const gridId = groupKey;
   const rowIds = useMemo(() => group.rows.map((r) => String(r.id)), [group.rows]);
-  const [openCategoryPicker, setOpenCategoryPicker] = useState<{ workoutId: string; slotIndex: number } | null>(null);
-  const [categoryPickerQuery, setCategoryPickerQuery] = useState("");
-  const [categorySlotCountByWorkoutId, setCategorySlotCountByWorkoutId] = useState<Record<string, number>>({});
   const groupGridRef = useRef<any>(null);
+  const clearDragGhostLocal = useCallback(() => {
+    setWebDragGhost(null);
+    setWebDragGhostClone(null);
+  }, [setWebDragGhost, setWebDragGhostClone]);
 
   const resolveDisplayCategories = useCallback(
     (workoutId: string, draft?: AthleteDraft, row?: TeamWorkoutRow) => {
@@ -290,44 +368,44 @@ function GroupAthleteRows({
     []
   );
 
-  const applyCategoryCellValue = useCallback(
-    (workoutId: string, nextCategoriesInput: string[]) => {
-      const row = group.rows.find((r) => String(r.id) === workoutId);
-      const draft = athleteDrafts[workoutId];
-      const prevCategories = resolveDisplayCategories(workoutId, draft, row);
-      const nextCategories = normalizeCategoryArrayForGrid(nextCategoriesInput);
+  const buildFillSelectedChanges = useCallback(() => {
+    const rect = groupGridRef.current?.getSelectionRect?.();
+    if (!rect) return [] as Array<{ rowId: string; colKey: AthleteEditableField; prev: string; next: string }>;
+    const sourceRowIndex = rect.r1;
+    const sourceId = rowIds[sourceRowIndex];
+    if (!sourceId) return [] as Array<{ rowId: string; colKey: AthleteEditableField; prev: string; next: string }>;
 
-      const prevSerialized = serializeCategories(prevCategories);
-      const nextSerialized = serializeCategories(nextCategories);
-
-      if (prevSerialized === nextSerialized) return;
-
-      onEditAthleteCategories(workoutId, nextCategories);
-
-      groupGridRef.current?.applyChanges([
-        {
-          rowId: workoutId,
-          colKey: "primary_category",
-          prev: prevSerialized,
-          next: nextSerialized,
-        },
-      ] as any);
-    },
-    [athleteDrafts, group.rows, onEditAthleteCategories, resolveDisplayCategories]
-  );
+    const source = athleteDrafts[sourceId] ?? {
+      session: "AM",
+      location: "",
+      time_text: "",
+      details: "",
+      primary_category: "",
+      categories: [],
+    };
+    const selectedCols = new Set(groupGridRef.current?.getSelectedColKeys?.() ?? []);
+    const selectedRowIds = (groupGridRef.current?.selectedRowIds ?? []) as string[];
+    const changes: Array<{ rowId: string; colKey: AthleteEditableField; prev: string; next: string }> = [];
+    selectedRowIds.forEach((id) => {
+      if (id === sourceId) return;
+      ATHLETE_EDIT_FIELDS.forEach((field) => {
+        if (!selectedCols.has(field)) return;
+        const row = group.rows.find((r) => String(r.id) === id);
+        const prev = String((athleteDrafts[id] as any)?.[field] ?? row?.[field] ?? "");
+        changes.push({ rowId: id, colKey: field, prev, next: String(source[field] ?? "") });
+      });
+    });
+    return changes;
+  }, [athleteDrafts, group.rows, rowIds]);
 
   const groupGrid = useGridEngine<string, AthleteEditableField>({
     enabled: Platform.OS === "web",
     rowIds,
     colKeys: ATHLETE_EDIT_FIELDS,
-    isEditorHandlingKeys: () => !!openCategoryPicker,
+    isEditorHandlingKeys: () => false,
     getValue: (workoutId, field) => {
       const draft = athleteDrafts[workoutId];
       const row = group.rows.find((r) => String(r.id) === workoutId);
-      if (field === "primary_category") {
-        const resolved = resolveDisplayCategories(workoutId, draft, row);
-        return serializeCategories(resolved);
-      }
       if (draft && typeof draft[field] === "string") return String(draft[field] ?? "");
       if (!row) return "";
       if (field === "location") return String(row.location ?? "");
@@ -336,25 +414,20 @@ function GroupAthleteRows({
       return "";
     },
     setValue: (workoutId, field, value) => {
-      if (field !== "primary_category") {
-        onEditAthleteField(workoutId, field, value);
-        return;
-      }
-      const parsed = parseCategoryClipboard(String(value ?? ""), categoryNames);
-      if (parsed.length > 0) {
-        applyCategoryCellValue(workoutId, parsed);
-        return;
-      }
-      if (!String(value ?? "").trim()) {
-        applyCategoryCellValue(workoutId, []);
-      }
+      onEditAthleteField(workoutId, field, value);
     },
     onActivate: () => setActiveGridId(gridId),
     onSelectionChange: (selection) =>
-      onSelectionMetaChange({
+      onSelectionMetaChange(groupKey, {
         rowIds: selection.rowIds.map((id) => String(id)),
         colKeys: selection.colKeys,
       }),
+    onFillDown: () => {
+      const changes = buildFillSelectedChanges();
+      if (changes.length > 0) {
+        groupGridRef.current?.applyChanges?.(changes as any);
+      }
+    },
   });
   groupGridRef.current = groupGrid;
 
@@ -369,55 +442,27 @@ function GroupAthleteRows({
       primary_category: "",
       categories: [],
     };
-    const sourceRow = group.rows.find((r) => String(r.id) === sourceId);
-    const sourceCategories = resolveDisplayCategories(sourceId, athleteDrafts[sourceId], sourceRow);
     const targetIds = rowIds.slice(1);
     const changes: Array<{ rowId: string; colKey: AthleteEditableField; prev: string; next: string }> = [];
     targetIds.forEach((id) => {
       ATHLETE_EDIT_FIELDS.forEach((field) => {
-        if (field === "primary_category") return;
-        const prev = String((athleteDrafts[id] as any)?.[field] ?? group.rows.find((r) => String(r.id) === id)?.[field] ?? "");
+        const row = group.rows.find((r) => String(r.id) === id);
+        const prev = String((athleteDrafts[id] as any)?.[field] ?? row?.[field] ?? "");
         changes.push({ rowId: id, colKey: field, prev, next: String(source[field] ?? "") });
       });
-      applyCategoryCellValue(id, sourceCategories);
     });
     groupGrid.applyChanges(changes as any);
-  }, [applyCategoryCellValue, athleteDrafts, group.rows, groupGrid, resolveDisplayCategories, rowIds]);
+  }, [athleteDrafts, group.rows, groupGrid, rowIds]);
 
   const fillSelectedForGroup = useCallback(() => {
-    const rect = groupGrid.getSelectionRect();
-    if (!rect) return;
-    const sourceRowIndex = rect.r1;
-    const sourceId = rowIds[sourceRowIndex];
-    if (!sourceId) return;
-    const source = athleteDrafts[sourceId] ?? {
-      session: "AM",
-      location: "",
-      time_text: "",
-      details: "",
-      primary_category: "",
-      categories: [],
-    };
-    const sourceRow = group.rows.find((r) => String(r.id) === sourceId);
-    const sourceCategories = resolveDisplayCategories(sourceId, athleteDrafts[sourceId], sourceRow);
-    const selectedCols = new Set(groupGrid.getSelectedColKeys());
-    const selectedRowIds = groupGrid.selectedRowIds;
-    const changes: Array<{ rowId: string; colKey: AthleteEditableField; prev: string; next: string }> = [];
-    selectedRowIds.forEach((id) => {
-      if (id === sourceId) return;
-      ATHLETE_EDIT_FIELDS.forEach((field) => {
-        if (field === "primary_category") return;
-        if (!selectedCols.has(field)) return;
-        const prev = String((athleteDrafts[id] as any)?.[field] ?? group.rows.find((r) => String(r.id) === id)?.[field] ?? "");
-        changes.push({ rowId: id, colKey: field, prev, next: String(source[field] ?? "") });
-      });
-      if (selectedCols.has("primary_category")) applyCategoryCellValue(id, sourceCategories);
-    });
-    groupGrid.applyChanges(changes as any);
-  }, [applyCategoryCellValue, athleteDrafts, group.rows, groupGrid, resolveDisplayCategories, rowIds]);
+    const changes = buildFillSelectedChanges();
+    if (changes.length > 0) {
+      groupGrid.applyChanges(changes as any);
+    }
+  }, [buildFillSelectedChanges, groupGrid]);
 
   useEffect(() => {
-    onRegisterGridApi(gridId, {
+    onRegisterGridApi(groupKey, {
       copy: async () => {
         await groupGrid.copySelectionToClipboard();
       },
@@ -430,22 +475,14 @@ function GroupAthleteRows({
       fillSelected: fillSelectedForGroup,
       fillAll: fillAllForGroup,
     });
-    return () => onRegisterGridApi(gridId, null);
-  }, [fillAllForGroup, fillSelectedForGroup, gridId, groupGrid, onRegisterGridApi]);
+    return () => onRegisterGridApi(groupKey, null);
+  }, [fillAllForGroup, fillSelectedForGroup, groupGrid, groupKey, onRegisterGridApi]);
 
   useEffect(() => {
     if (Platform.OS !== "web") return;
     const handler = (e: any) => {
       if (batchHeaderActiveRef.current) return;
       if (activeGridId !== gridId) return;
-      const key = String(e?.key ?? "");
-      const categoryDropdownOpen = !!openCategoryPicker;
-      if (
-        categoryDropdownOpen &&
-        ["Enter", "Tab", "ArrowUp", "ArrowDown", "Escape"].includes(key)
-      ) {
-        return;
-      }
       const handled = groupGrid.handleKeyDown(e);
       if (!handled) return;
       e.preventDefault?.();
@@ -455,23 +492,10 @@ function GroupAthleteRows({
     return () => {
       window.removeEventListener("keydown", handler, true);
     };
-  }, [activeGridId, batchHeaderActiveRef, fillSelectedForGroup, gridId, groupGrid, openCategoryPicker]);
+  }, [activeGridId, batchHeaderActiveRef, fillSelectedForGroup, gridId, groupGrid]);
 
   return (
-    <View style={{ position: "relative" }}>
-      {openCategoryPicker ? (
-        <Pressable
-          onPress={() => setOpenCategoryPicker(null)}
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            zIndex: 70,
-          }}
-        />
-      ) : null}
+    <View style={{ position: "relative", overflow: "visible", zIndex: 1 }}>
       {group.rows.map((workout, idx) => {
         const workoutId = String(workout.id);
         const athleteId = String(workout.athlete_profile_id ?? "").trim();
@@ -499,29 +523,20 @@ function GroupAthleteRows({
         const rowSelected = groupGrid.isRowSelected(workoutId);
         const timeSelected = groupGrid.isCellSelected(workoutId, "time_text");
         const notesSelected = groupGrid.isCellSelected(workoutId, "details");
-        const categorySelected = groupGrid.isCellSelected(workoutId, "primary_category");
         const locationActive = groupGrid.isCellActive(workoutId, "location");
         const timeActive = groupGrid.isCellActive(workoutId, "time_text");
         const notesActive = groupGrid.isCellActive(workoutId, "details");
-        const categoryActive = groupGrid.isCellActive(workoutId, "primary_category");
         const displayCategories = resolveDisplayCategories(workoutId, athleteDraft, workout);
-        const categorySlotsRaw =
-          displayCategories.length > 0
-            ? displayCategories
-            : String(athleteDraft.primary_category ?? "").trim()
-            ? [String(athleteDraft.primary_category ?? "").trim()]
-            : [];
-        const categorySlotCount = Math.max(1, categorySlotsRaw.length, categorySlotCountByWorkoutId[workoutId] ?? 1);
-        const categoryOptions = categoryNames
-          .map((name) => String(name ?? "").trim())
-          .filter(Boolean)
-          .filter((name) => name.toLowerCase().includes(String(categoryPickerQuery ?? "").trim().toLowerCase()));
+        const isDraggingThisRow =
+          Platform.OS === "web" &&
+          webDragMove?.workoutId === workoutId &&
+          webDragMove?.batchKey === batchRowKey;
         const rowStyle = {
           flexDirection: "row" as const,
           minHeight: 40,
           backgroundColor:
-            draggingWorkoutId === workoutId
-              ? "rgba(148, 163, 184, 0.08)"
+            isDraggingThisRow
+              ? "rgba(148, 163, 184, 0.18)"
               : justMovedWorkoutId === workoutId
               ? "rgba(59, 130, 246, 0.10)"
               : idx % 2 === 0
@@ -529,9 +544,12 @@ function GroupAthleteRows({
               : "#f9fbfe",
           borderBottomWidth: 1,
           borderBottomColor: "#e2e8f0",
-          opacity: draggingWorkoutId === workoutId ? 0.45 : 1,
           position: "relative" as const,
-          zIndex: openCategoryPicker?.workoutId === workoutId ? 200 : 1,
+          overflow: "visible" as const,
+          zIndex: 1,
+          opacity: isDraggingThisRow ? 0.55 : 1,
+          outline: isDraggingThisRow ? "1px dashed rgba(51, 65, 85, 0.45)" : "none",
+          outlineOffset: isDraggingThisRow ? -1 : 0,
         };
 
         const rowBody = (
@@ -580,67 +598,127 @@ function GroupAthleteRows({
                 overflow: "hidden",
               }}
             >
-              {Platform.OS === "web" ? (
+              {Platform.OS === "web" && batchId ? (
                 <div
                   draggable
+                  onDragStart={(e: any) => {
+                    const payload: WebDragMoveState = {
+                      workoutId,
+                      batchKey: batchRowKey,
+                      batchId,
+                      fromGroupId: group.groupId,
+                    };
+                    setWebDragMove(payload);
+                    setDragOverGroupKey(null);
+                    setWebDragGhost({
+                      workoutId,
+                      batchKey: batchRowKey,
+                      athleteName,
+                      location: String(athleteDraft.location ?? "").trim(),
+                      timeText: String(athleteDraft.time_text ?? "").trim(),
+                      distanceText: String(prescribedDistanceByWorkoutId[workoutId] ?? "-"),
+                      details: String(athleteDraft.details ?? "").trim(),
+                      categoriesText: displayCategories.join(", "),
+                      width: 520,
+                      x: Number(e?.clientX ?? e?.nativeEvent?.clientX ?? 0),
+                      y: Number(e?.clientY ?? e?.nativeEvent?.clientY ?? 0),
+                    });
+                    try {
+                      const dataTransfer = e?.dataTransfer ?? e?.nativeEvent?.dataTransfer;
+                      dataTransfer?.setData?.("text/plain", JSON.stringify(payload));
+                      if (dataTransfer) dataTransfer.effectAllowed = "move";
+                      const doc = e?.currentTarget?.ownerDocument as Document | undefined;
+                      const findRowFromHandle = (start: HTMLElement | null): HTMLElement | null => {
+                        let node: HTMLElement | null = start;
+                        while (node) {
+                          const childCount = node.children?.length ?? 0;
+                          const hasDataRow =
+                            (node.getAttribute?.("data-row-container") === "1" ||
+                              node.getAttribute?.("data-row-id") === String(workoutId));
+                          if (hasDataRow && childCount >= 6) return node;
+                          const style = window.getComputedStyle(node);
+                          if (
+                            childCount >= 6 &&
+                            style.display === "flex" &&
+                            style.flexDirection === "row" &&
+                            Number.parseFloat(style.minHeight || "0") >= 30
+                          ) {
+                            return node;
+                          }
+                          node = node.parentElement;
+                        }
+                        return null;
+                      };
+                      const rowById =
+                        (doc?.querySelector?.(`[data-row-id="${String(workoutId)}"]`) as HTMLElement | null) ?? null;
+                      const row =
+                        rowById ??
+                        findRowFromHandle(e?.currentTarget as HTMLElement | null) ??
+                        (e?.currentTarget?.closest?.("[data-row-container='1']") as HTMLElement | null) ??
+                        (e?.currentTarget?.parentElement?.closest?.("[data-row-container='1']") as HTMLElement | null);
+                      if (row) {
+                        const rect = row.getBoundingClientRect();
+                        const clone = row.cloneNode(true) as HTMLElement;
+                        clone.style.width = `${rect.width}px`;
+                        clone.style.minWidth = `${rect.width}px`;
+                        clone.style.maxWidth = `${rect.width}px`;
+                        clone.style.margin = "0";
+                        clone.style.pointerEvents = "none";
+                        clone.style.opacity = "0.92";
+                        clone.style.background = "#ffffff";
+                        clone.style.borderRadius = "8px";
+                        clone.style.boxShadow = "0 10px 24px rgba(15,23,42,0.18)";
+                        setWebDragGhostClone(clone);
+                        setWebDragGhost((prev) => (prev ? { ...prev, width: rect.width } : prev));
+                      } else {
+                        setWebDragGhostClone(null);
+                      }
+                      if (dataTransfer?.setDragImage) {
+                        const transparentImage = (doc?.createElement?.("img") ?? document.createElement("img")) as HTMLImageElement;
+                        transparentImage.src =
+                          "data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=";
+                        transparentImage.width = 1;
+                        transparentImage.height = 1;
+                        transparentImage.style.position = "fixed";
+                        transparentImage.style.left = "-9999px";
+                        transparentImage.style.top = "-9999px";
+                        doc?.body?.appendChild(transparentImage);
+                        dataTransfer.setDragImage(transparentImage, 0, 0);
+                        setTimeout(() => {
+                          if (transparentImage.parentNode) transparentImage.parentNode.removeChild(transparentImage);
+                        }, 0);
+                      }
+                    } catch {}
+                  }}
+                  onDrag={(e: any) => {
+                    const x = Number(e?.clientX ?? e?.nativeEvent?.clientX ?? 0);
+                    const y = Number(e?.clientY ?? e?.nativeEvent?.clientY ?? 0);
+                    if (!(x > 0 || y > 0)) return;
+                    setWebDragGhost((prev) => (prev ? { ...prev, x, y } : prev));
+                  }}
+                  onDragEnd={() => {
+                    setDragOverGroupKey(null);
+                    setWebDragMove(null);
+                    clearDragGhostLocal();
+                  }}
                   style={{
-                    width: 30,
+                    width: "100%",
+                    height: "100%",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
                     cursor: "grab",
-                    userSelect: "none",
-                    WebkitUserSelect: "none",
-                    MozUserSelect: "none",
-                    color: "#64748b",
-                    fontSize: "14px",
-                    fontWeight: 900,
+                    opacity:
+                      webDragMove?.workoutId === workoutId && webDragMove?.batchKey === batchRowKey ? 0.55 : 1,
+                    backgroundColor:
+                      dragOverGroupKey && dragOverGroupKey === groupKey ? "rgba(59,130,246,0.06)" : "transparent",
                   }}
-                  onDragStart={(e: any) => {
-                    if (!batchId) return;
-                    const ne = e?.nativeEvent ?? e;
-                    const payload = { workoutId, batchId, fromGroupId: group.groupId ?? null };
-                    const anchor = rowElByWorkoutId.current[workoutId];
-                    if (!anchor) return;
-                    const rowNode =
-                      (anchor.firstElementChild?.closest?.("[data-row-container]") as HTMLElement | null) ??
-                      (anchor.firstElementChild as HTMLElement | null) ??
-                      anchor;
-                    const row = rowNode as HTMLElement;
-                    if (row && ne?.dataTransfer?.setDragImage) {
-                      const clone = row.cloneNode(true) as HTMLElement;
-                      const rect = row.getBoundingClientRect();
-                      clone.style.position = "absolute";
-                      clone.style.top = "-1000px";
-                      clone.style.left = "-1000px";
-                      clone.style.width = `${rect.width}px`;
-                      clone.style.pointerEvents = "none";
-                      clone.style.opacity = "0.95";
-                      clone.style.background = "white";
-                      clone.style.borderRadius = "8px";
-                      clone.style.boxShadow = "0 8px 24px rgba(0,0,0,0.15)";
-                      document.body.appendChild(clone);
-                      ne.dataTransfer.setDragImage(clone, 24, 24);
-                      requestAnimationFrame(() => {
-                        setTimeout(() => {
-                          if (clone.parentNode) clone.parentNode.removeChild(clone);
-                        }, 50);
-                      });
-                    }
-                    ne?.dataTransfer?.setData?.("text/plain", JSON.stringify(payload));
-                    ne?.dataTransfer?.setData?.("application/json", JSON.stringify(payload));
-                    if (ne?.dataTransfer) ne.dataTransfer.effectAllowed = "move";
-                    setDraggingWorkoutId(workoutId);
-                  }}
-                  onDragEnd={() => {
-                    setDraggingWorkoutId(null);
-                    setDragOverTargetGroupId(null);
-                  }}
+                  title="Drag to move to another group"
                 >
-                  {"⋮⋮"}
+                  <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b", lineHeight: 12 }}>⋮⋮</Text>
                 </div>
               ) : (
-                <Text style={{ fontSize: 13, fontWeight: "900", color: "#94a3b8" }}>⋮⋮</Text>
+                <View />
               )}
             </View>
 
@@ -649,8 +727,8 @@ function GroupAthleteRows({
                 flexGrow: 0,
                 flexShrink: 1,
                 flexBasis: COL.athleteName,
-                minWidth: 160,
-                maxWidth: 260,
+                minWidth: 120,
+                maxWidth: COL.athleteName,
                 borderRightWidth: 1,
                 borderRightColor: "#e3e8f0",
                 justifyContent: "center",
@@ -658,56 +736,22 @@ function GroupAthleteRows({
                 overflow: "hidden",
               }}
             >
-              <Text numberOfLines={1} ellipsizeMode="tail" style={{ fontSize: 12, fontWeight: "800", color: "#0f172a" }}>
+              <Text numberOfLines={2} style={{ fontSize: 12, fontWeight: "800", color: "#0f172a", lineHeight: 15 }}>
                 {athleteName}
               </Text>
             </View>
 
             <View
               style={{
-                width: COL.athleteSession,
-                minWidth: 0,
-                flexShrink: 1,
-                borderRightWidth: 1,
-                borderRightColor: "#e3e8f0",
-                justifyContent: "center",
-                paddingHorizontal: 6,
-              }}
-            >
-              <View style={{ flexDirection: "row", gap: 4 }}>
-                {(["AM", "PM"] as const).map((s) => (
-                  <Pressable
-                    key={`${workoutId}-${s}`}
-                    onPress={() => onEditAthleteSession(workoutId, s)}
-                    style={{
-                      flex: 1,
-                      alignItems: "center",
-                      justifyContent: "center",
-                      borderWidth: 1,
-                      borderColor: athleteDraft.session === s ? "#0f172a" : "#cbd5e1",
-                      backgroundColor: athleteDraft.session === s ? "#0f172a" : "#fff",
-                      borderRadius: 6,
-                      paddingVertical: 2,
-                    }}
-                  >
-                    <Text style={{ fontSize: 10, fontWeight: "900", color: athleteDraft.session === s ? "#fff" : "#334155" }}>
-                      {s}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-            </View>
-
-            <View
-              style={{
-                width: COL.athleteLocation,
-                minWidth: 0,
+                flexBasis: COL.athleteLocation,
+                maxWidth: COL.athleteLocation,
+                minWidth: 110,
                 flexShrink: 1,
                 borderRightWidth: 1,
                 borderRightColor: "#e3e8f0",
                 justifyContent: "center",
                 paddingHorizontal: 8,
-                overflow: "hidden",
+                overflow: "visible",
                 ...(locationSelected ? ({ outline: "1px solid rgba(15,23,42,0.55)", outlineOffset: -1 } as any) : null),
                 ...(locationActive ? ({ outline: "2px solid #111827", outlineOffset: -2 } as any) : null),
               }}
@@ -717,7 +761,7 @@ function GroupAthleteRows({
                 onChangeText={(v) => groupGrid.applyCellValue(workoutId, "location", v)}
                 style={{ fontSize: 12, fontWeight: "600", color: "#334155", paddingVertical: 3 }}
                 placeholder="Location"
-                numberOfLines={1}
+                numberOfLines={2}
                 gridEditing={groupGrid.isEditingCell(workoutId, "location")}
                 editIntent={
                   groupGrid.editIntentRef.current?.rowId === workoutId &&
@@ -733,14 +777,15 @@ function GroupAthleteRows({
 
             <View
               style={{
-                width: COL.athleteTime,
-                minWidth: 0,
+                flexBasis: COL.athleteTime,
+                maxWidth: COL.athleteTime,
+                minWidth: 70,
                 flexShrink: 1,
                 borderRightWidth: 1,
                 borderRightColor: "#e3e8f0",
                 justifyContent: "center",
                 paddingHorizontal: 8,
-                overflow: "hidden",
+                overflow: "visible",
                 ...(timeSelected ? ({ outline: "1px solid rgba(15,23,42,0.55)", outlineOffset: -1 } as any) : null),
                 ...(timeActive ? ({ outline: "2px solid #111827", outlineOffset: -2 } as any) : null),
               }}
@@ -823,121 +868,17 @@ function GroupAthleteRows({
                 flexShrink: 1,
                 borderRightWidth: 1,
                 borderRightColor: "#e3e8f0",
-                justifyContent: "flex-start",
+                justifyContent: "center",
                 paddingHorizontal: 8,
-                ...(categorySelected ? ({ outline: "1px solid rgba(15,23,42,0.55)", outlineOffset: -1 } as any) : null),
-                ...(categoryActive ? ({ outline: "2px solid #111827", outlineOffset: -2 } as any) : null),
-                overflow: "visible",
-                zIndex: 20,
+                overflow: "hidden",
               }}
             >
-              <View style={{ gap: 4, paddingVertical: 4 }} {...(groupGrid.bindCell(workoutId, "primary_category") as any)}>
-                {Array.from({ length: categorySlotCount }).map((_, slotIndex) => {
-                  const slotValue = categorySlotsRaw[slotIndex] ?? "";
-                  const isOpen =
-                    openCategoryPicker?.workoutId === workoutId &&
-                    openCategoryPicker.slotIndex === slotIndex;
-                  return (
-                    <View
-                      key={`athlete-cat-slot-${workoutId}-${slotIndex}`}
-                      data-athlete-category-picker="1"
-                      style={{ flexDirection: "row", alignItems: "center", gap: 4, position: "relative", zIndex: isOpen ? 80 : 1 }}
-                    >
-                      <Pressable
-                        onPress={() => {
-                          setActiveGridId(gridId);
-                          if (isOpen) {
-                            setOpenCategoryPicker(null);
-                            return;
-                          }
-                          setOpenCategoryPicker({ workoutId, slotIndex });
-                          setCategoryPickerQuery("");
-                        }}
-                        style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 6, paddingVertical: 5, flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: "#fff", position: "relative", zIndex: isOpen ? 95 : 1 }}
-                      >
-                        <Text numberOfLines={1} style={{ fontSize: 11, fontWeight: "700", color: slotValue ? "#334155" : "#94a3b8" }}>
-                          {slotValue || "Select"}
-                        </Text>
-                        <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>{isOpen ? "▴" : "▾"}</Text>
-                      </Pressable>
-
-                      <Pressable
-                        onPress={() => {
-                          if (slotIndex === 0 && categorySlotCount <= 1) return;
-                          if (slotValue) {
-                            const next = categorySlotsRaw.filter((_, idx) => idx !== slotIndex);
-                            applyCategoryCellValue(workoutId, next);
-                          }
-                          setCategorySlotCountByWorkoutId((prev) => ({
-                            ...prev,
-                            [workoutId]: Math.max(1, (prev[workoutId] ?? categorySlotCount) - 1),
-                          }));
-                          if (isOpen) setOpenCategoryPicker(null);
-                        }}
-                        style={{ width: 22, height: 22, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 6, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && categorySlotCount <= 1 ? 0.4 : 1 }}
-                        disabled={slotIndex === 0 && categorySlotCount <= 1}
-                      >
-                        <Text style={{ fontSize: 12, fontWeight: "900", color: "#b91c1c" }}>−</Text>
-                      </Pressable>
-
-                      <Pressable
-                        onPress={() =>
-                          setCategorySlotCountByWorkoutId((prev) => ({
-                            ...prev,
-                            [workoutId]: (prev[workoutId] ?? categorySlotCount) + 1,
-                          }))
-                        }
-                        style={{ width: 22, height: 22, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, alignItems: "center", justifyContent: "center" }}
-                      >
-                        <Text style={{ fontSize: 12, fontWeight: "900", color: "#334155" }}>+</Text>
-                      </Pressable>
-
-                      {isOpen ? (
-                        <View
-                          data-athlete-category-picker="1"
-                          style={{
-                            position: "absolute",
-                            top: 30,
-                            left: 0,
-                            right: 48,
-                            borderWidth: 1,
-                            borderColor: "#e2e8f0",
-                            borderRadius: 8,
-                            overflow: "hidden",
-                            backgroundColor: "#fff",
-                            zIndex: 90,
-                            ...(Platform.OS === "android" ? { elevation: 7 } : null),
-                          }}
-                        >
-                          <TextInput
-                            value={categoryPickerQuery}
-                            onChangeText={setCategoryPickerQuery}
-                            placeholder="Search..."
-                            style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }}
-                          />
-                          <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 180 }}>
-                            {categoryOptions.map((name) => (
-                              <Pressable
-                                key={`athlete-cat-opt-${workoutId}-${name}`}
-                                onPress={() => {
-                                  const next = [...categorySlotsRaw];
-                                  if (next.includes(name) && next[slotIndex] !== name) return;
-                                  next[slotIndex] = name;
-                                  applyCategoryCellValue(workoutId, next.filter(Boolean));
-                                  setOpenCategoryPicker(null);
-                                }}
-                                style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7", backgroundColor: "#fff" }}
-                              >
-                                <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>{name}</Text>
-                              </Pressable>
-                            ))}
-                          </ScrollView>
-                        </View>
-                      ) : null}
-                    </View>
-                  );
-                })}
-              </View>
+              <Text
+                numberOfLines={3}
+                style={{ fontSize: 11, fontWeight: "700", color: displayCategories.length ? "#334155" : "#94a3b8", lineHeight: 14, paddingVertical: 4 }}
+              >
+                {displayCategories.length ? displayCategories.join(", ") : "No categories"}
+              </Text>
             </View>
 
             <View
@@ -952,6 +893,22 @@ function GroupAthleteRows({
                 overflow: "hidden",
               }}
             >
+              {Platform.OS === "web" && batchId ? (
+                <Pressable
+                  onPress={() =>
+                    setMoveMode({
+                      workoutId,
+                      batchKey: batchRowKey,
+                      batchId,
+                      fromGroupId: group.groupId,
+                    })
+                  }
+                  style={{ borderWidth: 1, borderColor: "#cbd5e1", backgroundColor: "#f8fafc", borderRadius: 7, paddingHorizontal: 8, paddingVertical: 4 }}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: "800", color: "#334155" }}>Move</Text>
+                </Pressable>
+              ) : null}
+
               <Pressable
                 onPress={() => void onDeleteSingleWorkout(workoutId)}
                 disabled={deletingKey === workoutId}
@@ -962,23 +919,16 @@ function GroupAthleteRows({
                 </Text>
               </Pressable>
 
-              <Text style={{ fontSize: 11, fontWeight: "800", color: athleteState?.status === "error" ? "#b91c1c" : "#64748b" }}>
-                {saveStatusText(athleteState)}
-              </Text>
+              <View style={{ alignItems: "flex-end", flexShrink: 1 }}>
+                <InlineSaveStatus status={athleteState?.status ?? "idle"} message={athleteState?.message} size="sm" align="right" />
+              </View>
             </View>
           </>
         );
 
         if (Platform.OS === "web") {
           return (
-            <div
-              key={`${batchRowKey}-athlete-${workoutId}`}
-              style={{ display: "contents" }}
-              data-row-anchor={workoutId}
-              ref={(el) => {
-                rowElByWorkoutId.current[workoutId] = el;
-              }}
-            >
+            <div key={`${batchRowKey}-athlete-${workoutId}`} style={{ display: "contents" }}>
               <View
                 {...({ "data-row-id": workoutId, "data-row-container": "1" } as any)}
                 style={[
@@ -988,7 +938,6 @@ function GroupAthleteRows({
                     transition:
                       "transform 120ms ease, background-color 250ms ease, opacity 120ms ease, border-color 120ms ease",
                     transform: justMovedWorkoutId === workoutId ? "scale(1.01)" : "scale(1)",
-                    outline: draggingWorkoutId === workoutId ? "1px solid rgba(0,0,0,0.15)" : "none",
                   } as any,
                 ]}
               >
@@ -1019,7 +968,7 @@ function GroupAthleteRows({
       })}
     </View>
   );
-}
+});
 
 function formatDisplayDate(iso: string) {
   const [y, m, d] = String(iso ?? "").split("-").map(Number);
@@ -1045,6 +994,136 @@ function normalizeSession(value: string): "AM" | "PM" {
   return v === "AM" ? "AM" : "PM";
 }
 
+function resolveDefaultSessionSlotAndTimeForDate(
+  dateISO: string,
+  defaults: PracticeTimeDefaults,
+  fallbackSession: "AM" | "PM" = "AM",
+  fallbackTime = ""
+): { session: "AM" | "PM"; timeText: string } {
+  const amTime = getDefaultPracticeTime(defaults, dateISO, "AM") ?? "";
+  const pmTime = getDefaultPracticeTime(defaults, dateISO, "PM") ?? "";
+
+  if (amTime) return { session: "AM", timeText: amTime };
+  if (pmTime) return { session: "PM", timeText: pmTime };
+  return { session: fallbackSession, timeText: fallbackTime };
+}
+
+function resolveSessionSwitchTime({
+  dateISO,
+  defaults,
+  fromSession,
+  toSession,
+  currentTimeText,
+}: {
+  dateISO: string;
+  defaults: PracticeTimeDefaults;
+  fromSession: "AM" | "PM";
+  toSession: "AM" | "PM";
+  currentTimeText: string;
+}): string {
+  const trimmed = String(currentTimeText ?? "").trim();
+  const fromDefault = getDefaultPracticeTime(defaults, dateISO, fromSession) ?? "";
+  const toDefault = getDefaultPracticeTime(defaults, dateISO, toSession) ?? "";
+  const canAutoSwap = !trimmed || (!!fromDefault && trimmed === fromDefault);
+  if (!canAutoSwap) return String(currentTimeText ?? "");
+  if (!toDefault) return String(currentTimeText ?? "");
+  return toDefault;
+}
+
+function parseTimeTextToSortableMinutes(value: string): number | null {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return null;
+
+  const compact = raw.replace(/\./g, "").replace(/\s+/g, "");
+  const match = compact.match(/^(\d{1,2})(?::(\d{1,2}))?([ap]m?|)$/);
+  if (!match) return null;
+
+  const hoursRaw = Number(match[1]);
+  const minutesRaw = match[2] == null ? 0 : Number(match[2]);
+  if (!Number.isFinite(hoursRaw) || !Number.isFinite(minutesRaw)) return null;
+  if (minutesRaw < 0 || minutesRaw > 59) return null;
+
+  const suffix = match[3] ?? "";
+  if (suffix) {
+    if (hoursRaw < 1 || hoursRaw > 12) return null;
+    const isPm = suffix.startsWith("p");
+    const normalizedHour = hoursRaw % 12 + (isPm ? 12 : 0);
+    return normalizedHour * 60 + minutesRaw;
+  }
+
+  if (hoursRaw < 0 || hoursRaw > 23) return null;
+  return hoursRaw * 60 + minutesRaw;
+}
+
+function sanitizeAthleteCategories(raw: unknown): string[] {
+  return (Array.isArray(raw) ? raw : [])
+    .map((c) => String(c ?? "").trim())
+    .filter(Boolean);
+}
+
+function toAthleteDraftFromRow(row: TeamWorkoutRow): AthleteDraft {
+  const categories = sanitizeAthleteCategories(row.categories);
+  const primary = String(row.primary_category ?? "").trim();
+  return {
+    session: normalizeSession(row.session),
+    location: String(row.location ?? ""),
+    time_text: String(row.time_text ?? ""),
+    details: String(row.details ?? ""),
+    primary_category: primary,
+    categories: categories.length > 0 ? categories : (primary ? [primary] : []),
+  };
+}
+
+function toAthleteCloudPatch(draft: AthleteDraft): Partial<TeamWorkoutRow> {
+  return {
+    session: normalizeSession(draft.session),
+    location: String(draft.location ?? "").trim() || null,
+    time_text: String(draft.time_text ?? "").trim() || null,
+    details: String(draft.details ?? "").trim() || null,
+    primary_category: String(draft.primary_category ?? "").trim() || null,
+    categories: sanitizeAthleteCategories(draft.categories),
+  };
+}
+
+function toSavedAthleteDraftSnapshot(draft: AthleteDraft): AthleteDraft {
+  return {
+    session: normalizeSession(draft.session),
+    location: String(draft.location ?? ""),
+    time_text: String(draft.time_text ?? ""),
+    details: String(draft.details ?? ""),
+    primary_category: String(draft.primary_category ?? ""),
+    categories: sanitizeAthleteCategories(draft.categories),
+  };
+}
+
+function sanitizeBatchCategoriesForPatch(raw: unknown): string[] {
+  return (Array.isArray(raw) ? raw : [])
+    .map((c) => String(c ?? "").trim())
+    .filter((c) => !!c && c.toLowerCase() !== "other");
+}
+
+function toBatchCloudPatchFromDraft(
+  draft: BatchDraft,
+  dirtyKeys: BatchEditableField[]
+): Partial<TeamWorkoutRow> {
+  const payload: Partial<TeamWorkoutRow> = {};
+  dirtyKeys.forEach((k) => {
+    if (k === "session") payload.session = normalizeSession(draft.session);
+    if (k === "date_iso") (payload as any).date_iso = String(draft.date_iso ?? "").trim() || null;
+    if (k === "title") payload.title = String(draft.title ?? "").trim() || "Workout";
+    if (k === "location") payload.location = String(draft.location ?? "").trim() || null;
+    if (k === "time_text") payload.time_text = String(draft.time_text ?? "").trim() || null;
+    if (k === "details") payload.details = String(draft.details ?? "").trim() || null;
+    if (k === "primary_category") payload.primary_category = String(draft.primary_category ?? "").trim() || null;
+    if (k === "categories") {
+      const cleaned = sanitizeBatchCategoriesForPatch(draft.categories);
+      payload.categories = cleaned;
+      payload.primary_category = cleaned[0] ?? null;
+    }
+  });
+  return payload;
+}
+
 function createBatchId(dateISO: string): string {
   const suffix = Math.random().toString(36).slice(2, 8);
   return `bat_${dateISO}_${suffix}`;
@@ -1060,6 +1139,12 @@ function isISODateOnly(value: string): boolean {
   const mm = String(dt.getMonth() + 1).padStart(2, "0");
   const dd = String(dt.getDate()).padStart(2, "0");
   return `${yy}-${mm}-${dd}` === `${String(value ?? "").trim()}`;
+}
+
+function isLikelyConnectivityError(message: unknown): boolean {
+  const text = String(message ?? "").toLowerCase();
+  if (!text) return false;
+  return /network|offline|internet|connection|fetch|timed? out|timeout/.test(text);
 }
 
 function getBatchKey(row: TeamWorkoutRow): string {
@@ -1107,17 +1192,10 @@ function makeNewGroupId(): string {
   return `group_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function saveStatusText(state?: SaveState): string {
-  if (!state || state.status === "idle") return "";
-  if (state.status === "saving") return "Saving...";
-  if (state.status === "saved") return "Saved";
-  return "Error";
-}
-
 export default function CoachWorkoutsDay() {
   const router = useRouter();
   const { patch: patchAppRuntime } = useAppRuntime();
-  const { date, refresh, batch } = useLocalSearchParams<{ date?: string; refresh?: string | string[]; batch?: string | string[] }>();
+  const { date, batch } = useLocalSearchParams<{ date?: string; batch?: string | string[] }>();
 
   const dayISO = String(date ?? "");
   const batchParam = useMemo(() => {
@@ -1130,12 +1208,18 @@ export default function CoachWorkoutsDay() {
   const batchSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const batchRoutineSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const athleteSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const rowElByWorkoutId = useRef<Record<string, HTMLElement | null>>({});
   const savedAthleteDraftsRef = useRef<Record<string, AthleteDraft>>({});
   const batchDraftsRef = useRef<Record<string, BatchDraft>>({});
   const batchDirtyFieldsRef = useRef<Record<string, Partial<Record<BatchEditableField, true>>>>({});
   const athleteDraftsRef = useRef<Record<string, AthleteDraft>>({});
+  const groupedAthletesCacheRef = useRef<Record<string, Record<string, GroupedAthleteRows>>>({});
+  const groupAthleteSliceCacheRef = useRef<Record<string, GroupAthletePropSlices>>({});
   const mileageDistanceRequestRef = useRef(0);
+  const workoutsScrollRef = useRef<ScrollView | null>(null);
+  const batchHeaderYByKeyRef = useRef<Record<string, number>>({});
+  const alreadyScrolledForBatchRef = useRef<string | null>(null);
+  const previousDayISORef = useRef<string | null>(null);
+  const flushPendingEditsRef = useRef<() => Promise<void>>(async () => {});
 
   const [loading, setLoading] = useState(true);
   const [rowsRaw, setRowsRaw] = useState<TeamWorkoutRow[]>([]);
@@ -1144,8 +1228,6 @@ export default function CoachWorkoutsDay() {
 
   const [expandedByBatchKey, setExpandedByBatchKey] = useState<Record<string, boolean>>({});
   const [groupOrderByBatch, setGroupOrderByBatch] = useState<Record<string, string[]>>({});
-  const [draggingWorkoutId, setDraggingWorkoutId] = useState<string | null>(null);
-  const [dragOverTargetGroupId, setDragOverTargetGroupId] = useState<string | null>(null);
   const [justMovedWorkoutId, setJustMovedWorkoutId] = useState<string | null>(null);
   const [moveMode, setMoveMode] = useState<{
     workoutId: string;
@@ -1153,6 +1235,12 @@ export default function CoachWorkoutsDay() {
     batchId: string;
     fromGroupId: string | null;
   } | null>(null);
+  const [webDragMove, setWebDragMove] = useState<WebDragMoveState | null>(null);
+  const [webDragGhost, setWebDragGhost] = useState<WebDragGhostState | null>(null);
+  const [dragOverGroupKey, setDragOverGroupKey] = useState<string | null>(null);
+  const webDragGhostCloneRef = useRef<HTMLElement | null>(null);
+  const webDragGhostHostRef = useRef<HTMLDivElement | null>(null);
+  const [webDragGhostUsingClone, setWebDragGhostUsingClone] = useState(false);
 
   const [batchDrafts, setBatchDrafts] = useState<Record<string, BatchDraft>>({});
   const [batchDirtyFields, setBatchDirtyFields] = useState<Record<string, Partial<Record<BatchEditableField, true>>>>({});
@@ -1168,7 +1256,15 @@ export default function CoachWorkoutsDay() {
   const [selectedByGroup, setSelectedByGroup] = useState<Record<string, GroupSelectionMeta>>({});
   const [groupGridApis, setGroupGridApis] = useState<Record<string, GroupGridApi>>({});
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
+  const categoryNames = useMemo(
+    () =>
+      (Array.isArray(categories) ? categories : [])
+        .map((c) => String((c as any)?.name ?? "").trim())
+        .filter((name) => !!name && name.toLowerCase() !== "other"),
+    [categories]
+  );
   const [auxiliaryRoutines, setAuxiliaryRoutines] = useState<AuxiliaryRoutine[]>([]);
+  const [practiceDefaults, setPracticeDefaults] = useState<PracticeTimeDefaults>(emptyPracticeTimeDefaults());
   const [batchCategorySlots, setBatchCategorySlots] = useState<Record<string, string[]>>({});
   const [batchPreRoutineSlots, setBatchPreRoutineSlots] = useState<Record<string, string[]>>({});
   const [batchPostRoutineSlots, setBatchPostRoutineSlots] = useState<Record<string, string[]>>({});
@@ -1183,19 +1279,46 @@ export default function CoachWorkoutsDay() {
   const [batchPickerQuery, setBatchPickerQuery] = useState("");
   const [activeGridId, setActiveGridId] = useState<string | null>(null);
   const [highlightBatchKey, setHighlightBatchKey] = useState<string | null>(null);
-  const [pickerBatchKey, setPickerBatchKey] = useState<string | null>(null);
-  const [athleteMenuBatchKey, setAthleteMenuBatchKey] = useState<string | null>(null);
+  const [openAthletePickerBatchKey, setOpenAthletePickerBatchKey] = useState<string | null>(null);
+  const [openGroupCategoryPickerKey, setOpenGroupCategoryPickerKey] = useState<string | null>(null);
   const [removingAthleteId, setRemovingAthleteId] = useState<string | null>(null);
   const [pendingRemovedAthleteKeys, setPendingRemovedAthleteKeys] = useState<Set<string>>(new Set());
-  const [pickerQuery, setPickerQuery] = useState("");
+  const [athletePickerQuery, setAthletePickerQuery] = useState("");
   const [addingAthleteId, setAddingAthleteId] = useState<string | null>(null);
   const [creatingBatch, setCreatingBatch] = useState(false);
+  const [saveSignalTick, setSaveSignalTick] = useState(0);
+  const [lastSavedAtMs, setLastSavedAtMs] = useState<number | null>(null);
   const justMovedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchHeaderInputRefs = useRef<Record<string, any>>({});
   const batchHeaderRegionRefs = useRef<Record<string, any>>({});
   const batchHeaderRootRef = useRef<any>(null);
   const headerBlurTimerRef = useRef<any>(null);
   const loadVersionRef = useRef(0);
+
+  const bumpSaveSignal = useCallback(() => {
+    setSaveSignalTick((prev) => prev + 1);
+  }, []);
+
+  const markSavedNow = useCallback(() => {
+    setLastSavedAtMs(Date.now());
+  }, []);
+
+  const handleGroupSelectionMetaChange = useCallback((groupKey: string, meta: GroupSelectionMeta) => {
+    setSelectedByGroup((prev) => ({ ...prev, [groupKey]: meta }));
+  }, []);
+
+  const handleRegisterGroupGridApi = useCallback((groupKey: string, api: GroupGridApi | null) => {
+    setGroupGridApis((prev) => {
+      if (!api) {
+        if (!(groupKey in prev)) return prev;
+        const next = { ...prev };
+        delete next[groupKey];
+        return next;
+      }
+      if (prev[groupKey] === api) return prev;
+      return { ...prev, [groupKey]: api };
+    });
+  }, []);
 
   useEffect(() => {
     batchDraftsRef.current = batchDrafts;
@@ -1374,18 +1497,7 @@ export default function CoachWorkoutsDay() {
       });
 
       nextRows.forEach((w) => {
-        const categoriesForRow = (Array.isArray(w.categories) ? w.categories : [])
-          .map((c) => String(c ?? "").trim())
-          .filter(Boolean);
-        const primary = String(w.primary_category ?? "").trim();
-        nextAthleteDrafts[String(w.id)] = {
-          session: normalizeSession(w.session),
-          location: String(w.location ?? ""),
-          time_text: String(w.time_text ?? ""),
-          details: String(w.details ?? ""),
-          primary_category: primary,
-          categories: categoriesForRow.length > 0 ? categoriesForRow : (primary ? [primary] : []),
-        };
+        nextAthleteDrafts[String(w.id)] = toAthleteDraftFromRow(w);
       });
 
       setBatchDrafts(nextBatchDrafts);
@@ -1473,8 +1585,6 @@ export default function CoachWorkoutsDay() {
   useEffect(() => {
     patchAppRuntime({
       activeDateISO: dayISO || null,
-      activeBatchId: batchParam || null,
-      selectedBatchHighlight: highlightBatchKey,
     });
   }, [batchParam, dayISO, highlightBatchKey, patchAppRuntime]);
 
@@ -1482,6 +1592,10 @@ export default function CoachWorkoutsDay() {
     let mounted = true;
     (async () => {
       try {
+        const previousDayISO = previousDayISORef.current;
+        if (previousDayISO && previousDayISO !== dayISO) {
+          await flushPendingEditsRef.current();
+        }
         setLoading(true);
         await refreshDayGuarded(dayISO);
       } catch (e: any) {
@@ -1489,14 +1603,17 @@ export default function CoachWorkoutsDay() {
         patchAppRuntime({ lastSaveError: String(e?.message ?? e ?? "Could not load daily workouts.") });
         Alert.alert("Load failed", e?.message ?? "Could not load daily workouts.");
       } finally {
-        if (mounted) setLoading(false);
+        if (mounted) {
+          previousDayISORef.current = dayISO;
+          setLoading(false);
+        }
       }
     })();
 
     return () => {
       mounted = false;
     };
-  }, [dayISO, refresh, patchAppRuntime, refreshDayGuarded]);
+  }, [dayISO, patchAppRuntime, refreshDayGuarded]);
 
   useEffect(() => {
     const dirtyBatchCount = Object.values(batchDirtyFields).filter((dirty) => Object.keys(dirty ?? {}).length > 0).length;
@@ -1528,16 +1645,88 @@ export default function CoachWorkoutsDay() {
   }, [batchParam, dayISO]);
 
   useEffect(() => {
+    alreadyScrolledForBatchRef.current = null;
+  }, [batchParam, dayISO]);
+
+  useEffect(() => {
+    if (!batchParam || loading) return;
+    const key = `batch:${batchParam}`;
+    if (alreadyScrolledForBatchRef.current === key) return;
+    const y = batchHeaderYByKeyRef.current[key];
+    if (!Number.isFinite(y)) return;
+    workoutsScrollRef.current?.scrollTo?.({ y: Math.max(0, Number(y) - 72), animated: true });
+    alreadyScrolledForBatchRef.current = key;
+  }, [batchParam, loading, rowsRaw.length]);
+
+  useEffect(() => {
     setActiveGridId(null);
+    setOpenGroupCategoryPickerKey(null);
   }, [dayISO]);
+
+  const setWebDragGhostClone = useCallback((clone: HTMLElement | null) => {
+    const prev = webDragGhostCloneRef.current;
+    if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+    webDragGhostCloneRef.current = clone;
+    setWebDragGhostUsingClone(!!clone);
+    const host = webDragGhostHostRef.current;
+    if (host) {
+      host.innerHTML = "";
+      if (clone) host.appendChild(clone);
+      return;
+    }
+  }, []);
+
+  const clearWebDragGhost = useCallback(() => {
+    setWebDragGhost(null);
+    setWebDragGhostClone(null);
+    setWebDragGhostUsingClone(false);
+  }, [setWebDragGhostClone]);
+
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    if (!webDragGhost) return;
+    const onDragOver = (event: DragEvent) => {
+      const x = Number(event.clientX ?? 0);
+      const y = Number(event.clientY ?? 0);
+      if (!(x > 0 || y > 0)) return;
+      setWebDragGhost((prev) => (prev ? { ...prev, x, y } : prev));
+    };
+    const clearGhost = () => clearWebDragGhost();
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", clearGhost);
+    window.addEventListener("dragend", clearGhost);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("drop", clearGhost);
+      window.removeEventListener("dragend", clearGhost);
+    };
+  }, [clearWebDragGhost, webDragGhost]);
+
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const host = webDragGhostHostRef.current;
+    if (!host) return;
+    host.innerHTML = "";
+    if (webDragGhost && webDragGhostCloneRef.current) {
+      host.appendChild(webDragGhostCloneRef.current);
+      setWebDragGhostUsingClone(host.childElementCount > 0);
+      return;
+    }
+    setWebDragGhostUsingClone(false);
+  }, [webDragGhost?.workoutId, webDragGhost?.batchKey]);
 
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const [stored, routines] = await Promise.all([loadCoachCategories(), loadAuxiliaryRoutines()]);
+      const [stored, routines, defaults] = await Promise.all([
+        loadCoachCategories(),
+        loadAuxiliaryRoutines(),
+        loadPracticeTimeDefaults(),
+      ]);
       if (!mounted) return;
       setCategories(stored);
       setAuxiliaryRoutines(Array.isArray(routines) ? routines : []);
+      setPracticeDefaults(defaults);
     })();
     return () => {
       mounted = false;
@@ -1642,6 +1831,8 @@ export default function CoachWorkoutsDay() {
   }, [activateBatchHeaderField, focusBatchHeaderField, getBatchHeaderNeighborField]);
 
   const worksheetBatches = useMemo<WorksheetBatchRow[]>(() => {
+    const previousCache = groupedAthletesCacheRef.current;
+    const nextCache: Record<string, Record<string, GroupedAthleteRows>> = {};
     const map = new Map<string, TeamWorkoutRow[]>();
     const visibleRows = rowsRaw.filter((w) => {
       const batchId = String(w.batch_id ?? "").trim();
@@ -1679,6 +1870,8 @@ export default function CoachWorkoutsDay() {
         .concat(presentOrder.filter((encoded) => !preferredOrder.includes(encoded)))
         .map((encoded) => decodeGroupOrderId(encoded));
 
+      const previousGroupsByKey = previousCache[key] ?? {};
+      const nextGroupsByKey: Record<string, GroupedAthleteRows> = {};
       const groupedAthletes: GroupedAthleteRows[] = orderedGroupIds.map((groupId, index) => {
           const groupRows = groupedByGroup.get(groupId) ?? [];
           const sortedRows = [...groupRows].sort((a, b) => {
@@ -1686,12 +1879,27 @@ export default function CoachWorkoutsDay() {
             const nb = String(rosterNameById.get(String(b.athlete_profile_id ?? "").trim()) ?? "");
             return compareAthleteDisplayNamesByLastName(na, nb);
           });
-          return {
+          const groupLabel = `Group ${index + 1}`;
+          const groupKey = buildGroupKey(key, groupId);
+          const previousGroup = previousGroupsByKey[groupKey];
+          if (
+            previousGroup &&
+            previousGroup.groupId === groupId &&
+            previousGroup.groupLabel === groupLabel &&
+            areOrderedGroupRowsUnchanged(previousGroup.rows, sortedRows)
+          ) {
+            nextGroupsByKey[groupKey] = previousGroup;
+            return previousGroup;
+          }
+          const nextGroup: GroupedAthleteRows = {
             groupId,
-            groupLabel: `Group ${index + 1}`,
+            groupLabel,
             rows: sortedRows,
           };
+          nextGroupsByKey[groupKey] = nextGroup;
+          return nextGroup;
         });
+      nextCache[key] = nextGroupsByKey;
 
       return {
         key,
@@ -1703,20 +1911,91 @@ export default function CoachWorkoutsDay() {
       };
     });
 
-    rows.sort((a, b) => {
-      const sa = String(a.sample.session ?? "");
-      const sb = String(b.sample.session ?? "");
-      if (sa !== sb) return sa.localeCompare(sb);
-      const ta = String(a.sample.time_text ?? "").trim();
-      const tb = String(b.sample.time_text ?? "").trim();
-      if (!ta && tb) return -1;
-      if (ta && !tb) return 1;
-      if (ta !== tb) return ta.localeCompare(tb);
-      return String(a.sample.title ?? "").localeCompare(String(b.sample.title ?? ""));
+    const indexedRows = rows.map((row, index) => ({ row, index }));
+    indexedRows.sort((left, right) => {
+      const leftSession = normalizeSession(
+        String(batchDrafts[left.row.key]?.session ?? left.row.sample.session ?? "")
+      );
+      const rightSession = normalizeSession(
+        String(batchDrafts[right.row.key]?.session ?? right.row.sample.session ?? "")
+      );
+      const leftSessionRank = leftSession === "AM" ? 0 : 1;
+      const rightSessionRank = rightSession === "AM" ? 0 : 1;
+      if (leftSessionRank !== rightSessionRank) return leftSessionRank - rightSessionRank;
+
+      const leftTimeText = String(batchDrafts[left.row.key]?.time_text ?? left.row.sample.time_text ?? "").trim();
+      const rightTimeText = String(batchDrafts[right.row.key]?.time_text ?? right.row.sample.time_text ?? "").trim();
+      const leftMinutes = parseTimeTextToSortableMinutes(leftTimeText);
+      const rightMinutes = parseTimeTextToSortableMinutes(rightTimeText);
+      const leftHasUsableTime = leftMinutes != null;
+      const rightHasUsableTime = rightMinutes != null;
+
+      if (leftHasUsableTime !== rightHasUsableTime) return leftHasUsableTime ? -1 : 1;
+      if (leftHasUsableTime && rightHasUsableTime && leftMinutes !== rightMinutes) {
+        return (leftMinutes as number) - (rightMinutes as number);
+      }
+
+      return left.index - right.index;
+    });
+    const sortedRows = indexedRows.map((entry) => entry.row);
+
+    groupedAthletesCacheRef.current = nextCache;
+    return sortedRows;
+  }, [batchDrafts, groupOrderByBatch, pendingRemovedAthleteKeys, rowsRaw, rosterNameById]);
+
+  const getCachedGroupAthleteSlices = useCallback(
+    (groupKey: string, groupWorkoutIds: string[]): GroupAthletePropSlices => {
+      const previous = groupAthleteSliceCacheRef.current[groupKey];
+      if (
+        areGroupAthleteSlicesUnchanged(
+          previous,
+          groupWorkoutIds,
+          athleteDrafts,
+          athleteSaveState,
+          prescribedDistanceByWorkoutId
+        )
+      ) {
+        return previous as GroupAthletePropSlices;
+      }
+
+      const nextAthleteDrafts: Record<string, AthleteDraft> = {};
+      const nextAthleteSaveState: Record<string, SaveState> = {};
+      const nextPrescribedDistanceByWorkoutId: Record<string, string> = {};
+
+      groupWorkoutIds.forEach((workoutId) => {
+        const draft = athleteDrafts[workoutId];
+        if (draft) nextAthleteDrafts[workoutId] = draft;
+        const saveState = athleteSaveState[workoutId];
+        if (saveState) nextAthleteSaveState[workoutId] = saveState;
+        const prescribed = resolvePrescribedForSlice(prescribedDistanceByWorkoutId, workoutId);
+        if (prescribed) nextPrescribedDistanceByWorkoutId[workoutId] = prescribed;
+      });
+
+      const next: GroupAthletePropSlices = {
+        workoutIds: [...groupWorkoutIds],
+        athleteDrafts: nextAthleteDrafts,
+        athleteSaveState: nextAthleteSaveState,
+        prescribedDistanceByWorkoutId: nextPrescribedDistanceByWorkoutId,
+      };
+      groupAthleteSliceCacheRef.current[groupKey] = next;
+      return next;
+    },
+    [athleteDrafts, athleteSaveState, prescribedDistanceByWorkoutId]
+  );
+
+  useEffect(() => {
+    const activeGroupKeys = new Set<string>();
+    worksheetBatches.forEach((batchRow) => {
+      batchRow.groupedAthletes.forEach((group) => {
+        activeGroupKeys.add(buildGroupKey(batchRow.key, group.groupId));
+      });
     });
 
-    return rows;
-  }, [groupOrderByBatch, pendingRemovedAthleteKeys, rowsRaw, rosterNameById]);
+    const cache = groupAthleteSliceCacheRef.current;
+    Object.keys(cache).forEach((groupKey) => {
+      if (!activeGroupKeys.has(groupKey)) delete cache[groupKey];
+    });
+  }, [worksheetBatches]);
 
   useEffect(() => {
     setBatchCategorySlots((prev) => {
@@ -1808,7 +2087,7 @@ export default function CoachWorkoutsDay() {
         next[batchKey] = { status: "idle" };
         return next;
       });
-    }, 900);
+    }, 2000);
   };
 
   const setAthleteSavedSoonIdle = (workoutId: string) => {
@@ -1819,7 +2098,7 @@ export default function CoachWorkoutsDay() {
         next[workoutId] = { status: "idle" };
         return next;
       });
-    }, 900);
+    }, 2000);
   };
 
   const commitBatchEdit = useCallback(
@@ -1842,23 +2121,7 @@ export default function CoachWorkoutsDay() {
         }
       }
 
-      const payload: Partial<TeamWorkoutRow> = {};
-      dirtyKeys.forEach((k) => {
-        if (k === "session") payload.session = normalizeSession(draft.session);
-        if (k === "date_iso") (payload as any).date_iso = String(draft.date_iso ?? "").trim() || null;
-        if (k === "title") payload.title = String(draft.title ?? "").trim() || "Workout";
-        if (k === "location") payload.location = String(draft.location ?? "").trim() || null;
-        if (k === "time_text") payload.time_text = String(draft.time_text ?? "").trim() || null;
-        if (k === "details") payload.details = String(draft.details ?? "").trim() || null;
-        if (k === "primary_category") payload.primary_category = String(draft.primary_category ?? "").trim() || null;
-        if (k === "categories") {
-          const cleaned = (Array.isArray(draft.categories) ? draft.categories : [])
-            .map((c) => String(c ?? "").trim())
-            .filter((c) => !!c && c.toLowerCase() !== "other");
-          payload.categories = cleaned;
-          payload.primary_category = cleaned[0] ?? null;
-        }
-      });
+      const payload = toBatchCloudPatchFromDraft(draft, dirtyKeys);
 
       if (Object.keys(payload).length === 0) return;
 
@@ -1884,13 +2147,14 @@ export default function CoachWorkoutsDay() {
           setBatchDirtyFields((prev) => ({ ...prev, [batchKey]: {} }));
           setBatchSaveState((prev) => ({ ...prev, [batchKey]: { status: "saved" } }));
           setBatchSavedSoonIdle(batchKey);
+          markSavedNow();
         }
         console.log("[workouts] commitBatchEdit:success", { batchKey, dirtyKeys });
         const nextDateISO = String(draft.date_iso ?? "").trim();
         if (!isUnmountingRef.current && isISODateOnly(nextDateISO) && nextDateISO !== dayISO) {
           router.replace({
             pathname: "/(coach)/workouts",
-            params: { date: nextDateISO, refresh: Date.now().toString() },
+            params: { date: nextDateISO },
           });
         }
       } catch (e: any) {
@@ -1906,18 +2170,21 @@ export default function CoachWorkoutsDay() {
         }
       }
     },
-    [dayISO, router]
+    [dayISO, markSavedNow, router]
   );
 
   const scheduleBatchSave = useCallback(
     (batchKey: string, delayMs = 450) => {
       const current = batchSaveTimersRef.current[batchKey];
       if (current) clearTimeout(current);
+      bumpSaveSignal();
       batchSaveTimersRef.current[batchKey] = setTimeout(() => {
+        delete batchSaveTimersRef.current[batchKey];
+        bumpSaveSignal();
         void commitBatchEdit(batchKey);
       }, delayMs);
     },
-    [commitBatchEdit]
+    [bumpSaveSignal, commitBatchEdit]
   );
 
   const scheduleBatchRoutineSave = useCallback(
@@ -1926,7 +2193,10 @@ export default function CoachWorkoutsDay() {
       const current = batchRoutineSaveTimersRef.current[timerKey];
       if (current) clearTimeout(current);
       setBatchSaveState((prev) => ({ ...prev, [batchKey]: { status: "saving" } }));
+      bumpSaveSignal();
       batchRoutineSaveTimersRef.current[timerKey] = setTimeout(async () => {
+        delete batchRoutineSaveTimersRef.current[timerKey];
+        bumpSaveSignal();
         try {
           const parsed = parseBatchKey(batchKey);
           const payload =
@@ -1940,6 +2210,7 @@ export default function CoachWorkoutsDay() {
           }
           setBatchSaveState((prev) => ({ ...prev, [batchKey]: { status: "saved" } }));
           setBatchSavedSoonIdle(batchKey);
+          markSavedNow();
         } catch (e: any) {
           setBatchSaveState((prev) => ({
             ...prev,
@@ -1948,7 +2219,7 @@ export default function CoachWorkoutsDay() {
         }
       }, delayMs);
     },
-    []
+    [bumpSaveSignal, markSavedNow]
   );
 
   const commitAthleteEdit = useCallback(
@@ -1956,16 +2227,7 @@ export default function CoachWorkoutsDay() {
       const draft = athleteDraftsRef.current[workoutId];
       if (!draft) return;
 
-      const payload: Partial<TeamWorkoutRow> = {
-        session: normalizeSession(draft.session),
-        location: String(draft.location ?? "").trim() || null,
-        time_text: String(draft.time_text ?? "").trim() || null,
-        details: String(draft.details ?? "").trim() || null,
-        primary_category: String(draft.primary_category ?? "").trim() || null,
-        categories: (Array.isArray(draft.categories) ? draft.categories : [])
-          .map((c) => String(c ?? "").trim())
-          .filter(Boolean),
-      };
+      const payload = toAthleteCloudPatch(draft);
 
       if (!isUnmountingRef.current) {
         setAthleteSaveState((prev) => ({ ...prev, [workoutId]: { status: "saving" } }));
@@ -1974,19 +2236,11 @@ export default function CoachWorkoutsDay() {
       try {
         await updateTeamWorkoutById(workoutId, payload);
 
-        savedAthleteDraftsRef.current[workoutId] = {
-          session: normalizeSession(draft.session),
-          location: String(draft.location ?? ""),
-          time_text: String(draft.time_text ?? ""),
-          details: String(draft.details ?? ""),
-          primary_category: String(draft.primary_category ?? ""),
-          categories: (Array.isArray(draft.categories) ? draft.categories : [])
-            .map((c) => String(c ?? "").trim())
-            .filter(Boolean),
-        };
+        savedAthleteDraftsRef.current[workoutId] = toSavedAthleteDraftSnapshot(draft);
         if (!isUnmountingRef.current) {
           setAthleteSaveState((prev) => ({ ...prev, [workoutId]: { status: "saved" } }));
           setAthleteSavedSoonIdle(workoutId);
+          markSavedNow();
         }
       } catch (e: any) {
         if (!isUnmountingRef.current) {
@@ -1997,18 +2251,21 @@ export default function CoachWorkoutsDay() {
         }
       }
     },
-    []
+    [markSavedNow]
   );
 
   const scheduleAthleteSave = useCallback(
     (workoutId: string, delayMs = 600) => {
       const current = athleteSaveTimersRef.current[workoutId];
       if (current) clearTimeout(current);
+      bumpSaveSignal();
       athleteSaveTimersRef.current[workoutId] = setTimeout(() => {
+        delete athleteSaveTimersRef.current[workoutId];
+        bumpSaveSignal();
         void commitAthleteEdit(workoutId);
       }, delayMs);
     },
-    [commitAthleteEdit]
+    [bumpSaveSignal, commitAthleteEdit]
   );
 
   const flushAllPendingBatchSaves = useCallback(async () => {
@@ -2018,6 +2275,7 @@ export default function CoachWorkoutsDay() {
       if (timer) clearTimeout(timer);
       delete batchSaveTimersRef.current[batchKey];
     });
+    if (timedBatchKeys.length > 0) bumpSaveSignal();
 
     const dirtyBatchKeys = Object.entries(batchDirtyFieldsRef.current)
       .filter(([, dirty]) => Object.keys(dirty ?? {}).length > 0)
@@ -2033,7 +2291,7 @@ export default function CoachWorkoutsDay() {
     for (const batchKey of batchKeysToFlush) {
       await commitBatchEdit(batchKey);
     }
-  }, [commitBatchEdit]);
+  }, [bumpSaveSignal, commitBatchEdit]);
 
   const flushAllPendingAthleteSaves = useCallback(async () => {
     const timedWorkoutIds = Object.keys(athleteSaveTimersRef.current);
@@ -2042,6 +2300,7 @@ export default function CoachWorkoutsDay() {
       if (timer) clearTimeout(timer);
       delete athleteSaveTimersRef.current[workoutId];
     });
+    if (timedWorkoutIds.length > 0) bumpSaveSignal();
 
     const changedWorkoutIds = Object.entries(athleteDraftsRef.current)
       .filter(([workoutId, draft]) => {
@@ -2058,7 +2317,137 @@ export default function CoachWorkoutsDay() {
     for (const workoutId of workoutIds) {
       await commitAthleteEdit(workoutId);
     }
-  }, [commitAthleteEdit]);
+  }, [bumpSaveSignal, commitAthleteEdit]);
+
+  useEffect(() => {
+    flushPendingEditsRef.current = async () => {
+      await flushAllPendingBatchSaves();
+      await flushAllPendingAthleteSaves();
+    };
+  }, [flushAllPendingAthleteSaves, flushAllPendingBatchSaves]);
+
+  const hasQueuedDebounceSaves = useMemo(() => {
+    return (
+      Object.keys(batchSaveTimersRef.current).length > 0 ||
+      Object.keys(batchRoutineSaveTimersRef.current).length > 0 ||
+      Object.keys(athleteSaveTimersRef.current).length > 0
+    );
+  }, [saveSignalTick]);
+
+  const queuedDebounceSaveCount = useMemo(() => {
+    return (
+      Object.keys(batchSaveTimersRef.current).length +
+      Object.keys(batchRoutineSaveTimersRef.current).length +
+      Object.keys(athleteSaveTimersRef.current).length
+    );
+  }, [saveSignalTick]);
+
+  const hasPendingBatchChanges = useMemo(
+    () => Object.values(batchDirtyFields).some((dirty) => Object.keys(dirty ?? {}).length > 0),
+    [batchDirtyFields]
+  );
+
+  const hasPendingAthleteChanges = useMemo(() => {
+    const drafts = athleteDrafts;
+    for (const workoutId of Object.keys(drafts)) {
+      const draft = drafts[workoutId];
+      const saved = savedAthleteDraftsRef.current[workoutId];
+      if (!saved) return true;
+      if (JSON.stringify(draft) !== JSON.stringify(saved)) return true;
+    }
+    return false;
+  }, [athleteDrafts, athleteSaveState]);
+
+  const firstBatchError = useMemo(
+    () => Object.values(batchSaveState).find((state) => state?.status === "error"),
+    [batchSaveState]
+  );
+  const firstAthleteError = useMemo(
+    () => Object.values(athleteSaveState).find((state) => state?.status === "error"),
+    [athleteSaveState]
+  );
+  const firstSaveError = firstBatchError ?? firstAthleteError;
+
+  const anySaving = useMemo(() => {
+    const batchSaving = Object.values(batchSaveState).some((state) => state?.status === "saving");
+    if (batchSaving) return true;
+    return Object.values(athleteSaveState).some((state) => state?.status === "saving");
+  }, [athleteSaveState, batchSaveState]);
+
+  const anySavedRecently = useMemo(() => {
+    const batchSaved = Object.values(batchSaveState).some((state) => state?.status === "saved");
+    if (batchSaved) return true;
+    return Object.values(athleteSaveState).some((state) => state?.status === "saved");
+  }, [athleteSaveState, batchSaveState]);
+
+  const showPendingEdits = hasPendingBatchChanges || hasPendingAthleteChanges || hasQueuedDebounceSaves;
+
+  const pendingChangeCount = useMemo(() => {
+    const pendingBatchCount = Object.values(batchDirtyFields).filter((dirty) => Object.keys(dirty ?? {}).length > 0).length;
+    let pendingAthleteCount = 0;
+    const drafts = athleteDrafts;
+    for (const workoutId of Object.keys(drafts)) {
+      const draft = drafts[workoutId];
+      const saved = savedAthleteDraftsRef.current[workoutId];
+      if (!saved || JSON.stringify(draft) !== JSON.stringify(saved)) pendingAthleteCount += 1;
+    }
+    return pendingBatchCount + pendingAthleteCount;
+  }, [athleteDrafts, batchDirtyFields, athleteSaveState]);
+
+  const lastSavedLabel = useMemo(() => {
+    if (!lastSavedAtMs) return "";
+    return new Date(lastSavedAtMs).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  }, [lastSavedAtMs]);
+
+  const headerSaveDisplay = useMemo<HeaderSaveDisplayState>(() => {
+    if (firstSaveError) {
+      return {
+        kind: "error",
+        message: firstSaveError.message,
+        detail: isLikelyConnectivityError(firstSaveError.message)
+          ? "Sync delayed. Retry will happen on your next save attempt."
+          : undefined,
+      };
+    }
+    if (anySaving) {
+      const activeCount = Math.max(1, pendingChangeCount);
+      return {
+        kind: "saving",
+        detail: activeCount === 1 ? "Saving 1 change..." : `Saving ${activeCount} changes...`,
+      };
+    }
+    if (showPendingEdits) {
+      const pendingText =
+        pendingChangeCount > 0
+          ? pendingChangeCount === 1
+            ? "1 change pending"
+            : `${pendingChangeCount} changes pending`
+          : "Pending save";
+      const queuedText =
+        queuedDebounceSaveCount > 0
+          ? queuedDebounceSaveCount === 1
+            ? "Autosave queued"
+            : `${queuedDebounceSaveCount} autosaves queued`
+          : undefined;
+      return { kind: "pending", detail: queuedText ? `${pendingText} • ${queuedText}` : pendingText };
+    }
+    if (anySavedRecently || lastSavedAtMs) {
+      return {
+        kind: "saved",
+        detail: lastSavedLabel ? `Saved at ${lastSavedLabel}` : "All changes saved",
+      };
+    }
+    return { kind: "idle", detail: "No unsaved changes" };
+  }, [
+    anySavedRecently,
+    anySaving,
+    firstSaveError,
+    lastSavedAtMs,
+    lastSavedLabel,
+    pendingChangeCount,
+    queuedDebounceSaveCount,
+    showPendingEdits,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -2076,6 +2465,13 @@ export default function CoachWorkoutsDay() {
 
   const onEditBatchField = (batchKey: string, field: BatchEditableField, value: string | string[]) => {
     console.log("[workouts] onEditBatchField", { batchKey, field, value });
+    const parsed = parseBatchKey(batchKey);
+    const matchingRows = rowsRaw.filter((w) =>
+      parsed.isBatch
+        ? String(w.batch_id ?? "").trim() === parsed.id
+        : String(w.id) === parsed.id
+    );
+
     setBatchDrafts((prev) => {
       const current = prev[batchKey] ?? ({} as BatchDraft);
       const nextDraft =
@@ -2088,6 +2484,25 @@ export default function CoachWorkoutsDay() {
                 primary_category: cleaned[0] ?? "",
               };
             })()
+          : field === "session"
+            ? (() => {
+                const nextSession = normalizeSession(String(value ?? ""));
+                const fallbackRow = matchingRows[0];
+                const currentSession = normalizeSession(String(current.session ?? fallbackRow?.session ?? "AM"));
+                const effectiveDateISO = String(current.date_iso ?? fallbackRow?.date_iso ?? "").trim();
+                const nextTimeText = resolveSessionSwitchTime({
+                  dateISO: effectiveDateISO,
+                  defaults: practiceDefaults,
+                  fromSession: currentSession,
+                  toSession: nextSession,
+                  currentTimeText: String(current.time_text ?? fallbackRow?.time_text ?? ""),
+                });
+                return {
+                  ...current,
+                  session: nextSession,
+                  time_text: nextTimeText,
+                };
+              })()
           : { ...current, [field]: String(value ?? "") };
       const next = { ...prev, [batchKey]: nextDraft };
       batchDraftsRef.current = next;
@@ -2096,20 +2511,16 @@ export default function CoachWorkoutsDay() {
     setBatchDirtyFields((prev) => {
       const next = {
         ...prev,
-        [batchKey]: { ...(prev[batchKey] ?? {}), [field]: true },
+        [batchKey]:
+          field === "session"
+            ? { ...(prev[batchKey] ?? {}), session: true, time_text: true }
+            : { ...(prev[batchKey] ?? {}), [field]: true },
       };
       batchDirtyFieldsRef.current = next;
       return next;
     });
 
-    const parsed = parseBatchKey(batchKey);
-    const matchingWorkoutIds = rowsRaw
-      .filter((w) =>
-        parsed.isBatch
-          ? String(w.batch_id ?? "").trim() === parsed.id
-          : String(w.id) === parsed.id
-      )
-      .map((w) => String(w.id));
+    const matchingWorkoutIds = matchingRows.map((w) => String(w.id));
 
     let clearedAthleteTimers = 0;
     matchingWorkoutIds.forEach((workoutId) => {
@@ -2127,7 +2538,19 @@ export default function CoachWorkoutsDay() {
           : String(w.id) === parsed.id;
         if (!match) return w;
 
-        if (field === "session") return { ...w, session: normalizeSession(String(value ?? "")) };
+        if (field === "session") {
+          const nextSession = normalizeSession(String(value ?? ""));
+          const currentSession = normalizeSession(String(w.session ?? ""));
+          const effectiveDateISO = String((batchDraftsRef.current[batchKey]?.date_iso ?? w.date_iso ?? "")).trim();
+          const nextTimeText = resolveSessionSwitchTime({
+            dateISO: effectiveDateISO,
+            defaults: practiceDefaults,
+            fromSession: currentSession,
+            toSession: nextSession,
+            currentTimeText: String(w.time_text ?? ""),
+          });
+          return { ...w, session: nextSession, time_text: nextTimeText };
+        }
         if (field === "date_iso") return { ...w, date_iso: String(value ?? "") };
         if (field === "title") return { ...w, title: String(value ?? "") };
         if (field === "location") return { ...w, location: String(value ?? "") };
@@ -2167,7 +2590,18 @@ export default function CoachWorkoutsDay() {
         };
 
         if (field === "session") {
-          next[workoutId] = { ...current, session: normalizeSession(String(value ?? "")) };
+          const nextSession = normalizeSession(String(value ?? ""));
+          const row = rowsRaw.find((r) => String(r.id) === workoutId);
+          const effectiveDateISO = String((batchDraftsRef.current[batchKey]?.date_iso ?? row?.date_iso ?? "")).trim();
+          const currentSession = normalizeSession(String(current.session ?? row?.session ?? "AM"));
+          const nextTimeText = resolveSessionSwitchTime({
+            dateISO: effectiveDateISO,
+            defaults: practiceDefaults,
+            fromSession: currentSession,
+            toSession: nextSession,
+            currentTimeText: String(current.time_text ?? row?.time_text ?? ""),
+          });
+          next[workoutId] = { ...current, session: nextSession, time_text: nextTimeText };
           return;
         }
         if (field === "location") {
@@ -2213,7 +2647,7 @@ export default function CoachWorkoutsDay() {
     scheduleBatchSave(batchKey);
   };
 
-  const onEditAthleteField = (
+  const onEditAthleteField = useCallback((
     workoutId: string,
     field: AthleteEditableField,
     value: string
@@ -2258,9 +2692,20 @@ export default function CoachWorkoutsDay() {
     );
 
     scheduleAthleteSave(workoutId);
-  };
+  }, [scheduleAthleteSave]);
 
-  const onEditAthleteSession = (workoutId: string, session: "AM" | "PM") => {
+  const onEditAthleteSession = useCallback((workoutId: string, session: "AM" | "PM") => {
+    const row = rowsRaw.find((w) => String(w.id) === workoutId);
+    const currentDraft = athleteDraftsRef.current[workoutId];
+    const currentSession = normalizeSession(String(currentDraft?.session ?? row?.session ?? "AM"));
+    const nextTimeText = resolveSessionSwitchTime({
+      dateISO: String(row?.date_iso ?? ""),
+      defaults: practiceDefaults,
+      fromSession: currentSession,
+      toSession: session,
+      currentTimeText: String(currentDraft?.time_text ?? row?.time_text ?? ""),
+    });
+
     setAthleteDrafts((prev) => {
       const next = {
         ...prev,
@@ -2274,6 +2719,7 @@ export default function CoachWorkoutsDay() {
             categories: [],
           }),
           session,
+          time_text: nextTimeText,
         },
       };
       athleteDraftsRef.current = next;
@@ -2281,20 +2727,23 @@ export default function CoachWorkoutsDay() {
     });
 
     setRowsRaw((prev) =>
-      prev.map((w) => (String(w.id) === workoutId ? { ...w, session } : w))
+      prev.map((w) => (String(w.id) === workoutId ? { ...w, session, time_text: nextTimeText } : w))
     );
 
     scheduleAthleteSave(workoutId);
-  };
+  }, [practiceDefaults, rowsRaw, scheduleAthleteSave]);
 
-  const onEditAthleteCategories = (workoutId: string, categoriesInput: string[]) => {
+  const applyCategoriesToWorkoutIds = useCallback((workoutIds: string[], categoriesInput: string[]) => {
+    const ids = Array.from(new Set((Array.isArray(workoutIds) ? workoutIds : []).map((id) => String(id ?? "").trim()).filter(Boolean)));
+    if (ids.length === 0) return;
     const normalized = normalizeCategoryArrayForGrid(Array.isArray(categoriesInput) ? categoriesInput : []);
     const primary = normalized[0] ?? "";
+    const idsSet = new Set(ids);
 
     setAthleteDrafts((prev) => {
-      const next = {
-        ...prev,
-        [workoutId]: {
+      const next = { ...prev };
+      ids.forEach((workoutId) => {
+        next[workoutId] = {
           ...(prev[workoutId] ?? {
             session: "AM",
             location: "",
@@ -2305,15 +2754,15 @@ export default function CoachWorkoutsDay() {
           }),
           primary_category: primary,
           categories: normalized,
-        },
-      };
+        };
+      });
       athleteDraftsRef.current = next;
       return next;
     });
 
     setRowsRaw((prev) =>
       prev.map((w) =>
-        String(w.id) === workoutId
+        idsSet.has(String(w.id))
           ? {
               ...w,
               primary_category: primary || null,
@@ -2323,30 +2772,21 @@ export default function CoachWorkoutsDay() {
       )
     );
 
-    scheduleAthleteSave(workoutId);
-  };
+    ids.forEach((workoutId) => scheduleAthleteSave(workoutId));
+  }, [scheduleAthleteSave]);
 
-  const goToDate = (targetDateISO: string) => {
-    router.replace({ pathname: "/(coach)/workouts", params: { date: targetDateISO } });
-  };
+  const onEditAthleteCategories = useCallback((workoutId: string, categoriesInput: string[]) => {
+    applyCategoriesToWorkoutIds([workoutId], categoriesInput);
+  }, [applyCategoriesToWorkoutIds]);
 
-  const openBatchEditor = (row: WorksheetBatchRow) => {
-    if (row.batchId) {
-      router.push({
-        pathname: "/(coach)/workout-batch/[batchId]",
-        params: {
-          batchId: row.batchId,
-          returnTo: "/(coach)/workouts",
-          returnDateISO: dayISO,
-        },
-      });
-      return;
-    }
+  const goToDate = useCallback((targetDateISO: string) => {
+    void (async () => {
+      await flushPendingEditsRef.current();
+      router.replace({ pathname: "/(coach)/workouts", params: { date: targetDateISO } });
+    })();
+  }, [router]);
 
-    router.push({ pathname: "/(coach)/workout/[id]", params: { id: String(row.sample.id) } });
-  };
-
-  const confirmDelete = async (title: string, message: string): Promise<boolean> => {
+  const confirmDelete = useCallback(async (title: string, message: string): Promise<boolean> => {
     if (Platform.OS === "web" && typeof globalThis.confirm === "function") {
       return globalThis.confirm(message);
     }
@@ -2357,7 +2797,7 @@ export default function CoachWorkoutsDay() {
         { text: "Delete", style: "destructive", onPress: () => resolve(true) },
       ]);
     });
-  };
+  }, []);
 
   const deleteBatchOrSingle = async (row: WorksheetBatchRow) => {
     const ok = await confirmDelete(
@@ -2380,7 +2820,7 @@ export default function CoachWorkoutsDay() {
     }
   };
 
-  const deleteSingleWorkout = async (workoutId: string) => {
+  const deleteSingleWorkout = useCallback(async (workoutId: string) => {
     const ok = await confirmDelete("Delete workout?", "Delete this individual workout?");
     if (!ok) return;
     try {
@@ -2392,7 +2832,7 @@ export default function CoachWorkoutsDay() {
     } finally {
       setDeletingKey((prev) => (prev === workoutId ? null : prev));
     }
-  };
+  }, [confirmDelete, dayISO, refreshDayGuarded]);
 
   const duplicateBatchOrSingle = async (row: WorksheetBatchRow) => {
     try {
@@ -2436,21 +2876,84 @@ export default function CoachWorkoutsDay() {
 
   const getSelectedRowIdsForGroup = (groupKey: string) => selectedByGroup[groupKey]?.rowIds ?? [];
 
-  const bulkSetCategory = (groupKey: string, value: string) => {
-    const ids = getSelectedRowIdsForGroup(groupKey);
-    const trimmed = String(value ?? "").trim();
+  const resolveCurrentWorkoutCategories = useCallback(
+    (workoutId: string, rowHint?: TeamWorkoutRow) => {
+      const draftCategories = normalizeCategoryArrayForGrid(athleteDrafts[workoutId]?.categories ?? []);
+      if (draftCategories.length > 0) return draftCategories;
+      const row = rowHint ?? rowsRaw.find((r) => String(r.id) === workoutId);
+      const rowCategories = normalizeCategoryArrayForGrid(
+        Array.isArray((row as any)?.categories) ? (((row as any)?.categories as string[]) ?? []) : []
+      );
+      if (rowCategories.length > 0) return rowCategories;
+      return normalizeCategoryArrayForGrid([String((row as any)?.primary_category ?? "").trim()]);
+    },
+    [athleteDrafts, rowsRaw]
+  );
+
+  const getInitialGroupCategorySelection = useCallback(
+    (rows: TeamWorkoutRow[]) => {
+      const merged = new Set<string>();
+      rows.forEach((row) => {
+        const workoutId = String(row.id);
+        resolveCurrentWorkoutCategories(workoutId, row).forEach((value) => merged.add(value));
+      });
+      return Array.from(merged);
+    },
+    [resolveCurrentWorkoutCategories]
+  );
+
+  const bulkSetCategoriesForWorkoutIds = (workoutIds: string[], values: string[]) => {
+    const normalized = normalizeCategoryArrayForGrid(Array.isArray(values) ? values : []);
     const validNames = new Set(
       (Array.isArray(categories) ? categories : [])
         .map((c) => String((c as any)?.name ?? "").trim())
         .filter(Boolean)
     );
-    if (validNames.size > 0 && !validNames.has(trimmed)) {
+    const invalidValues = normalized.filter((value) => !validNames.has(value));
+    if (validNames.size > 0 && invalidValues.length > 0) {
       Alert.alert("Invalid category", "Choose a category from Settings.");
       return;
     }
-    if (!trimmed || ids.length === 0) return;
-    ids.forEach((id) => onEditAthleteCategories(id, [trimmed]));
+    if (workoutIds.length === 0) return;
+    applyCategoriesToWorkoutIds(workoutIds, normalized);
   };
+
+  const bulkClearCategoriesForWorkoutIds = (workoutIds: string[]) => {
+    if (!Array.isArray(workoutIds) || workoutIds.length === 0) return;
+    applyCategoriesToWorkoutIds(workoutIds, []);
+  };
+
+  const getSharedGroupFieldValue = useCallback(
+    (rows: TeamWorkoutRow[], field: "location" | "time_text"): string | null => {
+      if (!Array.isArray(rows) || rows.length === 0) return "";
+      let shared: string | null = null;
+      for (const row of rows) {
+        const workoutId = String(row.id);
+        const draft = athleteDrafts[workoutId];
+        const value =
+          field === "location"
+            ? String(draft?.location ?? row.location ?? "").trim()
+            : String(draft?.time_text ?? row.time_text ?? "").trim();
+        if (shared == null) {
+          shared = value;
+          continue;
+        }
+        if (shared !== value) return null;
+      }
+      return shared ?? "";
+    },
+    [athleteDrafts]
+  );
+
+  const applyGroupFieldValue = useCallback(
+    (rows: TeamWorkoutRow[], field: "location" | "time_text", value: string) => {
+      const nextValue = String(value ?? "");
+      rows.forEach((row) => {
+        onEditAthleteField(String(row.id), field, nextValue);
+      });
+    },
+    [onEditAthleteField]
+  );
 
   const bulkAppendNotes = (groupKey: string, value: string) => {
     const ids = getSelectedRowIdsForGroup(groupKey);
@@ -2480,62 +2983,66 @@ export default function CoachWorkoutsDay() {
     api.fillSelected();
   };
 
-  const pickerBatch = useMemo(
-    () => (pickerBatchKey ? worksheetBatches.find((b) => b.key === pickerBatchKey) ?? null : null),
-    [pickerBatchKey, worksheetBatches]
+  const openAthletePickerBatch = useMemo(
+    () => (openAthletePickerBatchKey ? worksheetBatches.find((b) => b.key === openAthletePickerBatchKey) ?? null : null),
+    [openAthletePickerBatchKey, worksheetBatches]
   );
 
-  const pickerSelectedAthleteIds = useMemo(
+  const openAthletePickerSelectedAthleteIds = useMemo(
     () =>
       new Set(
-        (pickerBatch?.workouts ?? [])
+        (openAthletePickerBatch?.workouts ?? [])
           .map((w) => String(w.athlete_profile_id ?? "").trim())
           .filter(Boolean)
       ),
-    [pickerBatch]
+    [openAthletePickerBatch]
   );
 
-  const athleteMenuBatch = useMemo(
-    () => (athleteMenuBatchKey ? worksheetBatches.find((b) => b.key === athleteMenuBatchKey) ?? null : null),
-    [athleteMenuBatchKey, worksheetBatches]
-  );
-
-  const athleteMenuItems = useMemo(() => {
-    if (!athleteMenuBatch) return [];
-    const byAthleteId = new Map<string, { athleteId: string; displayName: string; workoutIds: string[] }>();
-    athleteMenuBatch.workouts.forEach((w) => {
-      const athleteId = String(w.athlete_profile_id ?? "").trim();
+  const openAthletePickerOptions = useMemo(() => {
+    if (!openAthletePickerBatch) return [];
+    const rosterById = new Map<string, TeamRosterAthlete>();
+    rosterOptions.forEach((athlete) => {
+      const athleteId = String((athlete as any)?.id ?? "").trim();
       if (!athleteId) return;
-      const current = byAthleteId.get(athleteId);
-      if (current) {
-        current.workoutIds.push(String(w.id));
-        return;
-      }
-      byAthleteId.set(athleteId, {
-        athleteId,
-        displayName: resolveAthleteDisplayName(
-          athleteId,
-          rosterNameById,
-          String((w as any).athlete_name ?? "")
-        ),
-        workoutIds: [String(w.id)],
-      });
+      rosterById.set(athleteId, athlete);
     });
-    return Array.from(byAthleteId.values()).sort((a, b) =>
-      compareAthleteDisplayNamesByLastName(a.displayName, b.displayName)
-    );
-  }, [athleteMenuBatch, rosterNameById]);
 
-  const filteredRosterOptions = useMemo(() => {
-    return searchRoster(rosterOptions, pickerQuery);
-  }, [pickerQuery, rosterOptions]);
+    const rowByAthleteId = new Map<string, TeamWorkoutRow>();
+    (openAthletePickerBatch.workouts ?? []).forEach((w) => {
+      const athleteId = String(w.athlete_profile_id ?? "").trim();
+      if (!athleteId || rowByAthleteId.has(athleteId)) return;
+      rowByAthleteId.set(athleteId, w);
+    });
+
+    const query = String(athletePickerQuery ?? "").trim().toLowerCase();
+    const ids = new Set<string>([...Array.from(rosterById.keys()), ...Array.from(rowByAthleteId.keys())]);
+    const out = Array.from(ids).map((athleteId) => {
+      const rosterAthlete = rosterById.get(athleteId);
+      const row = rowByAthleteId.get(athleteId);
+      const fallbackName = String((row as any)?.athlete_name ?? (rosterAthlete as any)?.displayName ?? "").trim();
+      const displayName = resolveAthleteDisplayName(athleteId, rosterNameById, fallbackName);
+      const selected = openAthletePickerSelectedAthleteIds.has(athleteId);
+      return { athleteId, displayName, selected };
+    });
+
+    return out
+      .filter((item) => !query || item.displayName.toLowerCase().includes(query))
+      .sort((a, b) => compareAthleteDisplayNamesByLastName(a.displayName, b.displayName));
+  }, [
+    athletePickerQuery,
+    openAthletePickerBatch,
+    openAthletePickerSelectedAthleteIds,
+    rosterNameById,
+    rosterOptions,
+  ]);
 
   useEffect(() => {
-    if (!athleteMenuBatchKey) return;
-    if (athleteMenuBatch) return;
-    setAthleteMenuBatchKey(null);
+    if (!openAthletePickerBatchKey) return;
+    if (openAthletePickerBatch) return;
+    setOpenAthletePickerBatchKey(null);
+    setAthletePickerQuery("");
     setRemovingAthleteId(null);
-  }, [athleteMenuBatch, athleteMenuBatchKey]);
+  }, [openAthletePickerBatch, openAthletePickerBatchKey]);
 
   const handleQuickCreateBatch = useCallback(async () => {
     if (creatingBatch) return;
@@ -2553,7 +3060,10 @@ export default function CoachWorkoutsDay() {
         return;
       }
 
+      const freshDefaults = await loadPracticeTimeDefaults().catch(() => practiceDefaults);
+      setPracticeDefaults(freshDefaults);
       const newBatchId = createBatchId(dayISO);
+      const defaultsForDay = resolveDefaultSessionSlotAndTimeForDate(dayISO, freshDefaults, "AM", "");
       const payload = rosterOptions
         .map((athlete) => String((athlete as any)?.id ?? "").trim())
         .filter(Boolean)
@@ -2562,9 +3072,9 @@ export default function CoachWorkoutsDay() {
           athlete_profile_id: athleteId,
           created_by: null,
           date_iso: dayISO,
-          session: "AM" as const,
+          session: defaultsForDay.session,
           location: null,
-          time_text: "",
+          time_text: defaultsForDay.timeText,
           title: "",
           details: null,
           primary_category: null,
@@ -2596,19 +3106,25 @@ export default function CoachWorkoutsDay() {
     } finally {
       setCreatingBatch(false);
     }
-  }, [creatingBatch, dayISO, ensureTeamId, refreshDayGuarded, rosterOptions]);
+  }, [creatingBatch, dayISO, ensureTeamId, practiceDefaults, refreshDayGuarded, rosterOptions]);
 
   const handleRemoveAthleteFromBatch = useCallback(
-    async (athleteId: string) => {
-      if (!athleteMenuBatch) return;
-      const batchId = String(athleteMenuBatch.batchId ?? "").trim();
+    async (batchRow: WorksheetBatchRow, athleteId: string) => {
+      const batchId = String(batchRow.batchId ?? "").trim();
       if (!batchId) return;
-      if (athleteMenuItems.length <= 1) {
+      const batchAthleteIds = Array.from(
+        new Set(
+          (batchRow.workouts ?? [])
+            .map((w) => String(w.athlete_profile_id ?? "").trim())
+            .filter(Boolean)
+        )
+      );
+      if (batchAthleteIds.length <= 1) {
         Alert.alert("Cannot remove", "A batch must contain at least one athlete.");
         return;
       }
 
-      const matchingRows = athleteMenuBatch.workouts.filter(
+      const matchingRows = batchRow.workouts.filter(
         (w) => String(w.athlete_profile_id ?? "").trim() === athleteId
       );
       if (matchingRows.length === 0) return;
@@ -2631,9 +3147,6 @@ export default function CoachWorkoutsDay() {
           next.delete(athleteKey);
           return next;
         });
-        if (athleteMenuItems.length <= 2) {
-          setAthleteMenuBatchKey(null);
-        }
       } catch (e: any) {
         setPendingRemovedAthleteKeys((prev) => {
           const next = new Set(prev);
@@ -2646,12 +3159,12 @@ export default function CoachWorkoutsDay() {
         setRemovingAthleteId(null);
       }
     },
-    [athleteMenuBatch, athleteMenuItems, dayISO, refreshDayGuarded]
+    [dayISO, refreshDayGuarded]
   );
 
-  const addAthleteToBatch = async (athleteId: string) => {
-    if (!pickerBatch || !pickerBatch.batchId) return;
-    const exists = pickerBatch.workouts.some(
+  const addAthleteToBatch = async (batchRow: WorksheetBatchRow, athleteId: string) => {
+    if (!batchRow || !batchRow.batchId) return;
+    const exists = batchRow.workouts.some(
       (w) => String(w.athlete_profile_id ?? "").trim() === String(athleteId).trim()
     );
     if (exists) {
@@ -2667,9 +3180,9 @@ export default function CoachWorkoutsDay() {
 
     setAddingAthleteId(athleteId);
     try {
-      const sample = pickerBatch.sample;
+      const sample = batchRow.sample;
       const batchDraft =
-        batchDrafts[pickerBatch.key] ??
+        batchDrafts[batchRow.key] ??
         ({
           session: normalizeSession(sample.session),
           date_iso: String(sample.date_iso ?? ""),
@@ -2691,7 +3204,7 @@ export default function CoachWorkoutsDay() {
             .filter(Boolean),
         } as BatchDraft);
 
-      let targetGroupId = pickerBatch.groupedAthletes.find((g) => !!g.groupId)?.groupId ?? null;
+      let targetGroupId = batchRow.groupedAthletes.find((g) => !!g.groupId)?.groupId ?? null;
       if (!targetGroupId) targetGroupId = makeNewGroupId();
 
       const payload = {
@@ -2708,7 +3221,7 @@ export default function CoachWorkoutsDay() {
         categories: (Array.isArray(batchDraft.categories) ? batchDraft.categories : [])
           .map((c) => String(c ?? "").trim())
           .filter((c) => !!c && c.toLowerCase() !== "other"),
-        batch_id: pickerBatch.batchId,
+        batch_id: batchRow.batchId,
         group_id: targetGroupId,
         pre_routine_ids: sample.pre_routine_ids ?? null,
         post_routine_ids: sample.post_routine_ids ?? null,
@@ -2718,8 +3231,6 @@ export default function CoachWorkoutsDay() {
 
       await createTeamWorkoutBatch([payload]);
 
-      setPickerQuery("");
-      setPickerBatchKey(null);
       await refreshDayGuarded(dayISO);
     } catch (e: any) {
       patchAppRuntime({ lastSaveError: String(e?.message ?? e ?? "Could not add athlete to batch.") });
@@ -2728,6 +3239,52 @@ export default function CoachWorkoutsDay() {
       setAddingAthleteId((prev) => (prev === athleteId ? null : prev));
     }
   };
+
+  const toggleAthleteInBatch = useCallback(
+    async (batchRow: WorksheetBatchRow, athleteId: string, selected: boolean) => {
+      if (selected) {
+        await handleRemoveAthleteFromBatch(batchRow, athleteId);
+      } else {
+        await addAthleteToBatch(batchRow, athleteId);
+      }
+    },
+    [addAthleteToBatch, handleRemoveAthleteFromBatch]
+  );
+
+  const selectAllAthletesForBatch = useCallback(
+    async (batchRow: WorksheetBatchRow) => {
+      const selectedIds = new Set(
+        (batchRow.workouts ?? [])
+          .map((w) => String(w.athlete_profile_id ?? "").trim())
+          .filter(Boolean)
+      );
+      const allRosterIds = rosterOptions
+        .map((r) => String((r as any)?.id ?? "").trim())
+        .filter(Boolean);
+      for (const athleteId of allRosterIds) {
+        if (selectedIds.has(athleteId)) continue;
+        await addAthleteToBatch(batchRow, athleteId);
+      }
+    },
+    [rosterOptions]
+  );
+
+  const clearAthletesForBatch = useCallback(
+    async (batchRow: WorksheetBatchRow) => {
+      const selectedIds = Array.from(
+        new Set(
+          (batchRow.workouts ?? [])
+            .map((w) => String(w.athlete_profile_id ?? "").trim())
+            .filter(Boolean)
+        )
+      );
+      const removable = selectedIds.slice(0, Math.max(0, selectedIds.length - 1));
+      for (const athleteId of removable) {
+        await handleRemoveAthleteFromBatch(batchRow, athleteId);
+      }
+    },
+    [handleRemoveAthleteFromBatch]
+  );
 
   const performMoveWorkout = useCallback(
     async (args: {
@@ -2773,53 +3330,9 @@ export default function CoachWorkoutsDay() {
           prev.map((w) => (String(w.id) === workoutId ? { ...w, group_id: fromGroupId } : w))
         );
         Alert.alert("Move failed", e?.message ?? "Could not move workout to target group.");
-      } finally {
-        setDraggingWorkoutId(null);
-        setDragOverTargetGroupId(null);
       }
     },
     []
-  );
-
-  const onWebDropToGroup = useCallback(
-    async (e: any, targetBatchKey: string, targetBatchId: string | null, targetGroupId: string | null | "NEW_GROUP") => {
-      e?.preventDefault?.();
-      e?.stopPropagation?.();
-      setDragOverTargetGroupId(null);
-      setDraggingWorkoutId(null);
-      console.log("dropTarget", { targetBatchKey, targetBatchId, targetGroupId });
-
-      try {
-        const dt = e?.dataTransfer ?? e?.nativeEvent?.dataTransfer;
-        const raw = dt?.getData?.("application/json") || dt?.getData?.("text/plain");
-        if (!raw) return;
-        const payload = JSON.parse(raw);
-        console.log("dropPayload", payload);
-        const workoutId = String(payload?.workoutId ?? "");
-        const sourceBatchId = String(payload?.batchId ?? "");
-        const fromGroupIdRaw = String(payload?.fromGroupId ?? "");
-        const fromGroupId = fromGroupIdRaw ? fromGroupIdRaw : null;
-
-        if (!workoutId || !targetBatchId) {
-          return;
-        }
-        if (sourceBatchId !== String(targetBatchId)) {
-          return;
-        }
-
-        await performMoveWorkout({
-          workoutId,
-          batchKey: targetBatchKey,
-          batchId: targetBatchId,
-          fromGroupId,
-          toGroupId: targetGroupId,
-        });
-      } catch (err: any) {
-        setDraggingWorkoutId(null);
-        setDragOverTargetGroupId(null);
-      }
-    },
-    [performMoveWorkout]
   );
 
   if (!dayISO) {
@@ -2836,7 +3349,6 @@ export default function CoachWorkoutsDay() {
     COL.rowSelect +
     COL.dragHandle +
     COL.athleteName +
-    COL.athleteSession +
     COL.athleteLocation +
     COL.athleteTime +
     COL.distance +
@@ -2880,11 +3392,34 @@ export default function CoachWorkoutsDay() {
         </View>
 
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <View style={{ alignItems: "flex-end", minWidth: 190 }}>
+            {headerSaveDisplay.kind === "error" ? (
+              <InlineSaveStatus status="error" message={headerSaveDisplay.message} size="sm" align="right" />
+            ) : headerSaveDisplay.kind === "saving" ? (
+              <InlineSaveStatus status="saving" size="sm" align="right" />
+            ) : headerSaveDisplay.kind === "saved" ? (
+              <InlineSaveStatus status="saved" size="sm" align="right" />
+            ) : headerSaveDisplay.kind === "pending" ? (
+              <Text style={{ fontSize: 11, fontWeight: "800", color: "#b45309", textAlign: "right" }}>
+                Pending save...
+              </Text>
+            ) : (
+              <Text style={{ fontSize: 10, fontWeight: "700", color: "#64748b", textAlign: "right" }}>
+                Ready
+              </Text>
+            )}
+            {headerSaveDisplay.detail ? (
+              <Text style={{ marginTop: 2, fontSize: 10, fontWeight: "600", color: "#64748b", textAlign: "right" }}>
+                {headerSaveDisplay.detail}
+              </Text>
+            ) : null}
+          </View>
+
           <Pressable
             onPress={() => goToDate(dayISO)}
             style={{ borderWidth: 1, borderColor: "#cfd7e6", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}
           >
-            <Text style={{ fontSize: 12, fontWeight: "800", color: "#24334f" }}>Pick Date</Text>
+            <Text style={{ fontSize: 12, fontWeight: "800", color: "#24334f" }}>Reload Day</Text>
           </Pressable>
 
           <Pressable
@@ -2907,7 +3442,12 @@ export default function CoachWorkoutsDay() {
         </View>
       </View>
 
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 18 }} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        ref={workoutsScrollRef}
+        style={{ flex: 1 }}
+        contentContainerStyle={{ paddingBottom: 18 }}
+        keyboardShouldPersistTaps="handled"
+      >
         <GridTable minWidth={worksheetMinWidth}>
           <View style={{ flex: 1 }}>
           {loading ? (
@@ -2996,9 +3536,28 @@ export default function CoachWorkoutsDay() {
                 scheduleBatchRoutineSave(batchRow.key, field, cleaned);
               };
 
-              const batchHasOpenOverlay = openBatchPicker?.batchKey === batchRow.key;
+              const athletePickerOpen = openAthletePickerBatchKey === batchRow.key;
+              const groupCategoryPickerOpenForBatch =
+                typeof openGroupCategoryPickerKey === "string" &&
+                openGroupCategoryPickerKey.startsWith(`${batchRow.key}::`);
+              const batchHasOpenOverlay =
+                openBatchPicker?.batchKey === batchRow.key || athletePickerOpen || groupCategoryPickerOpenForBatch;
+              const batchOverlayZIndex = groupCategoryPickerOpenForBatch ? 50000 : batchHasOpenOverlay ? 200 : 1;
+              const isFirstBatch = index === 0;
+              const isLastBatch = index === worksheetBatches.length - 1;
               return (
-                <View key={batchRow.key} style={{ position: "relative", zIndex: batchHasOpenOverlay ? 200 : 1 }}>
+                <View
+                  key={batchRow.key}
+                  onLayout={(e) => {
+                    batchHeaderYByKeyRef.current[batchRow.key] = e.nativeEvent.layout.y;
+                  }}
+                  style={{
+                    position: "relative",
+                    zIndex: batchOverlayZIndex,
+                    marginBottom: isLastBatch ? 0 : 8,
+                    paddingBottom: isLastBatch ? 0 : 2,
+                  }}
+                >
                   <View
                     ref={(el) => {
                       batchHeaderRegionRefs.current[batchRow.key] = el;
@@ -3022,18 +3581,51 @@ export default function CoachWorkoutsDay() {
                         } as any)
                       : null)}
                     style={{
-                      marginTop: 6,
+                      marginTop: isFirstBatch ? 4 : 16,
                       borderWidth: 1,
                       borderColor: highlightBatchKey === batchRow.key ? "#fdba74" : SHEET_BORDER,
+                      borderTopWidth: isFirstBatch ? 1 : 3,
+                      borderTopColor:
+                        highlightBatchKey === batchRow.key
+                          ? BATCH_START_HIGHLIGHT_BORDER
+                          : BATCH_START_BORDER,
                       borderRadius: 2,
-                      backgroundColor: highlightBatchKey === batchRow.key ? "#fff7ed" : SHEET_HEADER_BG,
+                      backgroundColor: highlightBatchKey === batchRow.key ? "#fff7ed" : BATCH_HEADER_SECTION_BG,
                       overflow: "visible",
                       position: "relative",
-                      zIndex: batchHasOpenOverlay ? 220 : 1,
+                      zIndex: groupCategoryPickerOpenForBatch ? 50020 : batchHasOpenOverlay ? 220 : 1,
                     }}
                   >
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        borderBottomWidth: 1,
+                        borderBottomColor: SHEET_BORDER,
+                        backgroundColor: BATCH_HEADER_CAPTION_BG,
+                      }}
+                    >
+                      <View style={{ flex: 1, paddingHorizontal: 8, paddingVertical: 3 }}>
+                        <Text style={{ fontSize: 9, fontWeight: "800", color: BATCH_GROUP_CAPTION, letterSpacing: 0.2 }}>Core</Text>
+                      </View>
+                      <View style={{ width: (COL.category + 46) * 3, paddingHorizontal: 8, paddingVertical: 3, borderLeftWidth: 2, borderLeftColor: BATCH_GROUP_DIVIDER }}>
+                        <Text style={{ fontSize: 9, fontWeight: "800", color: BATCH_GROUP_CAPTION, letterSpacing: 0.2 }}>Routines</Text>
+                      </View>
+                      <View
+                        style={{
+                          width: COL.athletes + 16 + 88 + 230 + 120,
+                          paddingHorizontal: 8,
+                          paddingVertical: 3,
+                          borderLeftWidth: 2,
+                          borderLeftColor: BATCH_GROUP_DIVIDER,
+                        }}
+                      >
+                        <Text style={{ fontSize: 9, fontWeight: "800", color: BATCH_GROUP_CAPTION, letterSpacing: 0.2, textAlign: "right" }}>Batch Tools</Text>
+                      </View>
+                    </View>
+
                     <View style={{ flexDirection: "row", alignItems: "stretch", gap: 0, borderBottomWidth: 1, borderBottomColor: SHEET_BORDER, backgroundColor: SHEET_HEADER_BG }}>
-                      <View style={{ ...batchSheetCellBase, width: COL.toggle, alignItems: "center" }}>
+                      <View style={{ ...batchSheetCellBase, width: COL.toggle, alignItems: "center", backgroundColor: BATCH_GROUP_CORE_BG }}>
                         <Pressable
                           onPress={() =>
                             setExpandedByBatchKey((prev) => ({
@@ -3048,7 +3640,7 @@ export default function CoachWorkoutsDay() {
                         </Pressable>
                       </View>
 
-                      <View style={{ ...batchSheetCellBase, width: COL.session }}>
+                      <View style={{ ...batchSheetCellBase, width: COL.session, backgroundColor: BATCH_GROUP_CORE_BG }}>
                         <Text style={batchSheetLabelText}>AM/PM</Text>
                         <View style={{ flexDirection: "row", gap: 4 }}>
                           {(["AM", "PM"] as const).map((s) => (
@@ -3083,7 +3675,7 @@ export default function CoachWorkoutsDay() {
                         </View>
                       </View>
 
-                      <View style={{ ...batchSheetCellBase, width: COL.time }}>
+                      <View style={{ ...batchSheetCellBase, width: COL.time, backgroundColor: BATCH_GROUP_CORE_BG }}>
                         <Text style={batchSheetLabelText}>Time</Text>
                         <TextCellEditor
                           value={batchDraft.time_text}
@@ -3101,7 +3693,7 @@ export default function CoachWorkoutsDay() {
                         />
                       </View>
 
-                      <View style={{ ...batchSheetCellBase, width: COL.date }}>
+                      <View style={{ ...batchSheetCellBase, width: COL.date, backgroundColor: BATCH_GROUP_CORE_BG }}>
                         <Text style={batchSheetLabelText}>Date</Text>
                         <TextCellEditor
                           value={batchDraft.date_iso}
@@ -3119,7 +3711,7 @@ export default function CoachWorkoutsDay() {
                         />
                       </View>
 
-                      <View style={{ ...batchSheetCellBase, minWidth: 160, flex: 1 }}>
+                      <View style={{ ...batchSheetCellBase, minWidth: 160, flex: 1, backgroundColor: BATCH_GROUP_CORE_BG }}>
                         <Text style={batchSheetLabelText}>Location</Text>
                         <TextCellEditor
                           value={batchDraft.location}
@@ -3137,7 +3729,7 @@ export default function CoachWorkoutsDay() {
                         />
                       </View>
 
-                      <View style={{ ...batchSheetCellBase, minWidth: 200, flex: 1.3 }}>
+                      <View style={{ ...batchSheetCellBase, minWidth: 200, flex: 1.3, backgroundColor: BATCH_GROUP_CORE_BG }}>
                         <Text style={batchSheetLabelText}>Title</Text>
                         <TextCellEditor
                           value={batchDraft.title}
@@ -3155,7 +3747,18 @@ export default function CoachWorkoutsDay() {
                         />
                       </View>
 
-                      <View style={{ ...batchSheetCellBase, width: COL.athletes + 16, alignItems: "flex-start" }}>
+                      <View
+                        style={{
+                          ...batchSheetCellBase,
+                          width: COL.athletes + 16,
+                          alignItems: "flex-start",
+                          overflow: "visible",
+                          zIndex: athletePickerOpen ? 90 : 1,
+                          backgroundColor: BATCH_GROUP_UTILITY_BG,
+                          borderLeftWidth: 2,
+                          borderLeftColor: BATCH_GROUP_DIVIDER,
+                        }}
+                      >
                         <Text style={batchSheetLabelText}>Athletes</Text>
                         <Pressable
                           ref={(el) => {
@@ -3163,7 +3766,12 @@ export default function CoachWorkoutsDay() {
                           }}
                           onPress={() => {
                             if (!batchRow.batchId) return;
-                            setAthleteMenuBatchKey(batchRow.key);
+                            const nextOpen = athletePickerOpen ? null : batchRow.key;
+                            if (!nextOpen && openBatchPicker?.batchKey === batchRow.key) {
+                              setOpenBatchPicker(null);
+                            }
+                            setOpenAthletePickerBatchKey(nextOpen);
+                            setAthletePickerQuery("");
                           }}
                           style={{ paddingVertical: 1 }}
                           disabled={!batchRow.batchId}
@@ -3177,19 +3785,101 @@ export default function CoachWorkoutsDay() {
                             : null)}
                         >
                           <Text style={{ fontSize: 12, fontWeight: "900", color: "#1e293b" }}>
-                            {`Athletes: ${batchRow.athleteCount} ▾`}
+                            {`Athletes: ${batchRow.athleteCount} ${athletePickerOpen ? "▴" : "▾"}`}
                           </Text>
                         </Pressable>
+                        {athletePickerOpen ? (
+                          <View
+                            style={{
+                              position: "absolute",
+                              top: 44,
+                              left: 0,
+                              width: 320,
+                              maxHeight: 360,
+                              borderWidth: 1,
+                              borderColor: "#dbe2ee",
+                              borderRadius: 8,
+                              backgroundColor: "#fff",
+                              padding: 8,
+                              gap: 8,
+                              zIndex: 95,
+                              ...(Platform.OS === "android" ? { elevation: 7 } : null),
+                            }}
+                          >
+                            <TextInput
+                              value={athletePickerQuery}
+                              onChangeText={setAthletePickerQuery}
+                              placeholder="Search athletes..."
+                              style={{
+                                borderWidth: 1,
+                                borderColor: "#d1d9e6",
+                                borderRadius: 8,
+                                paddingHorizontal: 10,
+                                paddingVertical: 6,
+                                fontSize: 12,
+                                fontWeight: "600",
+                                color: "#0f172a",
+                              }}
+                            />
+                            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                              <Pressable
+                                onPress={() => void selectAllAthletesForBatch(batchRow)}
+                                style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: "#fff" }}
+                              >
+                                <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>Select all</Text>
+                              </Pressable>
+                              <Pressable
+                                onPress={() => void clearAthletesForBatch(batchRow)}
+                                style={{ borderWidth: 1, borderColor: "#f2c4c4", backgroundColor: "#fff0f0", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 }}
+                              >
+                                <Text style={{ fontSize: 11, fontWeight: "800", color: "#9f1239" }}>Clear</Text>
+                              </Pressable>
+                            </View>
+                            <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 250 }}>
+                              {openAthletePickerOptions.map((item) => {
+                                const busy = addingAthleteId === item.athleteId || removingAthleteId === item.athleteId;
+                                return (
+                                  <Pressable
+                                    key={`athlete-toggle-${batchRow.key}-${item.athleteId}`}
+                                    onPress={() => void toggleAthleteInBatch(batchRow, item.athleteId, item.selected)}
+                                    disabled={busy}
+                                    style={{
+                                      borderWidth: 1,
+                                      borderColor: item.selected ? "#bfdbfe" : "#e2e8f0",
+                                      backgroundColor: item.selected ? "#eff6ff" : "#fff",
+                                      borderRadius: 8,
+                                      paddingHorizontal: 8,
+                                      paddingVertical: 7,
+                                      marginBottom: 6,
+                                      opacity: busy ? 0.7 : 1,
+                                      flexDirection: "row",
+                                      alignItems: "center",
+                                      justifyContent: "space-between",
+                                      gap: 8,
+                                    }}
+                                  >
+                                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155", flex: 1 }}>
+                                      {item.displayName}
+                                    </Text>
+                                    <Text style={{ fontSize: 11, fontWeight: "900", color: item.selected ? "#1d4ed8" : "#64748b" }}>
+                                      {busy ? (item.selected ? "Removing..." : "Adding...") : item.selected ? "Selected" : "Add"}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              })}
+                            </ScrollView>
+                          </View>
+                        ) : null}
                       </View>
 
-                      <View style={{ ...batchSheetCellBase, width: 88, alignItems: "flex-start" }}>
+                      <View style={{ ...batchSheetCellBase, width: 88, alignItems: "flex-start", backgroundColor: BATCH_GROUP_UTILITY_BG }}>
                         <Text style={batchSheetLabelText}>Sections</Text>
                         <Text style={{ fontSize: 12, fontWeight: "900", color: "#1e293b" }}>
                           {batchRow.groupedAthletes.length}
                         </Text>
                       </View>
 
-                      <View style={{ ...batchSheetCellBase, minWidth: 230, flexDirection: "row", alignItems: "center", gap: 6, borderRightWidth: 0 }}>
+                      <View style={{ ...batchSheetCellBase, minWidth: 230, flexDirection: "row", alignItems: "center", gap: 6, borderRightWidth: 0, backgroundColor: BATCH_GROUP_UTILITY_BG }}>
                         <Pressable
                           onPress={() => void duplicateBatchOrSingle(batchRow)}
                           disabled={duplicatingKey === batchRow.key}
@@ -3219,6 +3909,7 @@ export default function CoachWorkoutsDay() {
                           ...batchSheetCellBase,
                           flex: 1,
                           minWidth: COL.notes,
+                          backgroundColor: BATCH_GROUP_CORE_BG,
                         }}
                       >
                         <Text style={batchSheetLabelText}>Workout Notes</Text>
@@ -3238,296 +3929,321 @@ export default function CoachWorkoutsDay() {
                         />
                       </View>
 
-                      <View style={{ ...batchSheetCellBase, width: COL.category + 46, justifyContent: "flex-start", overflow: "visible", zIndex: 6 }}>
-                        <Text style={batchSheetLabelText}>Category</Text>
-                        <View style={{ gap: 4 }}>
-                          {categorySlots.map((slotValue, slotIndex) => (
-                            <View key={`cat-slot-${batchRow.key}-${slotIndex}`} style={{ flexDirection: "row", alignItems: "center", gap: 6, position: "relative", zIndex: openBatchPicker?.batchKey === batchRow.key && openBatchPicker.field === "category" && openBatchPicker.slotIndex === slotIndex ? 70 : 1 }}>
-                              <Pressable
-                                ref={(el) => {
-                                  if (slotIndex === 0) batchHeaderInputRefs.current[`${batchRow.key}:category`] = el;
-                                }}
-                                onPress={() => {
-                                  const isOpen =
-                                    openBatchPicker?.batchKey === batchRow.key &&
-                                    openBatchPicker.field === "category" &&
-                                    openBatchPicker.slotIndex === slotIndex;
-                                  if (isOpen) {
-                                    setOpenBatchPicker(null);
-                                    return;
-                                  }
-                                  setOpenBatchPicker({ batchKey: batchRow.key, field: "category", slotIndex });
-                                  setBatchPickerQuery("");
-                                }}
-                                {...(Platform.OS === "web"
-                                  ? ({
-                                      tabIndex: 0,
-                                      onFocus: () => activateBatchHeaderField(batchRow.key, "category"),
-                                      onBlur: () => scheduleBatchHeaderDeactivate(),
-                                      onKeyDown: (e: any) => handleBatchHeaderKeyDown(batchRow.key, "category", e),
-                                    } as any)
-                                  : null)}
-                                style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff" }}
-                              >
-                                <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "700", color: slotValue ? "#334155" : "#94a3b8" }}>
-                                  {slotValue || "Select"}
-                                </Text>
-                                <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
-                              </Pressable>
-                              <Pressable
-                                onPress={() => {
-                                  const next = categorySlots.filter((_, idx) => idx !== slotIndex);
-                                  const normalizedNext = next.length > 0 ? next : [""];
-                                  setBatchCategorySlots((prev) => ({ ...prev, [batchRow.key]: normalizedNext }));
-                                  onEditBatchField(batchRow.key, "categories", normalizedNext.filter((v) => String(v ?? "").trim()).filter(Boolean));
-                                }}
-                                style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && categorySlots.length <= 1 ? 0.4 : 1, backgroundColor: "#fff" }}
-                                disabled={slotIndex === 0 && categorySlots.length <= 1}
-                              >
-                                <Text style={{ fontSize: 14, fontWeight: "900", color: "#b91c1c" }}>−</Text>
-                              </Pressable>
-                              <Pressable
-                                onPress={() => {
-                                  setBatchCategorySlots((prev) => ({ ...prev, [batchRow.key]: [...categorySlots, ""] }));
-                                }}
-                                style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" }}
-                              >
-                                <Text style={{ fontSize: 14, fontWeight: "900", color: "#334155" }}>+</Text>
-                              </Pressable>
+                          <View
+                            style={{
+                              ...batchSheetCellBase,
+                              width: COL.category + 46,
+                              justifyContent: "flex-start",
+                              overflow: "visible",
+                              zIndex: 6,
+                              backgroundColor: BATCH_GROUP_SECONDARY_BG,
+                              borderLeftWidth: 2,
+                              borderLeftColor: BATCH_GROUP_DIVIDER,
+                            }}
+                          >
+                            <Text style={batchSheetLabelText}>Category</Text>
+                            <View style={{ gap: 4 }}>
+                              {categorySlots.map((slotValue, slotIndex) => (
+                                <View key={`cat-slot-${batchRow.key}-${slotIndex}`} style={{ flexDirection: "row", alignItems: "center", gap: 6, position: "relative", zIndex: openBatchPicker?.batchKey === batchRow.key && openBatchPicker.field === "category" && openBatchPicker.slotIndex === slotIndex ? 70 : 1 }}>
+                                  <Pressable
+                                    ref={(el) => {
+                                      if (slotIndex === 0) batchHeaderInputRefs.current[`${batchRow.key}:category`] = el;
+                                    }}
+                                    onPress={() => {
+                                      const isOpen =
+                                        openBatchPicker?.batchKey === batchRow.key &&
+                                        openBatchPicker.field === "category" &&
+                                        openBatchPicker.slotIndex === slotIndex;
+                                      if (isOpen) {
+                                        setOpenBatchPicker(null);
+                                        return;
+                                      }
+                                      setOpenBatchPicker({ batchKey: batchRow.key, field: "category", slotIndex });
+                                      setBatchPickerQuery("");
+                                    }}
+                                    {...(Platform.OS === "web"
+                                      ? ({
+                                          tabIndex: 0,
+                                          onFocus: () => activateBatchHeaderField(batchRow.key, "category"),
+                                          onBlur: () => scheduleBatchHeaderDeactivate(),
+                                          onKeyDown: (e: any) => handleBatchHeaderKeyDown(batchRow.key, "category", e),
+                                        } as any)
+                                      : null)}
+                                    style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff" }}
+                                  >
+                                    <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "700", color: slotValue ? "#334155" : "#94a3b8" }}>
+                                      {slotValue || "Select"}
+                                    </Text>
+                                    <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
+                                  </Pressable>
+                                  <Pressable
+                                    onPress={() => {
+                                      const next = categorySlots.filter((_, idx) => idx !== slotIndex);
+                                      const normalizedNext = next.length > 0 ? next : [""];
+                                      setBatchCategorySlots((prev) => ({ ...prev, [batchRow.key]: normalizedNext }));
+                                      onEditBatchField(batchRow.key, "categories", normalizedNext.filter((v) => String(v ?? "").trim()).filter(Boolean));
+                                    }}
+                                    style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && categorySlots.length <= 1 ? 0.4 : 1, backgroundColor: "#fff" }}
+                                    disabled={slotIndex === 0 && categorySlots.length <= 1}
+                                  >
+                                    <Text style={{ fontSize: 14, fontWeight: "900", color: "#b91c1c" }}>−</Text>
+                                  </Pressable>
+                                  <Pressable
+                                    onPress={() => {
+                                      setBatchCategorySlots((prev) => ({ ...prev, [batchRow.key]: [...categorySlots, ""] }));
+                                    }}
+                                    style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" }}
+                                  >
+                                    <Text style={{ fontSize: 14, fontWeight: "900", color: "#334155" }}>+</Text>
+                                  </Pressable>
 
-                              {openBatchPicker?.batchKey === batchRow.key &&
-                              openBatchPicker.field === "category" &&
-                              openBatchPicker.slotIndex === slotIndex ? (
-                                <View style={{ position: "absolute", top: 34, left: 0, right: 58, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
-                                  <TextInput
-                                    value={batchPickerQuery}
-                                    onChangeText={setBatchPickerQuery}
-                                    placeholder="Search..."
-                                    style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }}
-                                  />
-                                  <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
-                                    {categoryOptions.map((name) => (
-                                      <Pressable
-                                        key={`cat-opt-${batchRow.key}-${name}`}
-                                        onPress={() => {
-                                          const next = [...categorySlots];
-                                          if (next.includes(name) && next[slotIndex] !== name) return;
-                                          next[slotIndex] = name;
-                                          const normalizedNext = next.map((slot) => String(slot ?? "").trim());
-                                          const saved = Array.from(
-                                            new Set(
-                                              normalizedNext
-                                                .filter(Boolean)
-                                                .filter((v) => normalizeCategoryLabel(v) !== "other")
-                                            )
-                                          );
-                                          setBatchCategorySlots((prev) => ({
-                                            ...prev,
-                                            [batchRow.key]: normalizedNext.length > 0 ? normalizedNext : [""],
-                                          }));
-                                          onEditBatchField(batchRow.key, "categories", saved);
-                                          setOpenBatchPicker(null);
-                                        }}
-                                        style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7" }}
-                                      >
-                                        <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>{name}</Text>
-                                      </Pressable>
-                                    ))}
-                                  </ScrollView>
+                                  {openBatchPicker?.batchKey === batchRow.key &&
+                                  openBatchPicker.field === "category" &&
+                                  openBatchPicker.slotIndex === slotIndex ? (
+                                    <View style={{ position: "absolute", top: 34, left: 0, right: 58, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
+                                      <TextInput
+                                        value={batchPickerQuery}
+                                        onChangeText={setBatchPickerQuery}
+                                        placeholder="Search..."
+                                        style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }}
+                                      />
+                                      <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
+                                        {categoryOptions.map((name) => (
+                                          <Pressable
+                                            key={`cat-opt-${batchRow.key}-${name}`}
+                                            onPress={() => {
+                                              const next = [...categorySlots];
+                                              if (next.includes(name) && next[slotIndex] !== name) return;
+                                              next[slotIndex] = name;
+                                              const normalizedNext = next.map((slot) => String(slot ?? "").trim());
+                                              const saved = Array.from(
+                                                new Set(
+                                                  normalizedNext
+                                                    .filter(Boolean)
+                                                    .filter((v) => normalizeCategoryLabel(v) !== "other")
+                                                )
+                                              );
+                                              setBatchCategorySlots((prev) => ({
+                                                ...prev,
+                                                [batchRow.key]: normalizedNext.length > 0 ? normalizedNext : [""],
+                                              }));
+                                              onEditBatchField(batchRow.key, "categories", saved);
+                                              setOpenBatchPicker(null);
+                                            }}
+                                            style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7" }}
+                                          >
+                                            <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>{name}</Text>
+                                          </Pressable>
+                                        ))}
+                                      </ScrollView>
+                                    </View>
+                                  ) : null}
                                 </View>
-                              ) : null}
+                              ))}
                             </View>
-                          ))}
-                        </View>
-                      </View>
+                          </View>
 
-                      <View style={{ ...batchSheetCellBase, width: COL.category + 46, justifyContent: "flex-start", overflow: "visible", zIndex: 5 }}>
-                        <Text style={batchSheetLabelText}>Pre Workout</Text>
-                        <View style={{ gap: 4 }}>
-                          {preSlots.map((slotValue, slotIndex) => {
-                            const routineTitle = auxiliaryRoutines.find((r) => String(r.id) === slotValue)?.title ?? "";
-                            return (
-                              <View key={`pre-slot-${batchRow.key}-${slotIndex}`} style={{ flexDirection: "row", alignItems: "center", gap: 6, position: "relative", zIndex: openBatchPicker?.batchKey === batchRow.key && openBatchPicker.field === "pre" && openBatchPicker.slotIndex === slotIndex ? 70 : 1 }}>
-                                <Pressable
-                                  ref={(el) => {
-                                    if (slotIndex === 0) batchHeaderInputRefs.current[`${batchRow.key}:pre`] = el;
-                                  }}
-                                  onPress={() => {
-                                    const isOpen =
-                                      openBatchPicker?.batchKey === batchRow.key &&
-                                      openBatchPicker.field === "pre" &&
-                                      openBatchPicker.slotIndex === slotIndex;
-                                    if (isOpen) {
-                                      setOpenBatchPicker(null);
-                                      return;
-                                    }
-                                    setOpenBatchPicker({ batchKey: batchRow.key, field: "pre", slotIndex });
-                                    setBatchPickerQuery("");
-                                  }}
-                                  {...(Platform.OS === "web"
-                                    ? ({
-                                        tabIndex: 0,
-                                        onFocus: () => activateBatchHeaderField(batchRow.key, "pre"),
-                                        onBlur: () => scheduleBatchHeaderDeactivate(),
-                                        onKeyDown: (e: any) => handleBatchHeaderKeyDown(batchRow.key, "pre", e),
-                                      } as any)
-                                    : null)}
-                                  style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff" }}
-                                >
-                                  <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "700", color: routineTitle ? "#334155" : "#94a3b8" }}>
-                                    {routineTitle || "Select"}
-                                  </Text>
-                                  <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
-                                </Pressable>
-                                <Pressable
-                                  onPress={() => {
-                                    const next = preSlots.filter((_, idx) => idx !== slotIndex);
-                                    setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: next }));
-                                    applyBatchRoutineSlots("pre", next);
-                                  }}
-                                  style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && preSlots.length <= 1 ? 0.4 : 1, backgroundColor: "#fff" }}
-                                  disabled={slotIndex === 0 && preSlots.length <= 1}
-                                >
-                                  <Text style={{ fontSize: 14, fontWeight: "900", color: "#b91c1c" }}>−</Text>
-                                </Pressable>
-                                <Pressable
-                                  onPress={() => setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: [...preSlots, ""] }))}
-                                  style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" }}
-                                >
-                                  <Text style={{ fontSize: 14, fontWeight: "900", color: "#334155" }}>+</Text>
-                                </Pressable>
+                          <View style={{ ...batchSheetCellBase, width: COL.category + 46, justifyContent: "flex-start", overflow: "visible", zIndex: 5, backgroundColor: BATCH_GROUP_SECONDARY_BG }}>
+                            <Text style={batchSheetLabelText}>Pre Workout</Text>
+                            <View style={{ gap: 4 }}>
+                              {preSlots.map((slotValue, slotIndex) => {
+                                const routineTitle = auxiliaryRoutines.find((r) => String(r.id) === slotValue)?.title ?? "";
+                                return (
+                                  <View key={`pre-slot-${batchRow.key}-${slotIndex}`} style={{ flexDirection: "row", alignItems: "center", gap: 6, position: "relative", zIndex: openBatchPicker?.batchKey === batchRow.key && openBatchPicker.field === "pre" && openBatchPicker.slotIndex === slotIndex ? 70 : 1 }}>
+                                    <Pressable
+                                      ref={(el) => {
+                                        if (slotIndex === 0) batchHeaderInputRefs.current[`${batchRow.key}:pre`] = el;
+                                      }}
+                                      onPress={() => {
+                                        const isOpen =
+                                          openBatchPicker?.batchKey === batchRow.key &&
+                                          openBatchPicker.field === "pre" &&
+                                          openBatchPicker.slotIndex === slotIndex;
+                                        if (isOpen) {
+                                          setOpenBatchPicker(null);
+                                          return;
+                                        }
+                                        setOpenBatchPicker({ batchKey: batchRow.key, field: "pre", slotIndex });
+                                        setBatchPickerQuery("");
+                                      }}
+                                      {...(Platform.OS === "web"
+                                        ? ({
+                                            tabIndex: 0,
+                                            onFocus: () => activateBatchHeaderField(batchRow.key, "pre"),
+                                            onBlur: () => scheduleBatchHeaderDeactivate(),
+                                            onKeyDown: (e: any) => handleBatchHeaderKeyDown(batchRow.key, "pre", e),
+                                          } as any)
+                                        : null)}
+                                      style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff" }}
+                                    >
+                                      <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "700", color: routineTitle ? "#334155" : "#94a3b8" }}>
+                                        {routineTitle || "Select"}
+                                      </Text>
+                                      <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
+                                    </Pressable>
+                                    <Pressable
+                                      onPress={() => {
+                                        const next = preSlots.filter((_, idx) => idx !== slotIndex);
+                                        setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: next }));
+                                        applyBatchRoutineSlots("pre", next);
+                                      }}
+                                      style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && preSlots.length <= 1 ? 0.4 : 1, backgroundColor: "#fff" }}
+                                      disabled={slotIndex === 0 && preSlots.length <= 1}
+                                    >
+                                      <Text style={{ fontSize: 14, fontWeight: "900", color: "#b91c1c" }}>−</Text>
+                                    </Pressable>
+                                    <Pressable
+                                      onPress={() => setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: [...preSlots, ""] }))}
+                                      style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" }}
+                                    >
+                                      <Text style={{ fontSize: 14, fontWeight: "900", color: "#334155" }}>+</Text>
+                                    </Pressable>
 
-                                {openBatchPicker?.batchKey === batchRow.key &&
-                                openBatchPicker.field === "pre" &&
-                                openBatchPicker.slotIndex === slotIndex ? (
-                                  <View style={{ position: "absolute", top: 34, left: 0, right: 58, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
-                                    <TextInput value={batchPickerQuery} onChangeText={setBatchPickerQuery} placeholder="Search..." style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }} />
-                                    <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
-                                      {routineOptions.map((routine) => (
-                                        <Pressable
-                                          key={`pre-opt-${batchRow.key}-${routine.id}`}
-                                          onPress={() => {
-                                            const next = [...preSlots];
-                                            if (next.includes(routine.id) && next[slotIndex] !== routine.id) return;
-                                            next[slotIndex] = routine.id;
-                                            const cleaned = next.filter(Boolean);
-                                            setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: cleaned }));
-                                            applyBatchRoutineSlots("pre", cleaned);
-                                            setOpenBatchPicker(null);
-                                          }}
-                                          style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7" }}
-                                        >
-                                          <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>{routine.title}</Text>
-                                        </Pressable>
-                                      ))}
-                                    </ScrollView>
+                                    {openBatchPicker?.batchKey === batchRow.key &&
+                                    openBatchPicker.field === "pre" &&
+                                    openBatchPicker.slotIndex === slotIndex ? (
+                                      <View style={{ position: "absolute", top: 34, left: 0, right: 58, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
+                                        <TextInput value={batchPickerQuery} onChangeText={setBatchPickerQuery} placeholder="Search..." style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }} />
+                                        <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
+                                          {routineOptions.map((routine) => (
+                                            <Pressable
+                                              key={`pre-opt-${batchRow.key}-${routine.id}`}
+                                              onPress={() => {
+                                                const next = [...preSlots];
+                                                if (next.includes(routine.id) && next[slotIndex] !== routine.id) return;
+                                                next[slotIndex] = routine.id;
+                                                const cleaned = next.filter(Boolean);
+                                                setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: cleaned }));
+                                                applyBatchRoutineSlots("pre", cleaned);
+                                                setOpenBatchPicker(null);
+                                              }}
+                                              style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7" }}
+                                            >
+                                              <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>{routine.title}</Text>
+                                            </Pressable>
+                                          ))}
+                                        </ScrollView>
+                                      </View>
+                                    ) : null}
                                   </View>
-                                ) : null}
-                              </View>
-                            );
-                          })}
-                        </View>
-                      </View>
+                                );
+                              })}
+                            </View>
+                          </View>
 
-                      <View style={{ ...batchSheetCellBase, width: COL.category + 46, justifyContent: "flex-start", overflow: "visible", zIndex: 4 }}>
-                        <Text style={batchSheetLabelText}>Post Workout</Text>
-                        <View style={{ gap: 4 }}>
-                          {postSlots.map((slotValue, slotIndex) => {
-                            const routineTitle = auxiliaryRoutines.find((r) => String(r.id) === slotValue)?.title ?? "";
-                            return (
-                              <View key={`post-slot-${batchRow.key}-${slotIndex}`} style={{ flexDirection: "row", alignItems: "center", gap: 6, position: "relative", zIndex: openBatchPicker?.batchKey === batchRow.key && openBatchPicker.field === "post" && openBatchPicker.slotIndex === slotIndex ? 70 : 1 }}>
-                                <Pressable
-                                  ref={(el) => {
-                                    if (slotIndex === 0) batchHeaderInputRefs.current[`${batchRow.key}:post`] = el;
-                                  }}
-                                  onPress={() => {
-                                    const isOpen =
-                                      openBatchPicker?.batchKey === batchRow.key &&
-                                      openBatchPicker.field === "post" &&
-                                      openBatchPicker.slotIndex === slotIndex;
-                                    if (isOpen) {
-                                      setOpenBatchPicker(null);
-                                      return;
-                                    }
-                                    setOpenBatchPicker({ batchKey: batchRow.key, field: "post", slotIndex });
-                                    setBatchPickerQuery("");
-                                  }}
-                                  {...(Platform.OS === "web"
-                                    ? ({
-                                        tabIndex: 0,
-                                        onFocus: () => activateBatchHeaderField(batchRow.key, "post"),
-                                        onBlur: () => scheduleBatchHeaderDeactivate(),
-                                        onKeyDown: (e: any) => handleBatchHeaderKeyDown(batchRow.key, "post", e),
-                                      } as any)
-                                    : null)}
-                                  style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff" }}
-                                >
-                                  <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "700", color: routineTitle ? "#334155" : "#94a3b8" }}>
-                                    {routineTitle || "Select"}
-                                  </Text>
-                                  <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
-                                </Pressable>
-                                <Pressable
-                                  onPress={() => {
-                                    const next = postSlots.filter((_, idx) => idx !== slotIndex);
-                                    setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: next }));
-                                    applyBatchRoutineSlots("post", next);
-                                  }}
-                                  style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && postSlots.length <= 1 ? 0.4 : 1, backgroundColor: "#fff" }}
-                                  disabled={slotIndex === 0 && postSlots.length <= 1}
-                                >
-                                  <Text style={{ fontSize: 14, fontWeight: "900", color: "#b91c1c" }}>−</Text>
-                                </Pressable>
-                                <Pressable
-                                  onPress={() => setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: [...postSlots, ""] }))}
-                                  style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" }}
-                                >
-                                  <Text style={{ fontSize: 14, fontWeight: "900", color: "#334155" }}>+</Text>
-                                </Pressable>
+                          <View style={{ ...batchSheetCellBase, width: COL.category + 46, justifyContent: "flex-start", overflow: "visible", zIndex: 4, backgroundColor: BATCH_GROUP_SECONDARY_BG }}>
+                            <Text style={batchSheetLabelText}>Post Workout</Text>
+                            <View style={{ gap: 4 }}>
+                              {postSlots.map((slotValue, slotIndex) => {
+                                const routineTitle = auxiliaryRoutines.find((r) => String(r.id) === slotValue)?.title ?? "";
+                                return (
+                                  <View key={`post-slot-${batchRow.key}-${slotIndex}`} style={{ flexDirection: "row", alignItems: "center", gap: 6, position: "relative", zIndex: openBatchPicker?.batchKey === batchRow.key && openBatchPicker.field === "post" && openBatchPicker.slotIndex === slotIndex ? 70 : 1 }}>
+                                    <Pressable
+                                      ref={(el) => {
+                                        if (slotIndex === 0) batchHeaderInputRefs.current[`${batchRow.key}:post`] = el;
+                                      }}
+                                      onPress={() => {
+                                        const isOpen =
+                                          openBatchPicker?.batchKey === batchRow.key &&
+                                          openBatchPicker.field === "post" &&
+                                          openBatchPicker.slotIndex === slotIndex;
+                                        if (isOpen) {
+                                          setOpenBatchPicker(null);
+                                          return;
+                                        }
+                                        setOpenBatchPicker({ batchKey: batchRow.key, field: "post", slotIndex });
+                                        setBatchPickerQuery("");
+                                      }}
+                                      {...(Platform.OS === "web"
+                                        ? ({
+                                            tabIndex: 0,
+                                            onFocus: () => activateBatchHeaderField(batchRow.key, "post"),
+                                            onBlur: () => scheduleBatchHeaderDeactivate(),
+                                            onKeyDown: (e: any) => handleBatchHeaderKeyDown(batchRow.key, "post", e),
+                                          } as any)
+                                        : null)}
+                                      style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff" }}
+                                    >
+                                      <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "700", color: routineTitle ? "#334155" : "#94a3b8" }}>
+                                        {routineTitle || "Select"}
+                                      </Text>
+                                      <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
+                                    </Pressable>
+                                    <Pressable
+                                      onPress={() => {
+                                        const next = postSlots.filter((_, idx) => idx !== slotIndex);
+                                        setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: next }));
+                                        applyBatchRoutineSlots("post", next);
+                                      }}
+                                      style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && postSlots.length <= 1 ? 0.4 : 1, backgroundColor: "#fff" }}
+                                      disabled={slotIndex === 0 && postSlots.length <= 1}
+                                    >
+                                      <Text style={{ fontSize: 14, fontWeight: "900", color: "#b91c1c" }}>−</Text>
+                                    </Pressable>
+                                    <Pressable
+                                      onPress={() => setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: [...postSlots, ""] }))}
+                                      style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" }}
+                                    >
+                                      <Text style={{ fontSize: 14, fontWeight: "900", color: "#334155" }}>+</Text>
+                                    </Pressable>
 
-                                {openBatchPicker?.batchKey === batchRow.key &&
-                                openBatchPicker.field === "post" &&
-                                openBatchPicker.slotIndex === slotIndex ? (
-                                  <View style={{ position: "absolute", top: 34, left: 0, right: 58, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
-                                    <TextInput value={batchPickerQuery} onChangeText={setBatchPickerQuery} placeholder="Search..." style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }} />
-                                    <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
-                                      {routineOptions.map((routine) => (
-                                        <Pressable
-                                          key={`post-opt-${batchRow.key}-${routine.id}`}
-                                          onPress={() => {
-                                            const next = [...postSlots];
-                                            if (next.includes(routine.id) && next[slotIndex] !== routine.id) return;
-                                            next[slotIndex] = routine.id;
-                                            const cleaned = next.filter(Boolean);
-                                            setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: cleaned }));
-                                            applyBatchRoutineSlots("post", cleaned);
-                                            setOpenBatchPicker(null);
-                                          }}
-                                          style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7" }}
-                                        >
-                                          <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>{routine.title}</Text>
-                                        </Pressable>
-                                      ))}
-                                    </ScrollView>
+                                    {openBatchPicker?.batchKey === batchRow.key &&
+                                    openBatchPicker.field === "post" &&
+                                    openBatchPicker.slotIndex === slotIndex ? (
+                                      <View style={{ position: "absolute", top: 34, left: 0, right: 58, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
+                                        <TextInput value={batchPickerQuery} onChangeText={setBatchPickerQuery} placeholder="Search..." style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }} />
+                                        <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
+                                          {routineOptions.map((routine) => (
+                                            <Pressable
+                                              key={`post-opt-${batchRow.key}-${routine.id}`}
+                                              onPress={() => {
+                                                const next = [...postSlots];
+                                                if (next.includes(routine.id) && next[slotIndex] !== routine.id) return;
+                                                next[slotIndex] = routine.id;
+                                                const cleaned = next.filter(Boolean);
+                                                setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: cleaned }));
+                                                applyBatchRoutineSlots("post", cleaned);
+                                                setOpenBatchPicker(null);
+                                              }}
+                                              style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7" }}
+                                            >
+                                              <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>{routine.title}</Text>
+                                            </Pressable>
+                                          ))}
+                                        </ScrollView>
+                                      </View>
+                                    ) : null}
                                   </View>
-                                ) : null}
-                              </View>
-                            );
-                          })}
-                        </View>
-                      </View>
+                                );
+                              })}
+                            </View>
+                          </View>
 
-                      <View style={{ ...batchSheetCellBase, width: 120, alignItems: "flex-end", borderRightWidth: 0 }}>
+                      <View
+                        style={{
+                          ...batchSheetCellBase,
+                          width: 120,
+                          alignItems: "flex-end",
+                          borderRightWidth: 0,
+                          backgroundColor: BATCH_GROUP_UTILITY_BG,
+                          borderLeftWidth: 2,
+                          borderLeftColor: BATCH_GROUP_DIVIDER,
+                        }}
+                      >
                         <Text style={batchSheetLabelText}>Status</Text>
-                        <Text style={{ fontSize: 11, fontWeight: "800", color: batchState?.status === "error" ? "#b91c1c" : "#64748b", textAlign: "right" }}>
-                          {saveStatusText(batchState)}
-                        </Text>
+                        <InlineSaveStatus status={batchState?.status ?? "idle"} message={batchState?.message} size="sm" align="right" />
                       </View>
                     </View>
 
-                    {openBatchPicker?.batchKey === batchRow.key ? (
+                    {openBatchPicker?.batchKey === batchRow.key || athletePickerOpen ? (
                       <Pressable
-                        onPress={() => setOpenBatchPicker(null)}
+                        onPress={() => {
+                          if (openBatchPicker?.batchKey === batchRow.key) setOpenBatchPicker(null);
+                          if (athletePickerOpen) {
+                            setOpenAthletePickerBatchKey(null);
+                            setAthletePickerQuery("");
+                          }
+                        }}
                         style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 50 }}
                       />
                     ) : null}
@@ -3535,104 +4251,275 @@ export default function CoachWorkoutsDay() {
 
                   {expanded
                     ? batchRow.groupedAthletes.map((group) => {
-                        const groupTargetId = group.groupId ?? "UNGROUPED";
-                        const groupSurfaceStyle = {
-                          width: "100%",
-                          borderRadius: 8,
-                          padding: 4,
-                          minHeight: 44,
-                          overflow: "visible",
-                          position: "relative",
-                          zIndex: 1,
-                          backgroundColor: dragOverTargetGroupId === groupTargetId ? "#dbeafe" : "transparent",
-                          border: dragOverTargetGroupId === groupTargetId ? "1px dashed rgba(0,0,0,0.25)" : "1px dashed transparent",
-                          boxShadow: dragOverTargetGroupId === groupTargetId ? "inset 0 0 0 1px rgba(37,99,235,0.08)" : "none",
-                        } as const;
                         const groupKey = buildGroupKey(batchRow.key, group.groupId);
+                        const groupWorkoutIds = group.rows.map((row) => String(row.id));
+                        const {
+                          athleteDrafts: athleteDraftsForGroup,
+                          athleteSaveState: athleteSaveStateForGroup,
+                          prescribedDistanceByWorkoutId: prescribedDistanceByWorkoutIdForGroup,
+                        } = getCachedGroupAthleteSlices(groupKey, groupWorkoutIds);
                         const isFilling = fillingGroupKey === groupKey;
                         const selectedRowIds = selectedByGroup[groupKey]?.rowIds ?? [];
                         const groupApi = groupGridApis[groupKey];
+                        const groupSessionValue = group.rows.length
+                          ? normalizeSession(String((athleteDrafts[String(group.rows[0].id)]?.session ?? group.rows[0].session) ?? "AM"))
+                          : "AM";
+                        const sharedGroupLocation = getSharedGroupFieldValue(group.rows, "location");
+                        const sharedGroupTime = getSharedGroupFieldValue(group.rows, "time_text");
+                        const groupCategoryPickerOpen = openGroupCategoryPickerKey === groupKey;
+                        const groupCategorySelection = getInitialGroupCategorySelection(group.rows);
                         const groupContent = (
-                          <>
+                          <View
+                            style={{
+                              position: "relative",
+                              overflow: "visible",
+                              zIndex: groupCategoryPickerOpen ? 50200 : 1,
+                            }}
+                          >
+                            {groupCategoryPickerOpen ? (
+                              <Pressable
+                                onPress={() => setOpenGroupCategoryPickerKey(null)}
+                                style={{
+                                  position: "absolute",
+                                  top: 0,
+                                  left: 0,
+                                  right: 0,
+                                  bottom: 0,
+                                  zIndex: 50210,
+                                }}
+                              />
+                            ) : null}
                             <View
                               style={{
-                                backgroundColor: dragOverTargetGroupId === groupTargetId ? "#dbeafe" : "#f1f5f9",
+                                backgroundColor: GROUP_HEADER_BG,
                                 borderBottomWidth: 1,
-                                borderBottomColor: "#dbe2ee",
+                                borderBottomColor: GROUP_HEADER_BORDER,
                                 paddingHorizontal: 10,
                                 paddingVertical: 5,
                                 flexDirection: "row",
                                 alignItems: "center",
-                                justifyContent: "space-between",
+                                justifyContent: "flex-start",
+                                gap: 10,
+                                position: "relative",
+                                overflow: "visible",
+                                zIndex: groupCategoryPickerOpen ? 50215 : 1,
                               }}
                             >
-                              <View style={{ flexDirection: "column" }}>
-                                <Text style={{ fontSize: 11, fontWeight: "900", color: "#475569" }}>{group.groupLabel}</Text>
-                                {Platform.OS === "web" ? (
-                                  <Text style={{ fontSize: 10, fontWeight: "700", color: "#64748b", marginTop: 2 }}>
-                                    Drop athlete here
-                                  </Text>
-                                ) : null}
+                              <View style={{ flexDirection: "column", flexShrink: 0 }}>
+                                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                                  <Text style={{ fontSize: 11, fontWeight: "900", color: "#475569" }}>{group.groupLabel}</Text>
+                                  <View style={{ flexDirection: "row", gap: 4 }}>
+                                    {(["AM", "PM"] as const).map((sessionValue) => (
+                                      <Pressable
+                                        key={`${groupKey}-session-${sessionValue}`}
+                                        onPress={() => {
+                                          group.rows.forEach((row) => {
+                                            onEditAthleteSession(String(row.id), sessionValue);
+                                          });
+                                        }}
+                                        style={{
+                                          borderWidth: 1,
+                                          borderColor: groupSessionValue === sessionValue ? "#0f172a" : "#cbd5e1",
+                                          backgroundColor: groupSessionValue === sessionValue ? "#0f172a" : "#fff",
+                                          borderRadius: 6,
+                                          paddingHorizontal: 7,
+                                          paddingVertical: 2,
+                                        }}
+                                      >
+                                        <Text style={{ fontSize: 10, fontWeight: "900", color: groupSessionValue === sessionValue ? "#fff" : "#334155" }}>
+                                          {sessionValue}
+                                        </Text>
+                                      </Pressable>
+                                    ))}
+                                  </View>
+                                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginLeft: 2 }}>
+                                    <TextInput
+                                      value={sharedGroupLocation ?? ""}
+                                      onChangeText={(next) => applyGroupFieldValue(group.rows, "location", next)}
+                                      placeholder={sharedGroupLocation == null ? "Mixed location" : "Location"}
+                                      placeholderTextColor="#94a3b8"
+                                      style={{
+                                        width: 156,
+                                        height: 26,
+                                        borderWidth: 1,
+                                        borderColor: "#cbd5e1",
+                                        borderRadius: 6,
+                                        paddingHorizontal: 7,
+                                        paddingVertical: 3,
+                                        backgroundColor: "#fff",
+                                        color: "#334155",
+                                        fontSize: 11,
+                                        fontWeight: "700",
+                                      }}
+                                    />
+                                    <TextInput
+                                      value={sharedGroupTime ?? ""}
+                                      onChangeText={(next) => applyGroupFieldValue(group.rows, "time_text", next)}
+                                      placeholder={sharedGroupTime == null ? "Mixed time" : "Time"}
+                                      placeholderTextColor="#94a3b8"
+                                      style={{
+                                        width: 90,
+                                        height: 26,
+                                        borderWidth: 1,
+                                        borderColor: "#cbd5e1",
+                                        borderRadius: 6,
+                                        paddingHorizontal: 7,
+                                        paddingVertical: 3,
+                                        backgroundColor: "#fff",
+                                        color: "#334155",
+                                        fontSize: 11,
+                                        fontWeight: "700",
+                                      }}
+                                    />
+                                  </View>
+                                </View>
                               </View>
-                              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginLeft: "auto", flexShrink: 0 }}>
                                 <Text style={{ fontSize: 11, fontWeight: "800", color: "#475569" }}>
                                   Selected: {selectedRowIds.length}
                                 </Text>
                                 <Pressable
-                                  onPress={() => void groupApi?.copy()}
+                                  onPress={() => {
+                                    setActiveGridId(groupKey);
+                                    void groupApi?.copy();
+                                  }}
                                   disabled={!groupApi}
                                   style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 7, paddingHorizontal: 8, paddingVertical: 4, opacity: groupApi ? 1 : 0.5 }}
                                 >
                                   <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>Copy</Text>
                                 </Pressable>
                                 <Pressable
-                                  onPress={() => void groupApi?.paste()}
+                                  onPress={() => {
+                                    setActiveGridId(groupKey);
+                                    void groupApi?.paste();
+                                  }}
                                   disabled={!groupApi}
                                   style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 7, paddingHorizontal: 8, paddingVertical: 4, opacity: groupApi ? 1 : 0.5 }}
                                 >
                                   <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>Paste</Text>
                                 </Pressable>
                                 <Pressable
-                                  onPress={() => groupApi?.undo()}
+                                  onPress={() => {
+                                    setActiveGridId(groupKey);
+                                    groupApi?.undo();
+                                  }}
                                   disabled={!groupApi}
                                   style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 7, paddingHorizontal: 8, paddingVertical: 4, opacity: groupApi ? 1 : 0.5 }}
                                 >
                                   <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>Undo</Text>
                                 </Pressable>
                                 <Pressable
-                                  onPress={() => runGroupFillSelected(groupKey)}
+                                  onPress={() => {
+                                    setActiveGridId(groupKey);
+                                    runGroupFillSelected(groupKey);
+                                  }}
                                   disabled={!groupApi || selectedRowIds.length === 0}
                                   style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 7, paddingHorizontal: 8, paddingVertical: 4, opacity: !groupApi || selectedRowIds.length === 0 ? 0.5 : 1 }}
                                 >
                                   <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>Fill Selected</Text>
                                 </Pressable>
-                                <Pressable
-                                  onPress={() => {
-                                    if (selectedRowIds.length === 0) return;
-                                    const available = categories
-                                      .map((c) => String(c.name ?? "").trim())
-                                      .filter((name) => !!name && name.toLowerCase() !== "other");
-                                    const next = Platform.OS === "web" && typeof globalThis.prompt === "function"
-                                      ? globalThis.prompt(
-                                          `Set category for selected rows.\nAvailable: ${available.join(", ")}`,
-                                          available[0] ?? ""
-                                        )
-                                      : null;
-                                    if (next == null) return;
-                                    bulkSetCategory(groupKey, next);
-                                  }}
-                                  disabled={selectedRowIds.length === 0}
-                                  style={{
-                                    borderWidth: 1,
-                                    borderColor: "#cbd5e1",
-                                    borderRadius: 7,
-                                    paddingHorizontal: 8,
-                                    paddingVertical: 4,
-                                    opacity: selectedRowIds.length === 0 ? 0.5 : 1,
-                                  }}
-                                >
-                                  <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>Set Category</Text>
-                                </Pressable>
+                                <View style={{ position: "relative", zIndex: groupCategoryPickerOpen ? 50220 : 1 }}>
+                                  <Pressable
+                                    onPress={() => {
+                                      setOpenGroupCategoryPickerKey((prev) => (prev === groupKey ? null : groupKey));
+                                    }}
+                                    disabled={group.rows.length === 0}
+                                    style={{
+                                      borderWidth: 1,
+                                      borderColor: "#cbd5e1",
+                                      borderRadius: 7,
+                                      paddingHorizontal: 8,
+                                      paddingVertical: 4,
+                                      opacity: group.rows.length === 0 ? 0.5 : 1,
+                                      backgroundColor: "#fff",
+                                    }}
+                                  >
+                                    <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>Set Category</Text>
+                                  </Pressable>
+
+                                  {groupCategoryPickerOpen ? (
+                                    <View
+                                      style={{
+                                        position: "absolute",
+                                        top: 28,
+                                        left: 0,
+                                        minWidth: 170,
+                                        borderWidth: 1,
+                                        borderColor: "#dbe2ee",
+                                        borderRadius: 8,
+                                        backgroundColor: "#fff",
+                                        overflow: "visible",
+                                        zIndex: 50230,
+                                        ...(Platform.OS === "android" ? { elevation: 8 } : null),
+                                      }}
+                                    >
+                                      <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 220 }}>
+                                        {categoryNames.length === 0 ? (
+                                          <View style={{ paddingHorizontal: 10, paddingVertical: 8 }}>
+                                            <Text style={{ fontSize: 11, fontWeight: "700", color: "#64748b" }}>
+                                              No categories
+                                            </Text>
+                                          </View>
+                                        ) : null}
+                                        {categoryNames.map((name) => (
+                                          <Pressable
+                                            key={`group-cat-opt-${groupKey}-${name}`}
+                                            onPress={() => {
+                                              const hasValue = groupCategorySelection.includes(name);
+                                              const nextValues = hasValue
+                                                ? groupCategorySelection.filter((value) => value !== name)
+                                                : [...groupCategorySelection, name];
+                                              bulkSetCategoriesForWorkoutIds(groupWorkoutIds, nextValues);
+                                            }}
+                                            style={{
+                                              paddingHorizontal: 10,
+                                              paddingVertical: 8,
+                                              borderBottomWidth: 1,
+                                              borderBottomColor: "#edf2f7",
+                                              backgroundColor: groupCategorySelection.includes(name) ? "#eff6ff" : "#fff",
+                                              flexDirection: "row",
+                                              alignItems: "center",
+                                              justifyContent: "space-between",
+                                            }}
+                                          >
+                                            <Text style={{ fontSize: 11, fontWeight: "700", color: "#334155" }}>{name}</Text>
+                                            {groupCategorySelection.includes(name) ? (
+                                              <Text style={{ fontSize: 11, fontWeight: "900", color: "#1d4ed8" }}>✓</Text>
+                                            ) : null}
+                                          </Pressable>
+                                        ))}
+                                        <View
+                                          style={{
+                                            paddingHorizontal: 10,
+                                            paddingVertical: 8,
+                                            borderTopWidth: 1,
+                                            borderTopColor: "#e2e8f0",
+                                            backgroundColor: "#f8fafc",
+                                            flexDirection: "row",
+                                            alignItems: "center",
+                                            justifyContent: "flex-end",
+                                          }}
+                                        >
+                                          <Pressable
+                                            onPress={() => {
+                                              bulkClearCategoriesForWorkoutIds(groupWorkoutIds);
+                                            }}
+                                            style={{
+                                              borderWidth: 1,
+                                              borderColor: "#cbd5e1",
+                                              borderRadius: 6,
+                                              paddingHorizontal: 8,
+                                              paddingVertical: 4,
+                                              backgroundColor: "#fff",
+                                            }}
+                                          >
+                                            <Text style={{ fontSize: 11, fontWeight: "800", color: "#475569" }}>Clear</Text>
+                                          </Pressable>
+                                        </View>
+                                      </ScrollView>
+                                    </View>
+                                  ) : null}
+                                </View>
                                 <Pressable
                                   onPress={() => {
                                     if (selectedRowIds.length === 0) return;
@@ -3655,7 +4542,10 @@ export default function CoachWorkoutsDay() {
                                   <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>Append Notes</Text>
                                 </Pressable>
                                 <Pressable
-                                  onPress={() => runGroupFillAll(groupKey)}
+                                  onPress={() => {
+                                    setActiveGridId(groupKey);
+                                    runGroupFillAll(groupKey);
+                                  }}
                                   disabled={isFilling || group.rows.length < 2 || !groupApi}
                                   style={{
                                     borderWidth: 1,
@@ -3673,7 +4563,14 @@ export default function CoachWorkoutsDay() {
                               </View>
                             </View>
 
-                            <View style={{ flexDirection: "row", backgroundColor: "#f8fafc", borderBottomWidth: 1, borderBottomColor: "#e2e8f0" }}>
+                            <View
+                              style={{
+                                flexDirection: "row",
+                                backgroundColor: GROUP_SUBHEADER_BG,
+                                borderBottomWidth: 1,
+                                borderBottomColor: GROUP_HEADER_BORDER,
+                              }}
+                            >
                               <View style={{ width: COL.rowSelect, paddingHorizontal: 6, paddingVertical: 5, borderRightWidth: 1, borderRightColor: "#e2e8f0", alignItems: "center" }}>
                                 <Text style={{ fontSize: 10, fontWeight: "900", color: "#64748b" }}>◻</Text>
                               </View>
@@ -3683,8 +4580,8 @@ export default function CoachWorkoutsDay() {
                                   flexGrow: 0,
                                   flexShrink: 1,
                                   flexBasis: COL.athleteName,
-                                  minWidth: 160,
-                                  maxWidth: 260,
+                                  minWidth: 120,
+                                  maxWidth: COL.athleteName,
                                   paddingHorizontal: 8,
                                   paddingVertical: 5,
                                   borderRightWidth: 1,
@@ -3693,13 +4590,10 @@ export default function CoachWorkoutsDay() {
                               >
                                 <Text style={{ fontSize: 10, fontWeight: "900", color: "#64748b" }}>Athlete</Text>
                               </View>
-                              <View style={{ width: COL.athleteSession, paddingHorizontal: 8, paddingVertical: 5, borderRightWidth: 1, borderRightColor: "#e2e8f0" }}>
-                                <Text style={{ fontSize: 10, fontWeight: "900", color: "#64748b", textAlign: "center" }}>AM/PM</Text>
-                              </View>
-                              <View style={{ width: COL.athleteLocation, paddingHorizontal: 8, paddingVertical: 5, borderRightWidth: 1, borderRightColor: "#e2e8f0" }}>
+                              <View style={{ flexBasis: COL.athleteLocation, maxWidth: COL.athleteLocation, minWidth: 110, flexShrink: 1, paddingHorizontal: 8, paddingVertical: 5, borderRightWidth: 1, borderRightColor: "#e2e8f0" }}>
                                 <Text style={{ fontSize: 10, fontWeight: "900", color: "#64748b" }}>Location</Text>
                               </View>
-                              <View style={{ width: COL.athleteTime, paddingHorizontal: 8, paddingVertical: 5, borderRightWidth: 1, borderRightColor: "#e2e8f0" }}>
+                              <View style={{ flexBasis: COL.athleteTime, maxWidth: COL.athleteTime, minWidth: 70, flexShrink: 1, paddingHorizontal: 8, paddingVertical: 5, borderRightWidth: 1, borderRightColor: "#e2e8f0" }}>
                                 <Text style={{ fontSize: 10, fontWeight: "900", color: "#64748b" }}>Time</Text>
                               </View>
                               <View style={{ width: COL.distance, paddingHorizontal: 8, paddingVertical: 5, borderRightWidth: 1, borderRightColor: "#e2e8f0" }}>
@@ -3728,60 +4622,78 @@ export default function CoachWorkoutsDay() {
                             </View>
 
                             <GroupAthleteRows
+                              groupKey={groupKey}
                               batchRowKey={batchRow.key}
                               batchId={batchRow.batchId}
                               group={group}
-                              rowElByWorkoutId={rowElByWorkoutId}
                               rosterNameById={rosterNameById}
-                              athleteDrafts={athleteDrafts}
-                              athleteSaveState={athleteSaveState}
-                              categoryNames={(Array.isArray(categories) ? categories : [])
-                                .map((c) => String((c as any)?.name ?? "").trim())
-                                .filter((name) => !!name && name.toLowerCase() !== "other")}
-                              prescribedDistanceByWorkoutId={prescribedDistanceByWorkoutId}
+                              athleteDrafts={athleteDraftsForGroup}
+                              athleteSaveState={athleteSaveStateForGroup}
+                              prescribedDistanceByWorkoutId={prescribedDistanceByWorkoutIdForGroup}
                               deletingKey={deletingKey}
-                              draggingWorkoutId={draggingWorkoutId}
                               justMovedWorkoutId={justMovedWorkoutId}
                               onEditAthleteField={onEditAthleteField}
-                              onEditAthleteSession={onEditAthleteSession}
-                              onEditAthleteCategories={onEditAthleteCategories}
-                              onDeleteSingleWorkout={(id) => void deleteSingleWorkout(id)}
-                              setDraggingWorkoutId={setDraggingWorkoutId}
-                              setDragOverTargetGroupId={setDragOverTargetGroupId}
+                              onDeleteSingleWorkout={deleteSingleWorkout}
                               setMoveMode={setMoveMode}
+                              webDragMove={webDragMove}
+                              setWebDragMove={setWebDragMove}
+                              setWebDragGhost={setWebDragGhost}
+                              setWebDragGhostClone={setWebDragGhostClone}
+                              dragOverGroupKey={dragOverGroupKey}
+                              setDragOverGroupKey={setDragOverGroupKey}
                               activeGridId={activeGridId}
                               setActiveGridId={setActiveGridId}
-                              onSelectionMetaChange={(meta) =>
-                                setSelectedByGroup((prev) => ({ ...prev, [groupKey]: meta }))
-                              }
-                              onRegisterGridApi={(id, api) =>
-                                setGroupGridApis((prev) => {
-                                  if (!api) {
-                                    const next = { ...prev };
-                                    delete next[id];
-                                    return next;
-                                  }
-                                  return { ...prev, [id]: api };
-                                })
-                              }
+                              onSelectionMetaChange={handleGroupSelectionMetaChange}
+                              onRegisterGridApi={handleRegisterGroupGridApi}
                               batchHeaderActiveRef={batchHeaderActiveRef}
                             />
-                          </>
+                          </View>
                         );
 
                         if (Platform.OS === "web") {
                           return (
                             <div
                               key={`${batchRow.key}-${group.groupLabel}`}
-                              data-dropzone="group"
-                              style={groupSurfaceStyle as any}
                               onDragOver={(e: any) => {
-                                e.preventDefault();
-                                if (e?.dataTransfer) e.dataTransfer.dropEffect = "move";
-                                setDragOverTargetGroupId(groupTargetId);
+                                if (!webDragMove || webDragMove.batchKey !== batchRow.key) return;
+                                e.preventDefault?.();
+                                e.dataTransfer!.dropEffect = "move";
+                                if (dragOverGroupKey !== groupKey) setDragOverGroupKey(groupKey);
                               }}
-                              onDragLeave={() => setDragOverTargetGroupId((prev) => (prev === groupTargetId ? null : prev))}
-                              onDrop={(e: any) => void onWebDropToGroup(e, batchRow.key, batchRow.batchId, group.groupId)}
+                              onDragLeave={() => {
+                                if (dragOverGroupKey === groupKey) setDragOverGroupKey(null);
+                              }}
+                              onDrop={(e: any) => {
+                                if (!webDragMove || webDragMove.batchKey !== batchRow.key) return;
+                                e.preventDefault?.();
+                                setDragOverGroupKey(null);
+                                clearWebDragGhost();
+                                const payload = webDragMove;
+                                setWebDragMove(null);
+                                if (payload.fromGroupId === group.groupId) return;
+                                void performMoveWorkout({
+                                  workoutId: payload.workoutId,
+                                  batchKey: payload.batchKey,
+                                  batchId: payload.batchId,
+                                  fromGroupId: payload.fromGroupId,
+                                  toGroupId: group.groupId,
+                                });
+                              }}
+                              style={{
+                                position: "relative",
+                                zIndex: groupCategoryPickerOpen ? 50150 : 1,
+                                borderRadius: 8,
+                                overflow: "visible",
+                                outline:
+                                  dragOverGroupKey === groupKey && webDragMove?.batchKey === batchRow.key
+                                    ? "2px dashed rgba(59,130,246,0.55)"
+                                    : "none",
+                                outlineOffset: -2,
+                                backgroundColor:
+                                  dragOverGroupKey === groupKey && webDragMove?.batchKey === batchRow.key
+                                    ? "rgba(59,130,246,0.04)"
+                                    : "transparent",
+                              }}
                             >
                               {groupContent}
                             </div>
@@ -3795,29 +4707,73 @@ export default function CoachWorkoutsDay() {
                   {expanded && batchRow.batchId ? (
                     Platform.OS === "web" ? (
                       <div
-                        data-dropzone="new-group"
-                        style={{
-                          width: "100%",
-                          minHeight: 44,
-                          margin: "8px 8px",
-                          border: "1px dashed",
-                          borderColor: dragOverTargetGroupId === "NEW_GROUP" ? "#2563eb" : "#cbd5e1",
-                          backgroundColor: dragOverTargetGroupId === "NEW_GROUP" ? "#eff6ff" : "#f8fafc",
-                          borderRadius: 8,
-                          padding: "8px 10px",
-                          display: "flex",
-                          alignItems: "center",
-                          boxShadow: dragOverTargetGroupId === "NEW_GROUP" ? "inset 0 0 0 1px rgba(37,99,235,0.1)" : "none",
-                        } as any}
                         onDragOver={(e: any) => {
-                          e.preventDefault();
-                          if (e?.dataTransfer) e.dataTransfer.dropEffect = "move";
-                          setDragOverTargetGroupId("NEW_GROUP");
+                          if (!webDragMove || webDragMove.batchKey !== batchRow.key) return;
+                          e.preventDefault?.();
+                          e.dataTransfer!.dropEffect = "move";
+                          if (dragOverGroupKey !== `${batchRow.key}::NEW_GROUP`) {
+                            setDragOverGroupKey(`${batchRow.key}::NEW_GROUP`);
+                          }
                         }}
-                        onDragLeave={() => setDragOverTargetGroupId((prev) => (prev === "NEW_GROUP" ? null : prev))}
-                        onDrop={(e: any) => void onWebDropToGroup(e, batchRow.key, batchRow.batchId, "NEW_GROUP")}
+                        onDragLeave={() => {
+                          if (dragOverGroupKey === `${batchRow.key}::NEW_GROUP`) setDragOverGroupKey(null);
+                        }}
+                        onDrop={(e: any) => {
+                          if (!webDragMove || webDragMove.batchKey !== batchRow.key) return;
+                          e.preventDefault?.();
+                          const payload = webDragMove;
+                          setWebDragMove(null);
+                          clearWebDragGhost();
+                          setDragOverGroupKey(null);
+                          void performMoveWorkout({
+                            workoutId: payload.workoutId,
+                            batchKey: payload.batchKey,
+                            batchId: payload.batchId,
+                            fromGroupId: payload.fromGroupId,
+                            toGroupId: "NEW_GROUP",
+                          });
+                        }}
+                        style={{
+                          marginLeft: 8,
+                          marginRight: 8,
+                          marginTop: 8,
+                          marginBottom: 8,
+                          borderRadius: 8,
+                          outline:
+                            dragOverGroupKey === `${batchRow.key}::NEW_GROUP` &&
+                            webDragMove?.batchKey === batchRow.key
+                              ? "2px dashed rgba(59,130,246,0.55)"
+                              : "none",
+                          outlineOffset: -2,
+                        }}
                       >
-                        <Text style={{ fontSize: 12, fontWeight: "800", color: "#334155" }}>Drop here to add new group</Text>
+                        <Pressable
+                          onPress={() => {
+                            if (!moveMode || moveMode.batchKey !== batchRow.key) return;
+                            void performMoveWorkout({
+                              workoutId: moveMode.workoutId,
+                              batchKey: moveMode.batchKey,
+                              batchId: moveMode.batchId,
+                              fromGroupId: moveMode.fromGroupId,
+                              toGroupId: "NEW_GROUP",
+                            });
+                          }}
+                          style={{
+                            borderWidth: 1,
+                            borderStyle: "dashed",
+                            borderColor: "#cbd5e1",
+                            backgroundColor:
+                              dragOverGroupKey === `${batchRow.key}::NEW_GROUP` &&
+                              webDragMove?.batchKey === batchRow.key
+                                ? "rgba(59,130,246,0.07)"
+                                : "#f8fafc",
+                            borderRadius: 8,
+                            paddingHorizontal: 10,
+                            paddingVertical: 8,
+                          }}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: "800", color: "#334155" }}>+ Add new group</Text>
+                        </Pressable>
                       </div>
                     ) : (
                       <Pressable
@@ -3855,190 +4811,57 @@ export default function CoachWorkoutsDay() {
         </GridTable>
       </ScrollView>
 
-      {athleteMenuBatch ? (
-        <Modal transparent animationType="fade" visible onRequestClose={() => setAthleteMenuBatchKey(null)}>
-          <Pressable
-            onPress={() => setAthleteMenuBatchKey(null)}
-            style={{ flex: 1, backgroundColor: "rgba(2, 6, 23, 0.35)", justifyContent: Platform.OS === "web" ? "center" : "flex-end", alignItems: "center" }}
-          >
-            <Pressable
-              onPress={(e) => e.stopPropagation()}
+      {Platform.OS === "web" && webDragGhost ? (
+        <div
+          style={{
+            position: "fixed",
+            left: Math.max(8, webDragGhost.x + 12),
+            top: Math.max(8, webDragGhost.y + 12),
+            width: Math.max(360, webDragGhost.width || Math.max(420, worksheetMinWidth - 140)),
+            maxWidth: "78vw",
+            pointerEvents: "none",
+            zIndex: 99999,
+            opacity: 0.94,
+          }}
+        >
+          <div
+            ref={webDragGhostHostRef}
+            style={{
+              pointerEvents: "none",
+              borderRadius: 8,
+              overflow: "hidden",
+              display: webDragGhostUsingClone ? "block" : "none",
+            }}
+          />
+          {!webDragGhostUsingClone ? (
+            <div
               style={{
-                width: Platform.OS === "web" ? 560 : "100%",
-                maxHeight: Platform.OS === "web" ? "72%" : "80%",
-                backgroundColor: "#fff",
-                borderRadius: Platform.OS === "web" ? 12 : 0,
-                borderTopLeftRadius: Platform.OS === "web" ? 12 : 14,
-                borderTopRightRadius: Platform.OS === "web" ? 12 : 14,
-                paddingHorizontal: 12,
-                paddingVertical: 10,
-                gap: 8,
+                display: "grid",
+                gridTemplateColumns: "minmax(120px, 220px) minmax(90px, 150px) minmax(70px, 100px) 100px minmax(180px, 1fr) minmax(120px, 180px)",
+                columnGap: 10,
+                alignItems: "start",
+                padding: "8px 10px",
+                fontSize: 12,
+                color: "#0f172a",
+                background: "#ffffff",
+                border: "1px solid #dbe2ee",
+                borderRadius: 8,
+                boxShadow: "0 12px 30px rgba(15,23,42,0.18)",
+                overflow: "hidden",
               }}
             >
-              <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a" }}>Batch Athletes</Text>
-              <Text style={{ fontSize: 12, fontWeight: "700", color: "#64748b" }}>
-                Remove athletes from this batch
-              </Text>
-
-              <ScrollView style={{ maxHeight: Platform.OS === "web" ? 360 : 320 }}>
-                {athleteMenuItems.map((item) => {
-                  const busy = removingAthleteId === item.athleteId;
-                  return (
-                    <View
-                      key={`batch-athlete-${athleteMenuBatch.key}-${item.athleteId}`}
-                      style={{
-                        borderWidth: 1,
-                        borderColor: "#e2e8f0",
-                        backgroundColor: "#fff",
-                        borderRadius: 8,
-                        paddingHorizontal: 10,
-                        paddingVertical: 8,
-                        marginBottom: 6,
-                        opacity: busy ? 0.7 : 1,
-                        flexDirection: "row",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: 8,
-                      }}
-                    >
-                      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1 }}>
-                        <Text style={{ fontSize: 12, fontWeight: "900", color: "#1d4ed8" }}>✓</Text>
-                        <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155", flexShrink: 1 }}>
-                          {item.displayName}
-                        </Text>
-                      </View>
-                      <Pressable
-                        onPress={() => void handleRemoveAthleteFromBatch(item.athleteId)}
-                        disabled={busy}
-                        style={{
-                          borderWidth: 1,
-                          borderColor: "#f2c4c4",
-                          backgroundColor: "#fff0f0",
-                          borderRadius: 8,
-                          paddingHorizontal: 10,
-                          paddingVertical: 6,
-                          opacity: busy ? 0.65 : 1,
-                        }}
-                      >
-                        <Text style={{ fontSize: 11, fontWeight: "900", color: "#9f1239" }}>
-                          {busy ? "Removing..." : "Remove"}
-                        </Text>
-                      </Pressable>
-                    </View>
-                  );
-                })}
-              </ScrollView>
-
-              <Pressable
-                onPress={() => setAthleteMenuBatchKey(null)}
-                style={{
-                  borderWidth: 1,
-                  borderColor: "#e2e8f0",
-                  borderRadius: 8,
-                  paddingHorizontal: 10,
-                  paddingVertical: 8,
-                  alignItems: "center",
-                }}
-              >
-                <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Close</Text>
-              </Pressable>
-            </Pressable>
-          </Pressable>
-        </Modal>
+              <div style={{ fontWeight: 800, lineHeight: 1.3 }}>{webDragGhost.athleteName || "Athlete"}</div>
+              <div style={{ fontWeight: 600, color: "#334155", lineHeight: 1.3 }}>{webDragGhost.location || "-"}</div>
+              <div style={{ fontWeight: 600, color: "#334155", lineHeight: 1.3 }}>{webDragGhost.timeText || "-"}</div>
+              <div style={{ fontWeight: 800, textAlign: "right", color: "#1f2937", lineHeight: 1.3 }}>{webDragGhost.distanceText || "-"}</div>
+              <div style={{ fontWeight: 600, color: "#334155", lineHeight: 1.3 }}>{webDragGhost.details || "-"}</div>
+              <div style={{ fontWeight: 700, color: "#475569", lineHeight: 1.3 }}>{webDragGhost.categoriesText || "-"}</div>
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
-      {pickerBatch ? (
-        <Modal transparent animationType="fade" visible onRequestClose={() => setPickerBatchKey(null)}>
-          <Pressable
-            onPress={() => setPickerBatchKey(null)}
-            style={{ flex: 1, backgroundColor: "rgba(2, 6, 23, 0.35)", justifyContent: Platform.OS === "web" ? "center" : "flex-end", alignItems: "center" }}
-          >
-            <Pressable
-              onPress={(e) => e.stopPropagation()}
-              style={{
-                width: Platform.OS === "web" ? 560 : "100%",
-                maxHeight: Platform.OS === "web" ? "72%" : "80%",
-                backgroundColor: "#fff",
-                borderRadius: Platform.OS === "web" ? 12 : 0,
-                borderTopLeftRadius: Platform.OS === "web" ? 12 : 14,
-                borderTopRightRadius: Platform.OS === "web" ? 12 : 14,
-                paddingHorizontal: 12,
-                paddingVertical: 10,
-                gap: 8,
-              }}
-            >
-              <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a" }}>Add Athletes to Batch</Text>
-              <TextCellEditor
-                value={pickerQuery}
-                onChangeText={setPickerQuery}
-                placeholder="Search athletes..."
-                style={{
-                  borderWidth: 1,
-                  borderColor: "#d1d9e6",
-                  borderRadius: 8,
-                  paddingHorizontal: 10,
-                  paddingVertical: 8,
-                  fontSize: 13,
-                  fontWeight: "600",
-                  color: "#0f172a",
-                }}
-              />
-
-              <ScrollView style={{ maxHeight: Platform.OS === "web" ? 360 : 320 }}>
-                {filteredRosterOptions.map((r) => {
-                  const selected = pickerSelectedAthleteIds.has(String(r.id).trim());
-                  const busy = addingAthleteId === r.id;
-                  return (
-                    <Pressable
-                      key={`picker-athlete-${r.id}`}
-                      onPress={() => {
-                        if (!selected && !busy) void addAthleteToBatch(r.id);
-                      }}
-                      disabled={selected || busy}
-                      style={{
-                        borderWidth: 1,
-                        borderColor: selected ? "#bfdbfe" : "#e2e8f0",
-                        backgroundColor: selected ? "#eff6ff" : "#fff",
-                        borderRadius: 8,
-                        paddingHorizontal: 10,
-                        paddingVertical: 8,
-                        marginBottom: 6,
-                        opacity: busy ? 0.7 : 1,
-                        flexDirection: "row",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                      }}
-                    >
-                      <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155", flexShrink: 1 }}>
-                        {r.displayName}
-                      </Text>
-                      <Text style={{ fontSize: 11, fontWeight: "900", color: selected ? "#1d4ed8" : "#64748b" }}>
-                        {selected ? "Added" : busy ? "Adding..." : "Add"}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-
-              <Pressable
-                onPress={() => setPickerBatchKey(null)}
-                style={{
-                  borderWidth: 1,
-                  borderColor: "#e2e8f0",
-                  borderRadius: 8,
-                  paddingHorizontal: 10,
-                  paddingVertical: 8,
-                  alignItems: "center",
-                }}
-              >
-                <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Close</Text>
-              </Pressable>
-            </Pressable>
-          </Pressable>
-        </Modal>
-      ) : null}
-
-      {Platform.OS !== "web" && moveMode ? (
+      {moveMode ? (
         <Modal transparent animationType="fade" visible onRequestClose={() => setMoveMode(null)}>
           <Pressable
             onPress={() => setMoveMode(null)}

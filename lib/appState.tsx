@@ -3,8 +3,6 @@ import React, { createContext, useCallback, useContext, useMemo, useState } from
 export type AppRuntimeState = {
   currentTeamId: string | null;
   activeDateISO: string | null;
-  activeBatchId: string | null;
-  selectedBatchHighlight: string | null;
   plannerDraftId: string | null;
   lastPlannerSubmitDebug: string;
   lastSaveError: string | null;
@@ -19,8 +17,6 @@ type AppRuntimeContextValue = {
 const defaultState: AppRuntimeState = {
   currentTeamId: null,
   activeDateISO: null,
-  activeBatchId: null,
-  selectedBatchHighlight: null,
   plannerDraftId: null,
   lastPlannerSubmitDebug: "",
   lastSaveError: null,

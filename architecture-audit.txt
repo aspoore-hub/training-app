@@ -1,0 +1,89 @@
+===== ROSTER LEGACY USAGE =====
+components/roster/RosterListPane.tsx:import { loadRoster } from "../../lib/roster";
+lib/migrations.ts:import { migrateRosterToV2Once } from "./roster";
+components/roster/RosterListPane.tsx:      const local = await loadRoster();
+lib/roster.ts:export async function loadRoster(): Promise<AthleteProfile[]> {
+lib/roster.ts:  const roster = await loadRoster();
+lib/team.ts:  const roster = await loadRoster();
+lib/roster.ts:export async function saveRoster(list: AthleteProfile[]) {
+lib/team.ts:  await saveRoster(next);
+lib/roster.ts:export async function migrateRosterToV2Once() {
+lib/migrations.ts:import { migrateRosterToV2Once } from "./roster";
+lib/migrations.ts:  await migrateRosterToV2Once();
+
+===== LEGACY SYNC USAGE =====
+lib/storage.ts:import { loadJSONWithCloudSync, saveJSONWithCloudSync } from "./cloudSync";
+lib/roster.ts:import { loadJSONWithTeamCloudSync, saveJSONWithTeamCloudSync } from "./teamCloudSync";
+lib/storage.ts:import { loadJSONWithTeamCloudSync, saveJSONWithTeamCloudSync } from "./teamCloudSync";
+lib/storage.ts:import { loadJSONWithCloudSync, saveJSONWithCloudSync } from "./cloudSync";
+lib/storage.ts:  return await saveJSONWithCloudSync<T>(key, value);
+lib/cloudSync.ts:export async function saveJSONWithCloudSync<T>(
+lib/storage.ts:import { loadJSONWithCloudSync, saveJSONWithCloudSync } from "./cloudSync";
+lib/storage.ts:  return await loadJSONWithCloudSync<T>(key, fallback);
+lib/cloudSync.ts:export async function loadJSONWithCloudSync<T>(
+lib/roster.ts:import { loadJSONWithTeamCloudSync, saveJSONWithTeamCloudSync } from "./teamCloudSync";
+lib/roster.ts:  await saveJSONWithTeamCloudSync<AthleteProfile[]>(ROSTER_V2_KEY, sortRosterByLastName(list));
+lib/roster.ts:    await saveJSONWithTeamCloudSync<AthleteProfile[]>(ROSTER_V2_KEY, roster);
+lib/storage.ts:import { loadJSONWithTeamCloudSync, saveJSONWithTeamCloudSync } from "./teamCloudSync";
+lib/storage.ts:  if (isTeamKey(key)) return await saveJSONWithTeamCloudSync<T>(key, value);
+lib/teamCloudSync.ts:export async function saveJSONWithTeamCloudSync<T>(
+lib/roster.ts:import { loadJSONWithTeamCloudSync, saveJSONWithTeamCloudSync } from "./teamCloudSync";
+lib/roster.ts:  const v2 = await loadJSONWithTeamCloudSync<AthleteProfile[]>(ROSTER_V2_KEY, []);
+lib/storage.ts:import { loadJSONWithTeamCloudSync, saveJSONWithTeamCloudSync } from "./teamCloudSync";
+lib/storage.ts:  if (isTeamKey(key)) return await loadJSONWithTeamCloudSync<T>(key, fallback);
+lib/teamCloudSync.ts:export async function loadJSONWithTeamCloudSync<T>(
+app/_layout.tsx:import { bootstrapSyncOnce } from "../lib/bootstrapSync";
+app/_layout.tsx:          // await bootstrapSyncOnce();
+app/(auth)/login.tsx:import { bootstrapSyncOnce } from "../../lib/bootstrapSync";
+app/(auth)/login.tsx:        bootstrapSyncOnce(),
+lib/bootstrapSync.ts:export async function bootstrapSyncOnce() {
+
+===== TEAM STORE USAGE =====
+app/(coach)/(tabs)/planner.tsx:import { teamStore } from "../../../lib/teamStore";
+components/roster/RosterListPane.tsx:import { teamStore, type TeamAthlete } from "../../lib/teamStore";
+
+===== TEAM DATA STORE USAGE =====
+app/(athlete)/workout/[id].tsx:import { teamDataStore } from "../../../lib/teamDataStore";
+app/(coach)/(tabs)/mileage.tsx:import { teamDataStore } from "../../../lib/teamDataStore";
+
+===== DIRECT SUPABASE TABLE USAGE =====
+lib/teamDataStore.ts:      .from("team_athletes")
+lib/teamDataStore.ts:      .from("team_athletes")
+lib/team.ts:    .from("team_athletes")
+lib/team.ts:    .from("team_athletes")
+lib/team.ts:    .from("team_athletes")
+lib/team.ts:    .from("team_athletes")
+lib/team.ts:    .from("team_athletes")
+lib/team.ts:    .from("team_athletes")
+lib/teamStore.ts:        .from("team_athletes")
+lib/teamStore.ts:      .from("team_athletes")
+lib/teamStore.ts:      .from("team_athletes")
+lib/teamRoster.ts:    .from("team_athletes")
+lib/teamWorkoutsCloud.ts:    .from("team_workouts")
+lib/teamWorkoutsCloud.ts:    .from("team_workouts")
+lib/teamWorkoutsCloud.ts:    .from("team_workouts")
+lib/teamWorkoutsCloud.ts:    .from("team_workouts")
+lib/teamWorkoutsCloud.ts:    .from("team_workouts")
+lib/teamWorkoutsCloud.ts:    .from("team_workouts")
+lib/teamWorkoutsCloud.ts:    .from("team_workouts")
+lib/teamWorkoutsCloud.ts:    .from("team_workouts")
+lib/teamWorkoutsCloud.ts:    .from("team_workouts")
+lib/teamDataStore.ts:      .from("team_workouts")
+lib/mileageCloud.ts:    .from("team_mileage_cells")
+lib/mileageCloud.ts:    .from("team_mileage_cells")
+lib/mileageCloud.ts:    .from("team_mileage_day_flags")
+lib/mileageCloud.ts:    .from("team_mileage_day_flags")
+lib/teamDataStore.ts:    .from("profiles")
+lib/team.ts:    .from("profiles")
+lib/team.ts:    .from("profiles")
+lib/teamStore.ts:    .from("profiles")
+lib/profile.ts:    .from("profiles")
+lib/profile.ts:    .from("profiles")
+lib/profile.ts:  const { error } = await supabase.from("profiles").insert({
+lib/profile.ts:    .from("profiles")
+lib/settings.ts:      .from("team_kv_blobs")
+lib/settings.ts:    .from("team_kv_blobs")
+lib/bootstrapTeamSync.ts:    .from("team_kv_blobs")
+lib/bootstrapTeamSync.ts:  const { error } = await supabase.from("team_kv_blobs").upsert(
+lib/teamCloudSync.ts:  const { error } = await supabase.from("team_kv_blobs").upsert(
+lib/teamCloudSync.ts:    .from("team_kv_blobs")

@@ -20,12 +20,17 @@ import { getCurrentTeamId, getMyClaimedAthleteProfileId, getTeamAthlete } from "
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../lib/pace";
 import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../lib/units";
 import { loadAthletePaceOverrides, resolveAthletePaceSeconds, type AthletePaceOverrides } from "../../lib/athletePace";
-import type { AthleteWorkout, MileageValue, WeekStartDay, WeeklyMileagePlan, WorkoutCategory } from "../../lib/types";
+import type { AthleteWorkout, MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
 import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../lib/categories";
-import { WEEK_START_KEY, MILEAGE_PLANS_KEY, getWeekStartISO, getWeekIndex, sumMileage, formatSum, getDayTarget, parseISODate, toISODate, formatMileage } from "../../lib/mileagePlan";
+import { getWeekStartISO, getWeekIndex, sumMileage, formatSum, parseMileageInput, parseISODate, toISODate, formatMileage } from "../../lib/mileagePlan";
 import { loadMileageFeedback, type MileageSessionFeedback } from "../../lib/mileageFeedback";
 import { loadFeedbackFlagSettings, type FeedbackWarningMode } from "../../lib/feedbackFlags";
 import { listAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
+import { teamDataStore } from "../../lib/teamDataStore";
+import { loadWeekStartSetting } from "../../lib/settings";
+import { PrevNextNavButtons } from "../../components/shared/PrevNextNavButtons";
+import { SegmentedViewToggle } from "../../components/shared/SegmentedViewToggle";
+import { SectionEmptyText, SectionLabel } from "../../components/shared/PlannedRecordedPrimitives";
 
 const SELECTED_KEY = "training_app_selected_athlete_v1";
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -127,22 +132,12 @@ function xtRangeForValue(v: MileageValue | undefined): SecRange {
   return { min: 0, max: 0 };
 }
 
-function sumWeekXTSecRange(plan: WeeklyMileagePlan | undefined): SecRange {
-  if (!plan) return { min: 0, max: 0 };
-
-  let min = 0;
-  let max = 0;
-  for (let i = 0; i < 7; i++) {
-    const day: any = plan.days?.[String(i)] ?? {};
-    const values: Array<MileageValue | undefined> = [day.am ?? day.AM, day.pm ?? day.PM];
-    for (const v of values) {
-      const xt = xtRangeForValue(v);
-      min += xt.min;
-      max += xt.max;
-    }
-  }
-
-  return { min, max };
+function toMileageValue(raw: unknown): MileageValue | undefined {
+  if (!raw) return undefined;
+  if (typeof raw === "string") return parseMileageInput(raw);
+  if (typeof raw === "number") return { kind: "exact", value: raw };
+  if (typeof raw === "object") return raw as MileageValue;
+  return undefined;
 }
 
 function formatXTRangeLabel(sec: SecRange): string {
@@ -236,18 +231,17 @@ function toAthleteWorkout(row: TeamWorkoutRow, athleteName: string): AthleteWork
     categories: row.categories ?? undefined,
     title: row.title ?? "Workout",
     details: row.details ?? undefined,
-    plannedMiles: typeof row.planned_distance === "number" ? row.planned_distance : undefined,
     completedMiles: typeof (row as any).completed_miles === "number" ? (row as any).completed_miles : undefined,
     completedTime: String((row as any).completed_time_text ?? "").trim() || undefined,
     splitsOrPace: String((row as any).splits_or_pace ?? "").trim() || undefined,
     additionalFeedback: String((row as any).additional_feedback ?? "").trim() || undefined,
     feedback: String((row as any).additional_feedback ?? "").trim() || undefined,
-    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
   };
 }
 
 export default function AthleteMonthCalendar() {
   const router = useRouter();
+  const store = teamDataStore.use();
   const { name } = useLocalSearchParams<{ name?: string }>();
   const athleteName = name ?? "";
   const todayISO = useMemo(() => {
@@ -258,9 +252,8 @@ export default function AthleteMonthCalendar() {
   }, []);
 
   const [selectedAthleteId, setSelectedAthleteId] = useState<string | null>(null);
-  const [selectedAthleteLabel, setSelectedAthleteLabel] = useState<string | null>(null);
+  const [, setSelectedAthleteLabel] = useState<string | null>(null);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
-  const [mileagePlans, setMileagePlans] = useState<WeeklyMileagePlan[]>([]);
   const [allWorkouts, setAllWorkouts] = useState<AthleteWorkout[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [anchorMonth, setAnchorMonth] = useState(() => monthStart(new Date()));
@@ -272,11 +265,21 @@ export default function AthleteMonthCalendar() {
   const [feedbackWarningMode, setFeedbackWarningMode] = useState<FeedbackWarningMode>("all");
   const [feedbackStartDateISO, setFeedbackStartDateISO] = useState<string | undefined>(undefined);
 
+  const loadMonthWeekStartFromShared = useCallback(async () => {
+    const weekStartResult = await loadWeekStartSetting();
+    const normalized: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
+    console.log("[athlete-month] week start loaded via shared helper", {
+      raw: weekStartResult.raw,
+      normalized,
+    });
+    setWeekStartsOn(normalized);
+    return normalized;
+  }, []);
+
   const loadMonthData = useCallback(async () => {
+    const ws = await loadMonthWeekStartFromShared();
     const [
       selected,
-      ws,
-      plans,
       storedCategories,
       pace,
       unit,
@@ -285,8 +288,6 @@ export default function AthleteMonthCalendar() {
       flagSettings,
     ] = await Promise.all([
       loadJSON<string | null>(SELECTED_KEY, null),
-      loadJSON<WeekStartDay>(WEEK_START_KEY, 1),
-      loadJSON<WeeklyMileagePlan[]>(MILEAGE_PLANS_KEY, []),
       loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       loadPaceSecondsPerMile(),
       loadDistanceUnit(),
@@ -314,8 +315,6 @@ export default function AthleteMonthCalendar() {
       setSelectedAthleteLabel(null);
     }
 
-    setWeekStartsOn((ws ?? 1) as WeekStartDay);
-    setMileagePlans(plans ?? []);
     setCategories(normalizeCategories(storedCategories));
     setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
     setDistanceUnit(unit);
@@ -330,13 +329,16 @@ export default function AthleteMonthCalendar() {
       return;
     }
 
-    const grid = buildMonthGrid(anchorMonth, (ws ?? 1) as WeekStartDay);
+    const grid = buildMonthGrid(anchorMonth, ws);
+    const weekStarts = Array.from(new Set(grid.map((cell) => getWeekStartISO(cell.dateISO, ws))));
+    await Promise.all(weekStarts.map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO)));
+
     const startISO = grid[0]?.dateISO ?? toISODate(monthStart(anchorMonth));
     const endISO = grid[grid.length - 1]?.dateISO ?? startISO;
     const rows = await listAthleteWorkoutsInRange(selectedId, startISO, endISO);
     const resolvedAthleteName = selectedName ?? athleteName ?? "Athlete";
     setAllWorkouts(rows.map((row) => toAthleteWorkout(row, resolvedAthleteName)));
-  }, [anchorMonth, athleteName]);
+  }, [anchorMonth, athleteName, loadMonthWeekStartFromShared]);
 
   useEffect(() => {
     loadMonthData();
@@ -418,16 +420,43 @@ export default function AthleteMonthCalendar() {
     transform: [{ translateX: translateX.value }],
   }));
 
-  const planByWeek = useMemo(() => {
-    if (!selectedAthleteId) return new Map<string, WeeklyMileagePlan>();
+  const visibleDayPlanByDate = useMemo(() => {
+    const map = new Map<string, { am: MileageValue | undefined; pm: MileageValue | undefined; ncaaOff: boolean }>();
+    if (!selectedAthleteId) return map;
 
-    const map = new Map<string, WeeklyMileagePlan>();
-    for (const p of mileagePlans) {
-      if (String((p as any)?.athleteId ?? "") !== selectedAthleteId) continue;
-      map.set(p.weekStartISO, p);
+    for (const cell of monthCells) {
+      const weekStartISO = getWeekStartISO(cell.dateISO, weekStartsOn);
+      const idx = getWeekIndex(cell.dateISO, weekStartISO);
+      if (idx < 0 || idx > 6) continue;
+      const rows = store.mileageCellsByWeek[weekStartISO] ?? [];
+      const flags = store.mileageFlagsByWeek[weekStartISO] ?? [];
+      const am = toMileageValue(
+        rows.find(
+          (row) =>
+            String(row.athlete_profile_id) === String(selectedAthleteId) &&
+            row.day_idx === idx &&
+            row.session === "AM"
+        )?.value
+      );
+      const pm = toMileageValue(
+        rows.find(
+          (row) =>
+            String(row.athlete_profile_id) === String(selectedAthleteId) &&
+            row.day_idx === idx &&
+            row.session === "PM"
+        )?.value
+      );
+      const ncaaOff =
+        flags.find(
+          (row) =>
+            String(row.athlete_profile_id) === String(selectedAthleteId) &&
+            row.day_idx === idx
+        )?.ncaa_off ?? false;
+      map.set(cell.dateISO, { am, pm, ncaaOff });
     }
+
     return map;
-  }, [mileagePlans, selectedAthleteId]);
+  }, [monthCells, selectedAthleteId, store.mileageCellsByWeek, store.mileageFlagsByWeek, weekStartsOn]);
 
   const effectivePaceSecPerMile = useMemo(
     () => resolveAthletePaceSeconds(selectedAthleteId, athletePaceOverrides, paceSecPerMile),
@@ -440,14 +469,11 @@ export default function AthleteMonthCalendar() {
     }
 
     const currentWeekStart = getWeekStartISO(todayISO, weekStartsOn);
-    const plan = planByWeek.get(currentWeekStart);
-    if (!plan) return { miles: "", xt: "" };
-
     const values: Array<MileageValue | undefined> = [];
     for (let i = 0; i < 7; i++) {
-      const day: any = plan.days?.[String(i)] ?? {};
-      values.push(day.am ?? day.AM);
-      values.push(day.pm ?? day.PM);
+      const day = visibleDayPlanByDate.get(addDaysISO(currentWeekStart, i));
+      values.push(day?.am);
+      values.push(day?.pm);
     }
 
     const milesSum = sumMileage(values, effectivePaceSecPerMile);
@@ -460,11 +486,15 @@ export default function AthleteMonthCalendar() {
         ? `${roundedMin} ${distanceUnitLabel(distanceUnit)}`
         : `${roundedMin}-${roundedMax} ${distanceUnitLabel(distanceUnit)}`;
 
-    const xt = sumWeekXTSecRange(plan);
+    let xt: SecRange = { min: 0, max: 0 };
+    for (const v of values) {
+      const next = xtRangeForValue(v);
+      xt = { min: xt.min + next.min, max: xt.max + next.max };
+    }
     const xtLabel = formatXTRangeLabel(xt);
 
     return { miles: milesLabel, xt: xtLabel };
-  }, [distanceUnit, effectivePaceSecPerMile, planByWeek, selectedAthleteId, todayISO, weekStartsOn]);
+  }, [distanceUnit, effectivePaceSecPerMile, selectedAthleteId, todayISO, visibleDayPlanByDate, weekStartsOn]);
   const compactGoalLine = useMemo(() => {
     const miles = thisWeekGoal.miles || "No distance goal";
     const xt = thisWeekGoal.xt ? thisWeekGoal.xt.replace(" Cross training", " XT") : "";
@@ -498,14 +528,10 @@ export default function AthleteMonthCalendar() {
     const missing = new Set<string>();
     const ncaaOffDates = new Set<string>();
 
-    for (const plan of mileagePlans) {
-      if (String((plan as any)?.athleteId ?? "") !== selectedAthleteId) continue;
-      for (let idx = 0; idx < 7; idx++) {
-        const dateISO = addDaysISO(plan.weekStartISO, idx);
-        if (!isDateWithinWarningWindow(dateISO, todayISO, feedbackWarningMode, feedbackStartDateISO)) continue;
-        const day = getDayTarget(plan, idx) as any;
-        if (day?.ncaaOff) ncaaOffDates.add(dateISO);
-      }
+    for (const cell of monthCells) {
+      const dateISO = cell.dateISO;
+      if (!isDateWithinWarningWindow(dateISO, todayISO, feedbackWarningMode, feedbackStartDateISO)) continue;
+      if (visibleDayPlanByDate.get(dateISO)?.ncaaOff) ncaaOffDates.add(dateISO);
     }
 
     const workoutSessions = new Map<string, { hasAM: boolean; hasPM: boolean; fbAM: boolean; fbPM: boolean }>();
@@ -555,31 +581,28 @@ export default function AthleteMonthCalendar() {
       mileageFeedbackBySession.set(dateISO, state);
     }
 
-    for (const plan of mileagePlans) {
-      if (String((plan as any)?.athleteId ?? "") !== selectedAthleteId) continue;
-      for (let idx = 0; idx < 7; idx++) {
-        const dateISO = addDaysISO(plan.weekStartISO, idx);
-        if (!isDateWithinWarningWindow(dateISO, todayISO, feedbackWarningMode, feedbackStartDateISO)) continue;
-        const day = getDayTarget(plan, idx) as any;
-        const isNCAAOffDay = !!day.ncaaOff;
-        if (isNCAAOffDay) continue;
-        const hasPlannedAM = String(formatMileage(day.am ?? day.AM)).trim().length > 0;
-        const hasPlannedPM = String(formatMileage(day.pm ?? day.PM)).trim().length > 0;
+    for (const cell of monthCells) {
+      const dateISO = cell.dateISO;
+      if (!isDateWithinWarningWindow(dateISO, todayISO, feedbackWarningMode, feedbackStartDateISO)) continue;
+      const day = visibleDayPlanByDate.get(dateISO);
+      const isNCAAOffDay = !!day?.ncaaOff;
+      if (isNCAAOffDay) continue;
+      const hasPlannedAM = String(formatMileage(day?.am)).trim().length > 0;
+      const hasPlannedPM = String(formatMileage(day?.pm)).trim().length > 0;
 
-        const wState = workoutSessions.get(dateISO) ?? { hasAM: false, hasPM: false, fbAM: false, fbPM: false };
-        const mState = mileageFeedbackBySession.get(dateISO) ?? { fbAM: false, fbPM: false };
+      const wState = workoutSessions.get(dateISO) ?? { hasAM: false, hasPM: false, fbAM: false, fbPM: false };
+      const mState = mileageFeedbackBySession.get(dateISO) ?? { fbAM: false, fbPM: false };
 
-        const requiresAM = hasPlannedAM || wState.hasAM;
-        const requiresPM = hasPlannedPM || wState.hasPM;
+      const requiresAM = hasPlannedAM || wState.hasAM;
+      const requiresPM = hasPlannedPM || wState.hasPM;
 
-        const hasAMFeedback = wState.fbAM || mState.fbAM;
-        const hasPMFeedback = wState.fbPM || mState.fbPM;
+      const hasAMFeedback = wState.fbAM || mState.fbAM;
+      const hasPMFeedback = wState.fbPM || mState.fbPM;
 
-        if (ncaaOffDates.has(dateISO)) continue;
+      if (ncaaOffDates.has(dateISO)) continue;
 
-        if ((requiresAM && !hasAMFeedback) || (requiresPM && !hasPMFeedback)) {
-          missing.add(dateISO);
-        }
+      if ((requiresAM && !hasAMFeedback) || (requiresPM && !hasPMFeedback)) {
+        missing.add(dateISO);
       }
     }
 
@@ -598,27 +621,26 @@ export default function AthleteMonthCalendar() {
     feedbackStartDateISO,
     feedbackWarningMode,
     mileageFeedbackEntries,
-    mileagePlans,
+    monthCells,
     selectedAthleteId,
-    selectedAthleteLabel,
     todayISO,
+    visibleDayPlanByDate,
   ]);
 
   return (
     <View style={styles.container}>
-      <View style={styles.viewToggleRow}>
-        <Pressable style={[styles.viewTogglePill, styles.viewTogglePillActive]}>
-          <Text style={[styles.viewToggleText, styles.viewToggleTextActive]}>Monthly</Text>
-        </Pressable>
-        <Pressable onPress={() => router.push("/(athlete)/week")} style={styles.viewTogglePill}>
-          <Text style={styles.viewToggleText}>Weekly</Text>
-        </Pressable>
-      </View>
+      <SegmentedViewToggle
+        activeKey="month"
+        items={[
+          { key: "month", label: "Monthly", onPress: () => {} },
+          { key: "week", label: "Weekly", onPress: () => router.push("/(athlete)/week") },
+        ]}
+      />
 
-      <View style={styles.headerRow}>
-        <Pressable onPress={() => commitSwipe("prev")} style={styles.monthNavButton}>
-          <Text style={styles.monthNavButtonText}>◀</Text>
-        </Pressable>
+      <View style={[styles.headerRow, { position: "relative", minHeight: 40 }]}>
+        <View style={{ position: "absolute", left: 0, right: 0, top: 0 }}>
+          <PrevNextNavButtons onPrev={() => commitSwipe("prev")} onNext={() => commitSwipe("next")} spread />
+        </View>
 
         <View style={styles.monthCenter}>
           <Text style={styles.monthLabel}>{monthLabel}</Text>
@@ -627,10 +649,6 @@ export default function AthleteMonthCalendar() {
             <Text numberOfLines={1} style={styles.compactGoalValue}>{compactGoalLine}</Text>
           </View>
         </View>
-
-        <Pressable onPress={() => commitSwipe("next")} style={styles.monthNavButton}>
-          <Text style={styles.monthNavButtonText}>▶</Text>
-        </Pressable>
       </View>
 
       {!selectedAthleteId ? (
@@ -655,6 +673,15 @@ export default function AthleteMonthCalendar() {
           </View>
         ))}
       </View>
+      <View style={styles.signalLegend}>
+        <Text style={styles.signalLegendLabel}>Planned:</Text>
+        <Text style={styles.signalLegendValue}>AM/PM targets</Text>
+        <Text style={styles.signalLegendDivider}>•</Text>
+        <Text style={styles.signalLegendLabel}>Recorded:</Text>
+        <Text style={styles.signalLegendValue}>workout dots</Text>
+        <Text style={styles.signalLegendDivider}>•</Text>
+        <Text style={styles.signalLegendValue}>! feedback needed</Text>
+      </View>
 
       <GestureDetector gesture={pan}>
         <Animated.View style={[styles.gridWrap, animatedStyle]}>
@@ -672,24 +699,21 @@ export default function AthleteMonthCalendar() {
                         let pmText = "";
                         let isNCAAOffDay = false;
                         if (selectedAthleteId) {
-                          const weekStartISO = getWeekStartISO(iso, weekStartsOn);
-                          const plan = planByWeek.get(weekStartISO);
-                          const idx = getWeekIndex(iso, weekStartISO);
-                          if (plan && idx >= 0 && idx < 7) {
-                            const target = getDayTarget(plan, idx);
-                            const dayAny = target as any;
-                            isNCAAOffDay = !!dayAny.ncaaOff;
-                            const amValue = dayAny.am ?? dayAny.AM;
-                            const pmValue = dayAny.pm ?? dayAny.PM;
-                            amText = isXTValue(amValue) ? "XT" : formatMilesOnly(amValue, effectivePaceSecPerMile);
-                            pmText = isXTValue(pmValue) ? "XT" : formatMilesOnly(pmValue, effectivePaceSecPerMile);
-                          }
+                          const day = visibleDayPlanByDate.get(iso);
+                          const amValue = day?.am;
+                          const pmValue = day?.pm;
+                          isNCAAOffDay = !!day?.ncaaOff;
+                          amText = isXTValue(amValue) ? "XT" : formatMilesOnly(amValue, effectivePaceSecPerMile);
+                          pmText = isXTValue(pmValue) ? "XT" : formatMilesOnly(pmValue, effectivePaceSecPerMile);
                         }
 
                         const hasAm = !!amText;
                         const hasPm = !!pmText;
                         const hasPlanForDay = hasAm || hasPm;
                         const singleAmount = amText || pmText;
+                        const recordedDots = workoutDotColorsByDate.get(iso) ?? [];
+                        const hasRecordedWork = recordedDots.length > 0;
+                        const needsFeedback = missingFeedbackByDate.has(iso);
 
                         return (
                           <Pressable
@@ -720,6 +744,7 @@ export default function AthleteMonthCalendar() {
                               ) : null}
                             </View>
 
+                            <SectionLabel compact>Planned</SectionLabel>
                             {hasAm && hasPm ? (
                               <View style={styles.planRows}>
                                 <Text style={styles.planText}>AM {amText}</Text>
@@ -727,22 +752,29 @@ export default function AthleteMonthCalendar() {
                               </View>
                             ) : singleAmount ? (
                               <Text style={styles.singlePlanText}>{singleAmount}</Text>
-                            ) : null}
+                            ) : (
+                              <SectionEmptyText compact>None</SectionEmptyText>
+                            )}
 
                             {isNCAAOffDay ? (
                               <Text style={styles.offDayTag}>NCAA Off</Text>
                             ) : null}
 
-                            {(workoutDotColorsByDate.get(iso) ?? []).length > 0 ? (
+                            <SectionLabel compact>Recorded</SectionLabel>
+                            {hasRecordedWork ? (
                               <View style={styles.dotRow}>
-                                {(workoutDotColorsByDate.get(iso) ?? []).slice(0, 3).map((color, i) => (
+                                {recordedDots.slice(0, 3).map((color, i) => (
                                   <View key={`${iso}-dot-${i}-${color}`} style={[styles.workoutDot, { backgroundColor: color }]} />
                                 ))}
-                                {(workoutDotColorsByDate.get(iso) ?? []).length > 3 ? (
-                                  <Text style={styles.moreDotsText}>+{(workoutDotColorsByDate.get(iso) ?? []).length - 3}</Text>
+                                {recordedDots.length > 3 ? (
+                                  <Text style={styles.moreDotsText}>+{recordedDots.length - 3}</Text>
                                 ) : null}
                               </View>
-                            ) : null}
+                            ) : needsFeedback ? (
+                              <Text style={styles.recordedAlertText}>Feedback needed</Text>
+                            ) : (
+                              <SectionEmptyText compact>None</SectionEmptyText>
+                            )}
                           </Pressable>
                         );
                       })}
@@ -872,6 +904,29 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: "#6b6b6b",
   },
+  signalLegend: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    marginBottom: 8,
+  },
+  signalLegendLabel: {
+    fontSize: 10,
+    fontWeight: "900",
+    color: "#334155",
+  },
+  signalLegendValue: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#475569",
+  },
+  signalLegendDivider: {
+    fontSize: 10,
+    color: "#94a3b8",
+    marginHorizontal: 2,
+  },
   weekdayText: {
     width: (SCREEN_WIDTH - 32) / 7,
     textAlign: "center",
@@ -993,6 +1048,12 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: "#666",
     marginLeft: 2,
+  },
+  recordedAlertText: {
+    marginTop: 4,
+    fontSize: 9,
+    fontWeight: "800",
+    color: "#b91c1c",
   },
   listButton: {
     marginTop: 14,

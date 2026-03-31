@@ -18,7 +18,7 @@ import {
   type AuxiliaryRoutine,
 } from "../../../lib/auxiliaryRoutines";
 import { deletePlannerDraft, loadPlannerDrafts, type PlannerDraft } from "../../../lib/plannerDrafts";
-import { getCategoryOptions, loadCoachSettings } from "../../../lib/settings";
+import { getCategoryOptions, loadCoreCoachSettings } from "../../../lib/settings";
 
 type CreateType = "template" | "routine" | null;
 type EditState =
@@ -92,7 +92,7 @@ export default function CoachSavedTab() {
 
   const reload = useCallback(async () => {
     const [settings, storedTemplates, storedRoutines, storedDrafts] = await Promise.all([
-      loadCoachSettings(),
+      loadCoreCoachSettings(),
       loadWorkoutTemplates(),
       loadAuxiliaryRoutines(),
       loadPlannerDrafts(),

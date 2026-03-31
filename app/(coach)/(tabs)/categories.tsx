@@ -3,7 +3,7 @@ import { Alert, FlatList, Pressable, Text, TextInput, View } from "react-native"
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import type { WorkoutCategory } from "../../../lib/types";
-import { CATEGORY_COLOR_PALETTE, newId, pickUnusedCategoryColor } from "../../../lib/categories";
+import { CATEGORY_COLOR_PALETTE, isPermanentCategory, newId, pickUnusedCategoryColor } from "../../../lib/categories";
 import {
   COACH_CATEGORIES_KEY,
   COACH_CATEGORIES_SOURCE,
@@ -112,6 +112,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
   const [draft, setDraft] = useState("");
   const [chooserOpen, setChooserOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
+  const [pendingDeleteWorkouts, setPendingDeleteWorkouts] = useState<TeamWorkoutRow[] | null>(null);
   const [colorPickerForId, setColorPickerForId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [renamingCategory, setRenamingCategory] = useState<{ id: string; currentName: string } | null>(null);
@@ -192,15 +193,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
     const selectedCategory = categories.find((c) => c.id === categoryId);
     if (!selectedCategory) return;
 
-    const takenBy = categories.find(
-      (c) => c.id !== categoryId && (c.color ?? "").toLowerCase() === color.toLowerCase()
-    );
-
-    const next = categories.map((c) => {
-      if (c.id === categoryId) return { ...c, color };
-      if (takenBy && c.id === takenBy.id) return { ...c, color: selectedCategory.color };
-      return c;
-    });
+    const next = categories.map((c) => (c.id === categoryId ? { ...c, color } : c));
 
     await persist(next);
     setColorPickerForId(null);
@@ -222,6 +215,10 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
   }
 
   function renameCategory(id: string, currentName: string) {
+    if (isPermanentCategory({ id, name: currentName })) {
+      Alert.alert("Built-in category", `"${currentName}" is permanent and cannot be renamed.`);
+      return;
+    }
     setRenamingCategory({ id, currentName });
     setRenameDraft(currentName);
   }
@@ -231,6 +228,12 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
 
     if (!renamingCategory) {
       console.log("[rename] no renamingCategory");
+      return;
+    }
+    if (isPermanentCategory({ id: renamingCategory.id, name: renamingCategory.currentName })) {
+      Alert.alert("Built-in category", `"${renamingCategory.currentName}" is permanent and cannot be renamed.`);
+      setRenamingCategory(null);
+      setRenameDraft("");
       return;
     }
 
@@ -271,8 +274,18 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
   }
 
   async function deleteCategory(id: string, name: string) {
+    if (isPermanentCategory({ id, name })) {
+      Alert.alert("Built-in category", `"${name}" is permanent and cannot be deleted.`);
+      return;
+    }
     // Load workouts so we can see impact and optionally migrate
     const allWorkouts = await listTeamWorkoutsInRange(MIN_DATE_ISO, MAX_DATE_ISO);
+    console.log("[coach-categories] workouts fetch", {
+      purpose: "delete-category-impact-and-migrate",
+      start: MIN_DATE_ISO,
+      end: MAX_DATE_ISO,
+      count: allWorkouts?.length ?? 0,
+    });
 
     // A workout can store category as string name or categoryId depending on earlier versions.
     const affected = allWorkouts.filter((w) => categoryMatch(w, name));
@@ -284,12 +297,13 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
         ? `"${name}" is used in ${affected.length} workout(s). What do you want to do?`
         : `Delete "${name}"?`,
       [
-        { text: "Cancel", style: "cancel" },
+        { text: "Cancel", style: "cancel", onPress: () => setPendingDeleteWorkouts(null) },
 
         // Option 1: Leave as-is (do not touch workouts)
         {
           text: "Leave as-is",
           onPress: async () => {
+            setPendingDeleteWorkouts(null);
             const nextCats = categories.filter((c) => c.id !== id);
             await persist(nextCats.length > 0 ? nextCats : []);
           },
@@ -312,6 +326,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
               })
               .filter(Boolean) as Array<{ id: string; patch: any }>;
             if (patches.length > 0) await bulkUpdateTeamWorkouts(patches);
+            setPendingDeleteWorkouts(null);
             await persist(nextCats.length > 0 ? nextCats : []);
           },
         },
@@ -322,6 +337,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
           onPress: () => {
             // We can't show a picker inside Alert reliably.
             // We’ll open a simple in-screen chooser using a transient state.
+            setPendingDeleteWorkouts(allWorkouts);
             setPendingDelete({ id, name });
             setChooserOpen(true);
           },
@@ -359,6 +375,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
                       })
                       .filter(Boolean) as Array<{ id: string; patch: any }>;
                     if (patches.length > 0) await bulkUpdateTeamWorkouts(patches);
+                    setPendingDeleteWorkouts(null);
                     await persist(nextCats.length > 0 ? nextCats : []);
                   },
                 },
@@ -478,7 +495,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
               <Pressable
               key={c.id}
               onPress={async () => {
-                  const allWorkouts = await listTeamWorkoutsInRange(MIN_DATE_ISO, MAX_DATE_ISO);
+                  const allWorkouts = pendingDeleteWorkouts ?? [];
                   const nextCats = categories.filter((x) => x.id !== pendingDelete.id);
                   const patches = allWorkouts
                     .map((w) => {
@@ -493,6 +510,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
 
                   setChooserOpen(false);
                   setPendingDelete(null);
+                  setPendingDeleteWorkouts(null);
                 }}
                 style={{
                   borderWidth: 1,
@@ -512,6 +530,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
             onPress={() => {
               setChooserOpen(false);
               setPendingDelete(null);
+              setPendingDeleteWorkouts(null);
             }}
             style={{
               borderWidth: 1,
@@ -527,57 +546,6 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
         </View>
       ) : null}
 
-      {colorPickerForId ? (
-        <View
-          style={{
-            borderWidth: 1,
-            borderColor: "#eee",
-            borderRadius: 12,
-            padding: 12,
-            marginBottom: 12,
-            backgroundColor: "#fff",
-          }}
-        >
-          <Text style={{ fontWeight: "900", marginBottom: 10 }}>
-            Pick color for "{ordered.find((c) => c.id === colorPickerForId)?.name ?? "Category"}"
-          </Text>
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
-            {CATEGORY_COLOR_PALETTE.map((color) => {
-              const active =
-                (ordered.find((c) => c.id === colorPickerForId)?.color ?? "").toLowerCase() === color.toLowerCase();
-              return (
-                <Pressable
-                  key={`picker-${color}`}
-                  onPress={() => applyCategoryColor(colorPickerForId, color)}
-                  style={{
-                    width: 30,
-                    height: 30,
-                    borderRadius: 15,
-                    backgroundColor: color,
-                    borderWidth: active ? 3 : 1,
-                    borderColor: active ? "#111" : "rgba(0,0,0,0.20)",
-                  }}
-                />
-              );
-            })}
-          </View>
-          <Pressable
-            onPress={() => setColorPickerForId(null)}
-            style={{
-              marginTop: 12,
-              borderWidth: 1,
-              borderColor: "#ddd",
-              borderRadius: 10,
-              paddingVertical: 10,
-              alignItems: "center",
-              backgroundColor: "#fff",
-            }}
-          >
-            <Text style={{ fontWeight: "900" }}>Done</Text>
-          </Pressable>
-        </View>
-      ) : null}
-
       {useVirtualizedList ? (
         <FlatList
           data={ordered}
@@ -589,6 +557,9 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
               onSlideUp={() => moveCategory(item.id, "up")}
               onSlideDown={() => moveCategory(item.id, "down")}
             >
+              {(() => {
+                const permanent = isPermanentCategory(item);
+                return (
               <View
                 style={{
                   borderWidth: 1,
@@ -602,9 +573,23 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                     <Text style={{ fontSize: 15, color: "#777", fontWeight: "800" }}>≡</Text>
                     <Text style={{ fontSize: 14, fontWeight: "900" }}>{item.name}</Text>
+                    {permanent ? (
+                      <View
+                        style={{
+                          borderWidth: 1,
+                          borderColor: "#d7deea",
+                          borderRadius: 999,
+                          paddingHorizontal: 7,
+                          paddingVertical: 2,
+                          backgroundColor: "#f8faff",
+                        }}
+                      >
+                        <Text style={{ fontSize: 10, fontWeight: "900", color: "#4c5569" }}>Built-in</Text>
+                      </View>
+                    ) : null}
                   </View>
                   <Pressable
-                    onPress={() => setColorPickerForId(item.id)}
+                    onPress={() => setColorPickerForId((prev) => (prev === item.id ? null : item.id))}
                     style={{
                       flexDirection: "row",
                       alignItems: "center",
@@ -633,36 +618,86 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
 
                 <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
                   <Pressable
-                    onPress={() => renameCategory(item.id, item.name)}
+                    onPress={() => {
+                      if (permanent) return;
+                      void renameCategory(item.id, item.name);
+                    }}
                     style={{
                       flex: 1,
                       borderWidth: 1,
-                      borderColor: "#ddd",
+                      borderColor: permanent ? "#e8ebf1" : "#ddd",
                       borderRadius: 10,
                       paddingVertical: 10,
                       alignItems: "center",
-                      backgroundColor: "#fff",
+                      backgroundColor: permanent ? "#f7f7f8" : "#fff",
+                      opacity: permanent ? 0.7 : 1,
                     }}
                   >
                     <Text style={{ fontWeight: "900" }}>Rename</Text>
                   </Pressable>
 
                   <Pressable
-                    onPress={() => deleteCategory(item.id, item.name)}
+                    onPress={() => {
+                      if (permanent) return;
+                      void deleteCategory(item.id, item.name);
+                    }}
                     style={{
                       flex: 1,
                       borderWidth: 1,
-                      borderColor: "#f3c1c1",
+                      borderColor: permanent ? "#eedede" : "#f3c1c1",
                       borderRadius: 10,
                       paddingVertical: 10,
                       alignItems: "center",
+                      backgroundColor: permanent ? "#faf5f5" : "#fff",
+                      opacity: permanent ? 0.7 : 1,
+                    }}
+                  >
+                    <Text style={{ fontWeight: "900", color: "#b00020" }}>
+                      {permanent ? "Protected" : "Delete"}
+                    </Text>
+                  </Pressable>
+                </View>
+
+                {colorPickerForId === item.id ? (
+                  <View
+                    style={{
+                      marginTop: 10,
+                      borderWidth: 1,
+                      borderColor: "#e5e7eb",
+                      borderRadius: 10,
+                      paddingVertical: 8,
+                      paddingHorizontal: 8,
                       backgroundColor: "#fff",
                     }}
                   >
-                    <Text style={{ fontWeight: "900", color: "#b00020" }}>Delete</Text>
-                  </Pressable>
-                </View>
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                      {CATEGORY_COLOR_PALETTE.map((color) => {
+                        const active = (item.color ?? "").toLowerCase() === color.toLowerCase();
+                        return (
+                          <Pressable
+                            key={`row-picker-${item.id}-${color}`}
+                            onPress={() => applyCategoryColor(item.id, color)}
+                            style={{
+                              width: 34,
+                              height: 34,
+                              borderRadius: 17,
+                              backgroundColor: color,
+                              borderWidth: active ? 3 : 1,
+                              borderColor: active ? "#111" : "rgba(0,0,0,0.20)",
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
+                          >
+                            {active ? <Text style={{ color: "#fff", fontSize: 12, fontWeight: "900" }}>✓</Text> : null}
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ) : null}
               </View>
+                );
+              })()}
             </DraggableRow>
           )}
         />
@@ -675,6 +710,9 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
                 onSlideUp={() => moveCategory(item.id, "up")}
                 onSlideDown={() => moveCategory(item.id, "down")}
               >
+                {(() => {
+                  const permanent = isPermanentCategory(item);
+                  return (
                 <View
                   style={{
                     borderWidth: 1,
@@ -688,9 +726,23 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
                     <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                       <Text style={{ fontSize: 15, color: "#777", fontWeight: "800" }}>≡</Text>
                       <Text style={{ fontSize: 14, fontWeight: "900" }}>{item.name}</Text>
+                      {permanent ? (
+                        <View
+                          style={{
+                            borderWidth: 1,
+                            borderColor: "#d7deea",
+                            borderRadius: 999,
+                            paddingHorizontal: 7,
+                            paddingVertical: 2,
+                            backgroundColor: "#f8faff",
+                          }}
+                        >
+                          <Text style={{ fontSize: 10, fontWeight: "900", color: "#4c5569" }}>Built-in</Text>
+                        </View>
+                      ) : null}
                     </View>
                     <Pressable
-                      onPress={() => setColorPickerForId(item.id)}
+                      onPress={() => setColorPickerForId((prev) => (prev === item.id ? null : item.id))}
                       style={{
                         flexDirection: "row",
                         alignItems: "center",
@@ -719,36 +771,86 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
 
                   <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
                     <Pressable
-                      onPress={() => renameCategory(item.id, item.name)}
+                      onPress={() => {
+                        if (permanent) return;
+                        void renameCategory(item.id, item.name);
+                      }}
                       style={{
                         flex: 1,
                         borderWidth: 1,
-                        borderColor: "#ddd",
+                        borderColor: permanent ? "#e8ebf1" : "#ddd",
                         borderRadius: 10,
                         paddingVertical: 10,
                         alignItems: "center",
-                        backgroundColor: "#fff",
+                        backgroundColor: permanent ? "#f7f7f8" : "#fff",
+                        opacity: permanent ? 0.7 : 1,
                       }}
                     >
                       <Text style={{ fontWeight: "900" }}>Rename</Text>
                     </Pressable>
 
                     <Pressable
-                      onPress={() => deleteCategory(item.id, item.name)}
+                      onPress={() => {
+                        if (permanent) return;
+                        void deleteCategory(item.id, item.name);
+                      }}
                       style={{
                         flex: 1,
                         borderWidth: 1,
-                        borderColor: "#f3c1c1",
+                        borderColor: permanent ? "#eedede" : "#f3c1c1",
                         borderRadius: 10,
                         paddingVertical: 10,
                         alignItems: "center",
-                        backgroundColor: "#fff",
+                        backgroundColor: permanent ? "#faf5f5" : "#fff",
+                        opacity: permanent ? 0.7 : 1,
                       }}
                     >
-                      <Text style={{ fontWeight: "900", color: "#b00020" }}>Delete</Text>
-                    </Pressable>
-                  </View>
+                        <Text style={{ fontWeight: "900", color: "#b00020" }}>
+                          {permanent ? "Protected" : "Delete"}
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    {colorPickerForId === item.id ? (
+                      <View
+                        style={{
+                          marginTop: 10,
+                          borderWidth: 1,
+                          borderColor: "#e5e7eb",
+                          borderRadius: 10,
+                          paddingVertical: 8,
+                          paddingHorizontal: 8,
+                          backgroundColor: "#fff",
+                        }}
+                      >
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                          {CATEGORY_COLOR_PALETTE.map((color) => {
+                            const active = (item.color ?? "").toLowerCase() === color.toLowerCase();
+                            return (
+                              <Pressable
+                                key={`row-picker-${item.id}-${color}`}
+                                onPress={() => applyCategoryColor(item.id, color)}
+                                style={{
+                                  width: 34,
+                                  height: 34,
+                                  borderRadius: 17,
+                                  backgroundColor: color,
+                                  borderWidth: active ? 3 : 1,
+                                  borderColor: active ? "#111" : "rgba(0,0,0,0.20)",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                }}
+                              >
+                                {active ? <Text style={{ color: "#fff", fontSize: 12, fontWeight: "900" }}>✓</Text> : null}
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      </View>
+                    ) : null}
                 </View>
+                  );
+                })()}
               </DraggableRow>
             </View>
           ))}

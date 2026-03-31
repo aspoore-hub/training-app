@@ -9,20 +9,23 @@ import { getCurrentTeamId, getMyClaimedAthleteProfileId, getTeamAthlete } from "
 import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../lib/units";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../lib/pace";
 import { loadAthletePaceOverrides, resolveAthletePaceSeconds, type AthletePaceOverrides } from "../../lib/athletePace";
-import type { AthleteWorkout, MileageValue, WeekStartDay, WeeklyMileagePlan, WorkoutCategory } from "../../lib/types";
+import type { AthleteWorkout, MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
 import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../lib/categories";
 import {
-  WEEK_START_KEY,
-  MILEAGE_PLANS_KEY,
   getWeekStartISO,
   getWeekIndex,
-  getDayTarget,
   formatMileage,
+  parseMileageInput,
   sumMileage,
   parseISODate,
   toISODate,
 } from "../../lib/mileagePlan";
 import { listAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
+import { teamDataStore } from "../../lib/teamDataStore";
+import { loadWeekStartSetting } from "../../lib/settings";
+import { PrevNextNavButtons } from "../../components/shared/PrevNextNavButtons";
+import { SegmentedViewToggle } from "../../components/shared/SegmentedViewToggle";
+import { SectionEmptyText, SectionLabel } from "../../components/shared/PlannedRecordedPrimitives";
 
 const SELECTED_KEY = "training_app_selected_athlete_v1";
 
@@ -159,24 +162,30 @@ function toAthleteWorkout(row: TeamWorkoutRow, athleteName: string): AthleteWork
     categories: row.categories ?? undefined,
     title: row.title ?? "Workout",
     details: row.details ?? undefined,
-    plannedMiles: typeof row.planned_distance === "number" ? row.planned_distance : undefined,
     completedMiles: typeof (row as any).completed_miles === "number" ? (row as any).completed_miles : undefined,
     completedTime: String((row as any).completed_time_text ?? "").trim() || undefined,
     splitsOrPace: String((row as any).splits_or_pace ?? "").trim() || undefined,
     additionalFeedback: String((row as any).additional_feedback ?? "").trim() || undefined,
     feedback: String((row as any).additional_feedback ?? "").trim() || undefined,
-    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
   };
+}
+
+function toMileageValue(raw: unknown): MileageValue | undefined {
+  if (!raw) return undefined;
+  if (typeof raw === "string") return parseMileageInput(raw);
+  if (typeof raw === "number") return { kind: "exact", value: raw };
+  if (typeof raw === "object") return raw as MileageValue;
+  return undefined;
 }
 
 export default function AthleteWeekView() {
   const router = useRouter();
+  const store = teamDataStore.use();
 
   const [selectedAthleteId, setSelectedAthleteId] = useState<string | null>(null);
   const [selectedAthleteLabel, setSelectedAthleteLabel] = useState<string | null>(null);
 
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
-  const [mileagePlans, setMileagePlans] = useState<WeeklyMileagePlan[]>([]);
   const [allWorkouts, setAllWorkouts] = useState<AthleteWorkout[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
@@ -186,11 +195,21 @@ export default function AthleteWeekView() {
   // anchor is any date within the current week we’re viewing
   const [weekAnchorISO, setWeekAnchorISO] = useState(() => toISODate(new Date()));
 
+  const loadWeekStartFromShared = useCallback(async () => {
+    const weekStartResult = await loadWeekStartSetting();
+    const normalized: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
+    console.log("[athlete-week] week start loaded via shared helper", {
+      raw: weekStartResult.raw,
+      normalized,
+    });
+    setWeekStartsOn(normalized);
+    return normalized;
+  }, []);
+
   const loadData = useCallback(async () => {
-    const [selected, ws, plans, storedCategories, unit, pace, paceOverrides] = await Promise.all([
+    const ws = await loadWeekStartFromShared();
+    const [selected, storedCategories, unit, pace, paceOverrides] = await Promise.all([
       loadJSON<string | null>(SELECTED_KEY, null),
-      loadJSON<WeekStartDay>(WEEK_START_KEY, 1),
-      loadJSON<WeeklyMileagePlan[]>(MILEAGE_PLANS_KEY, []),
       loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       loadDistanceUnit(),
       loadPaceSecondsPerMile(),
@@ -215,24 +234,24 @@ export default function AthleteWeekView() {
       setSelectedAthleteLabel(null);
     }
 
-    setWeekStartsOn((ws ?? 1) as WeekStartDay);
-    setMileagePlans(plans ?? []);
     setCategories(normalizeCategories(storedCategories));
     setDistanceUnit(unit);
     setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
     setAthletePaceOverrides(paceOverrides ?? {});
+
+    const weekStartForFetch = getWeekStartISO(weekAnchorISO, ws);
+    await teamDataStore.actions.loadMileageWeek(weekStartForFetch);
 
     if (!selectedId) {
       setAllWorkouts([]);
       return;
     }
 
-    const weekStartForFetch = getWeekStartISO(weekAnchorISO, (ws ?? 1) as WeekStartDay);
     const weekEndForFetch = addDaysISO(weekStartForFetch, 6);
     const rows = await listAthleteWorkoutsInRange(selectedId, weekStartForFetch, weekEndForFetch);
     const athleteName = selectedName ?? "Athlete";
     setAllWorkouts(rows.map((row) => toAthleteWorkout(row, athleteName)));
-  }, [weekAnchorISO]);
+  }, [loadWeekStartFromShared, weekAnchorISO]);
 
   useEffect(() => {
     loadData();
@@ -270,17 +289,30 @@ export default function AthleteWeekView() {
     });
   }, [weekStartISO]);
 
-  const planByWeek = useMemo(() => {
-    if (!selectedAthleteId) return new Map<string, WeeklyMileagePlan>();
-    const map = new Map<string, WeeklyMileagePlan>();
-    for (const p of mileagePlans) {
-      if (String((p as any)?.athleteId ?? "") !== selectedAthleteId) continue;
-      map.set(p.weekStartISO, p);
+  const mileageByDaySession = useMemo(() => {
+    const map = new Map<string, MileageValue | undefined>();
+    if (!selectedAthleteId) return map;
+    const rows = store.mileageCellsByWeek[weekStartISO] ?? [];
+    for (const row of rows) {
+      if (String(row.athlete_profile_id) !== String(selectedAthleteId)) continue;
+      if (String(row.week_start_iso) !== String(weekStartISO)) continue;
+      const session = row.session === "AM" ? "AM" : "PM";
+      map.set(`${row.day_idx}:${session}`, toMileageValue((row as any).value));
     }
     return map;
-  }, [mileagePlans, selectedAthleteId]);
+  }, [selectedAthleteId, store.mileageCellsByWeek, weekStartISO]);
 
-  const thisWeekPlan = useMemo(() => planByWeek.get(weekStartISO), [planByWeek, weekStartISO]);
+  const ncaaOffByDay = useMemo(() => {
+    const map = new Map<number, boolean>();
+    if (!selectedAthleteId) return map;
+    const rows = store.mileageFlagsByWeek[weekStartISO] ?? [];
+    for (const row of rows) {
+      if (String(row.athlete_profile_id) !== String(selectedAthleteId)) continue;
+      if (String(row.week_start_iso) !== String(weekStartISO)) continue;
+      map.set(row.day_idx, !!row.ncaa_off);
+    }
+    return map;
+  }, [selectedAthleteId, store.mileageFlagsByWeek, weekStartISO]);
 
   const effectivePaceSecPerMile = useMemo(
     () => resolveAthletePaceSeconds(selectedAthleteId, athletePaceOverrides, paceSecPerMile),
@@ -293,18 +325,19 @@ export default function AthleteWeekView() {
     let xt: SecRange = { min: 0, max: 0 };
 
     for (let i = 0; i < 7; i++) {
-      const target = getDayTarget(thisWeekPlan, i);
-      miles = addMiles(miles, sumMileage([target.am], effectivePaceSecPerMile));
-      miles = addMiles(miles, sumMileage([target.pm], effectivePaceSecPerMile));
-      xt = addSecs(xt, toXTSecRange(target.am));
-      xt = addSecs(xt, toXTSecRange(target.pm));
+      const am = mileageByDaySession.get(`${i}:AM`);
+      const pm = mileageByDaySession.get(`${i}:PM`);
+      miles = addMiles(miles, sumMileage([am], effectivePaceSecPerMile));
+      miles = addMiles(miles, sumMileage([pm], effectivePaceSecPerMile));
+      xt = addSecs(xt, toXTSecRange(am));
+      xt = addSecs(xt, toXTSecRange(pm));
     }
 
     return {
       milesLabel: formatRoundedDistanceTotal(miles, distanceUnit),
       xtLabel: formatXTTotal(xt),
     };
-  }, [distanceUnit, effectivePaceSecPerMile, thisWeekPlan]);
+  }, [distanceUnit, effectivePaceSecPerMile, mileageByDaySession]);
 
   const workoutsByDate = useMemo(() => {
     const map = new Map<string, AthleteWorkout[]>();
@@ -357,14 +390,13 @@ export default function AthleteWeekView() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.viewToggleRow}>
-        <Pressable onPress={() => router.push("/(athlete)/month")} style={styles.viewTogglePill}>
-          <Text style={styles.viewToggleText}>Monthly</Text>
-        </Pressable>
-        <Pressable style={[styles.viewTogglePill, styles.viewTogglePillActive]}>
-          <Text style={[styles.viewToggleText, styles.viewToggleTextActive]}>Weekly</Text>
-        </Pressable>
-      </View>
+      <SegmentedViewToggle
+        activeKey="week"
+        items={[
+          { key: "month", label: "Monthly", onPress: () => router.push("/(athlete)/month") },
+          { key: "week", label: "Weekly", onPress: () => {} },
+        ]}
+      />
 
       {/* Week header */}
       <View style={styles.header}>
@@ -373,14 +405,7 @@ export default function AthleteWeekView() {
           <Text style={styles.athleteLabel}>{selectedAthleteLabel ?? "Athlete"}</Text>
         </View>
 
-        <View style={{ flexDirection: "row", gap: 10 }}>
-          <Pressable onPress={() => shiftWeek(-1)} style={styles.navBtn}>
-            <Text style={styles.navBtnText}>◀</Text>
-          </Pressable>
-          <Pressable onPress={() => shiftWeek(1)} style={styles.navBtn}>
-            <Text style={styles.navBtnText}>▶</Text>
-          </Pressable>
-        </View>
+        <PrevNextNavButtons onPrev={() => shiftWeek(-1)} onNext={() => shiftWeek(1)} />
       </View>
 
       {/* Weekly goals */}
@@ -395,10 +420,12 @@ export default function AthleteWeekView() {
           <ScrollView contentContainerStyle={{ paddingBottom: 18 }} keyboardShouldPersistTaps="handled">
             {dayRows.map((dRow) => {
               const weekIdx = getWeekIndex(dRow.dateISO, weekStartISO);
-              const target = getDayTarget(thisWeekPlan, weekIdx);
-              const isNCAAOffDay = !!(target as any)?.ncaaOff;
-              const amText = formatMileage(target.am);
-              const pmText = formatMileage(target.pm);
+              const amValue = mileageByDaySession.get(`${weekIdx}:AM`);
+              const pmValue = mileageByDaySession.get(`${weekIdx}:PM`);
+              const isNCAAOffDay = !!ncaaOffByDay.get(weekIdx);
+              const amText = formatMileage(amValue);
+              const pmText = formatMileage(pmValue);
+              const hasPlannedWork = Boolean(amText || pmText || isNCAAOffDay);
 
               const workouts = workoutsByDate.get(dRow.dateISO) ?? [];
 
@@ -421,56 +448,66 @@ export default function AthleteWeekView() {
                     <Text style={styles.dateISO}>{formatDisplayDate(dRow.dateISO)}</Text>
                   </View>
 
-                  {/* Planned mileage/time */}
-                  {(amText || pmText) ? (
-                    <View style={styles.planRow}>
-                      {amText ? <Text style={styles.planPill}>AM {amText}</Text> : null}
-                      {pmText ? <Text style={styles.planPill}>PM {pmText}</Text> : null}
-                    </View>
-                  ) : (
-                    <Text style={styles.planMuted}>No plan</Text>
-                  )}
-
-                  {isNCAAOffDay ? (
-                    <Text style={styles.offDayTag}>NCAA Off Day</Text>
-                  ) : null}
-
-                  {/* Workouts (no horizontal scroll) */}
-                  {workouts.length > 0 ? (
-                    <View style={{ marginTop: 8, gap: 6 }}>
-                      {workouts.slice(0, 4).map((w: any, idx: number) => {
-                        const cats = workoutCategoryNames(w);
-                        const primary = cats[0] ?? "Other";
-                        const color = categoryColorByName(categories, primary);
-
-                        const session = String(w?.session ?? "").toUpperCase();
-                        const title = String(w?.title ?? "").trim();
-                        const details = String(w?.details ?? "").trim();
-
-                        return (
-                          <View key={`${dRow.dateISO}-${idx}-${primary}`} style={styles.workoutRow}>
-                            <View style={[styles.colorDot, { backgroundColor: color }]} />
-                            <View style={{ flex: 1 }}>
-                              <Text style={styles.workoutTitle} numberOfLines={1}>
-                                {session ? `${session} • ` : ""}{primary}{title ? ` • ${title}` : ""}
-                              </Text>
-                              {details ? (
-                                <Text style={styles.workoutDetails} numberOfLines={2}>
-                                  {details}
-                                </Text>
-                              ) : null}
-                            </View>
+                  <View style={styles.plannedBlock}>
+                    <SectionLabel>Planned Work</SectionLabel>
+                    {hasPlannedWork ? (
+                      <>
+                        {(amText || pmText) ? (
+                          <View style={styles.planRow}>
+                            {amText ? <Text style={styles.planPill}>AM {amText}</Text> : null}
+                            {pmText ? <Text style={styles.planPill}>PM {pmText}</Text> : null}
                           </View>
-                        );
-                      })}
+                        ) : (
+                          <SectionEmptyText>No mileage target</SectionEmptyText>
+                        )}
 
-                      {workouts.length > 4 ? (
-                        <Text style={styles.moreWorkouts}>+{workouts.length - 4} more</Text>
-                      ) : null}
-                    </View>
-                  ) : (
-                    <Text style={styles.workoutMuted}>No workouts</Text>
-                  )}
+                        {isNCAAOffDay ? (
+                          <Text style={styles.offDayTag}>NCAA Off Day</Text>
+                        ) : null}
+                      </>
+                    ) : (
+                      <SectionEmptyText>No plan</SectionEmptyText>
+                    )}
+                  </View>
+
+                  <View style={styles.recordedBlock}>
+                    <SectionLabel>Recorded Workouts</SectionLabel>
+                    {workouts.length > 0 ? (
+                      <View style={{ marginTop: 8, gap: 6 }}>
+                        {workouts.slice(0, 4).map((w: any, idx: number) => {
+                          const cats = workoutCategoryNames(w);
+                          const primary = cats[0] ?? "Other";
+                          const color = categoryColorByName(categories, primary);
+
+                          const session = String(w?.session ?? "").toUpperCase();
+                          const title = String(w?.title ?? "").trim();
+                          const details = String(w?.details ?? "").trim();
+
+                          return (
+                            <View key={`${dRow.dateISO}-${idx}-${primary}`} style={styles.workoutRow}>
+                              <View style={[styles.colorDot, { backgroundColor: color }]} />
+                              <View style={{ flex: 1 }}>
+                                <Text style={styles.workoutTitle} numberOfLines={1}>
+                                  {session ? `${session} • ` : ""}{primary}{title ? ` • ${title}` : ""}
+                                </Text>
+                                {details ? (
+                                  <Text style={styles.workoutDetails} numberOfLines={2}>
+                                    {details}
+                                  </Text>
+                                ) : null}
+                              </View>
+                            </View>
+                          );
+                        })}
+
+                        {workouts.length > 4 ? (
+                          <Text style={styles.moreWorkouts}>+{workouts.length - 4} more</Text>
+                        ) : null}
+                      </View>
+                    ) : (
+                      <SectionEmptyText>No workouts</SectionEmptyText>
+                    )}
+                  </View>
                 </Pressable>
               );
             })}
@@ -534,16 +571,30 @@ const styles = StyleSheet.create({
   dayName: { fontSize: 16, fontWeight: "900", color: "#111" },
   dayNumber: { fontSize: 16, fontWeight: "900" },
   dateISO: { fontSize: 12, color: "#777", fontWeight: "800" },
+  plannedBlock: {
+    marginTop: 4,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    borderRadius: 10,
+    backgroundColor: "#f8fafc",
+  },
+  recordedBlock: {
+    marginTop: 8,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: "#eceff3",
+    borderRadius: 10,
+    backgroundColor: "#ffffff",
+  },
 
   planRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 },
   planPill: { borderWidth: 1, borderColor: "#e8e8e8", backgroundColor: "#fafafa", paddingVertical: 6, paddingHorizontal: 10, borderRadius: 999, fontWeight: "900", color: "#111" },
-  planMuted: { marginTop: 8, color: "#777", fontWeight: "800" },
   offDayTag: { marginTop: 6, color: "#0a5eb7", fontWeight: "900", fontSize: 12 },
 
   workoutRow: { flexDirection: "row", gap: 10, alignItems: "flex-start" },
   colorDot: { width: 10, height: 10, borderRadius: 5, marginTop: 4, borderWidth: 0.5, borderColor: "rgba(0,0,0,0.15)" },
   workoutTitle: { fontWeight: "900", color: "#111" },
   workoutDetails: { marginTop: 2, color: "#555", fontWeight: "700" },
-  workoutMuted: { marginTop: 8, color: "#777", fontWeight: "800" },
   moreWorkouts: { marginTop: 4, color: "#666", fontWeight: "800" },
 });

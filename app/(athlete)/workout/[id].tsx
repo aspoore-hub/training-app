@@ -12,6 +12,7 @@ import {
   Platform,
 } from "react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { InlineSaveStatus } from "../../../components/shared/InlineSaveStatus";
 import type { AthleteWorkout, WeekStartDay } from "../../../lib/types";
 import {
   buildMileageFeedbackId,
@@ -25,13 +26,12 @@ import { getCurrentTeamId } from "../../../lib/team";
 import { loadRosterNameMapForTeam } from "../../../lib/rosterNameMap";
 import { getTeamWorkoutById, listTeamWorkoutsInRange, updateTeamWorkoutById, type TeamWorkoutRow } from "../../../lib/teamWorkoutsCloud";
 import { teamDataStore } from "../../../lib/teamDataStore";
-import { loadJSON } from "../../../lib/storage";
 import {
-  WEEK_START_KEY,
   getWeekIndex,
   getWeekStartISO,
 } from "../../../lib/mileagePlan";
 import { formatParsedWorkoutEntry, parseWorkoutEntryValue } from "../../../lib/workoutEntryParser";
+import { loadWeekStartSetting } from "../../../lib/settings";
 
 const IOS_ACCESSORY_ID = "athlete-workout-accessory";
 
@@ -85,13 +85,11 @@ function toAthleteWorkout(row: TeamWorkoutRow, rosterMap: Map<string, string>): 
     categories: row.categories ?? undefined,
     title: row.title ?? "Workout",
     details: row.details ?? undefined,
-    plannedMiles: typeof row.planned_distance === "number" ? row.planned_distance : undefined,
     completedMiles: typeof (row as any).completed_miles === "number" ? (row as any).completed_miles : undefined,
     completedTime: String((row as any).completed_time_text ?? "").trim() || undefined,
     splitsOrPace: String((row as any).splits_or_pace ?? "").trim() || undefined,
     additionalFeedback: String((row as any).additional_feedback ?? "").trim() || undefined,
     feedback: String((row as any).additional_feedback ?? "").trim() || undefined,
-    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
   };
 }
 
@@ -168,6 +166,8 @@ export default function AthleteWorkoutDetail() {
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [loading, setLoading] = useState(true);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
+  const [submitStatus, setSubmitStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const store = teamDataStore.use();
 
   function dismissKeyboard() {
@@ -189,15 +189,20 @@ export default function AthleteWorkoutDetail() {
 
   useEffect(() => {
     (async () => {
-      const [rosterMap, unit, routines, storedWeekStart] = await Promise.all([
+      const [rosterMap, unit, routines, weekStartResult] = await Promise.all([
         loadRosterAny(),
         loadDistanceUnit(),
         loadAuxiliaryRoutines(),
-        loadJSON<WeekStartDay>(WEEK_START_KEY, 1),
+        loadWeekStartSetting(),
       ]);
+      const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
+      console.log("[athlete-workout] week start loaded via shared helper", {
+        raw: weekStartResult.raw,
+        normalized: resolvedWeekStart,
+      });
       setDistanceUnit(unit);
       setRoutineTitleById(new Map(routines.map((routine) => [routine.id, routine.title] as const)));
-      setWeekStartsOn((storedWeekStart ?? 1) as WeekStartDay);
+      setWeekStartsOn(resolvedWeekStart);
 
       const foundRow = await getTeamWorkoutById(String(id));
       const found = foundRow ? toAthleteWorkout(foundRow, rosterMap) : null;
@@ -237,7 +242,7 @@ export default function AthleteWorkoutDetail() {
 
         if (found?.athleteId && found?.dateISO) {
           void teamDataStore.actions.loadMileageWeek(
-            getWeekStartISO(String(found.dateISO), (storedWeekStart ?? 1) as WeekStartDay)
+            getWeekStartISO(String(found.dateISO), resolvedWeekStart)
           );
         }
       }
@@ -277,6 +282,7 @@ export default function AthleteWorkoutDetail() {
   }
 
   async function submitFeedback() {
+    if (submitStatus === "saving") return;
     const parsedCompletedMiles = parseCompletedMiles(completedMilesText);
     const hasMilesInput = completedMilesText.trim().length > 0;
 
@@ -296,52 +302,62 @@ export default function AthleteWorkoutDetail() {
       return;
     }
 
-    if (isSynthetic) {
-      const entry: MileageSessionFeedback = {
-        id: buildMileageFeedbackId({
+    setSubmitError(null);
+    setSubmitStatus("saving");
+    try {
+      if (isSynthetic) {
+        const entry: MileageSessionFeedback = {
+          id: buildMileageFeedbackId({
+            athleteId: String(athleteId ?? "") || undefined,
+            athleteName: String(name ?? "") || undefined,
+            dateISO: String(date ?? ""),
+            session: normalizeSession(session),
+          }),
           athleteId: String(athleteId ?? "") || undefined,
           athleteName: String(name ?? "") || undefined,
           dateISO: String(date ?? ""),
           session: normalizeSession(session),
-        }),
-        athleteId: String(athleteId ?? "") || undefined,
-        athleteName: String(name ?? "") || undefined,
-        dateISO: String(date ?? ""),
-        session: normalizeSession(session),
-        prescribed: String(prescribed ?? "") || undefined,
-        completedMiles: parsedCompletedMiles,
-        completedTime: completedTimeText.trim() || undefined,
-        splitsOrPace: splitsText.trim() || undefined,
-        additionalFeedback: additionalFeedbackText.trim() || undefined,
-        updatedAt: Date.now(),
-      };
-      await upsertMileageFeedback(entry);
-    } else {
-      if (!workout) return;
+          prescribed: String(prescribed ?? "") || undefined,
+          completedMiles: parsedCompletedMiles,
+          completedTime: completedTimeText.trim() || undefined,
+          splitsOrPace: splitsText.trim() || undefined,
+          additionalFeedback: additionalFeedbackText.trim() || undefined,
+          updatedAt: Date.now(),
+        };
+        await upsertMileageFeedback(entry);
+      } else {
+        if (!workout) return;
 
-      await updateTeamWorkoutById(workout.id, {
-        completed_miles: parsedCompletedMiles ?? null,
-        completed_time_text: completedTimeText.trim() || null,
-        splits_or_pace: splitsText.trim() || null,
-        additional_feedback: additionalFeedbackText.trim() || null,
-      } as any);
+        await updateTeamWorkoutById(workout.id, {
+          completed_miles: parsedCompletedMiles ?? null,
+          completed_time_text: completedTimeText.trim() || null,
+          splits_or_pace: splitsText.trim() || null,
+          additional_feedback: additionalFeedbackText.trim() || null,
+        } as any);
 
-      setWorkout({
-        ...workout,
-        completedMiles: parsedCompletedMiles,
-        completedTime: completedTimeText.trim() || undefined,
-        splitsOrPace: splitsText.trim() || undefined,
-        additionalFeedback: additionalFeedbackText.trim() || undefined,
-        feedback: additionalFeedbackText.trim() || undefined,
-      });
+        setWorkout({
+          ...workout,
+          completedMiles: parsedCompletedMiles,
+          completedTime: completedTimeText.trim() || undefined,
+          splitsOrPace: splitsText.trim() || undefined,
+          additionalFeedback: additionalFeedbackText.trim() || undefined,
+          feedback: additionalFeedbackText.trim() || undefined,
+        });
+      }
+
+      setSubmitStatus("saved");
+      Alert.alert("Submitted", "Your feedback was saved.", [
+        {
+          text: "OK",
+          onPress: () => router.back(),
+        },
+      ]);
+    } catch (error: any) {
+      const message = String(error?.message ?? error ?? "Could not save feedback.");
+      setSubmitStatus("error");
+      setSubmitError(message);
+      Alert.alert("Save failed", message);
     }
-
-    Alert.alert("Submitted", "Your feedback was saved.", [
-      {
-        text: "OK",
-        onPress: () => router.back(),
-      },
-    ]);
   }
 
   if (loading) {
@@ -369,7 +385,11 @@ export default function AthleteWorkoutDetail() {
   const prescribedFromMileage = workout
     ? resolvePrescribedText(store, String(workout.athleteId ?? ""), String(workout.dateISO), String(workout.session ?? "PM") as "AM" | "PM", weekStartsOn)
     : "";
-  const prescribedFromLegacy = workout?.plannedMiles != null ? `${workout.plannedMiles}mi` : "";
+  const prescribedLabel = String(isSynthetic ? String(prescribed ?? "") : prescribedFromMileage).trim();
+  const completedSummaryParts: string[] = [];
+  if (completedMilesText.trim()) completedSummaryParts.push(`${completedMilesText.trim()} ${distanceUnitLabel(distanceUnit).toUpperCase()}`);
+  if (completedTimeText.trim()) completedSummaryParts.push(completedTimeText.trim());
+  const completedSummary = completedSummaryParts.length > 0 ? completedSummaryParts.join(" • ") : "Not entered yet";
   const preRoutines = Array.from(
     new Set(
       (Array.isArray(workout?.preRoutineIds) ? workout?.preRoutineIds : [])
@@ -428,7 +448,7 @@ export default function AthleteWorkoutDetail() {
               <Text style={{ marginTop: 12, fontWeight: "700" }}>{workout?.title || "Workout"}</Text>
               <Text style={{ marginTop: 8 }}>{workout?.details}</Text>
               <Text style={{ marginTop: 8 }}>
-                {prescribedFromMileage ? `Prescribed: ${prescribedFromMileage}` : prescribedFromLegacy ? `Prescribed: ${prescribedFromLegacy}` : "Prescribed from mileage plan"}
+                {prescribedFromMileage ? `Prescribed: ${prescribedFromMileage}` : "Prescribed from mileage plan"}
               </Text>
               {preRoutines.length > 0 ? (
                 <Text style={{ marginTop: 8, color: "#333", fontWeight: "700" }}>Pre-run: {preRoutines.join(", ")}</Text>
@@ -531,15 +551,37 @@ export default function AthleteWorkoutDetail() {
               dismissKeyboard();
               submitFeedback();
             }}
+            disabled={submitStatus === "saving"}
             style={{
               backgroundColor: "black",
               padding: 14,
               borderRadius: 12,
               alignItems: "center",
+              opacity: submitStatus === "saving" ? 0.7 : 1,
             }}
           >
             <Text style={{ color: "white", fontWeight: "700" }}>Submit Feedback</Text>
           </Pressable>
+          <View
+            style={{
+              marginTop: 12,
+              borderWidth: 1,
+              borderColor: "#e2e8f0",
+              borderRadius: 10,
+              padding: 10,
+              backgroundColor: "#f8fafc",
+            }}
+          >
+            <Text style={{ fontSize: 12, fontWeight: "700", color: "#0f172a" }}>
+              Prescribed: {prescribedLabel || "Not set"}
+            </Text>
+            <Text style={{ marginTop: 2, fontSize: 12, color: "#334155" }}>
+              Completed: {completedSummary}
+            </Text>
+            <View style={{ marginTop: 8 }}>
+              <InlineSaveStatus status={submitStatus} message={submitError} size="md" />
+            </View>
+          </View>
         </ScrollView>
       </KeyboardAvoidingView>
 

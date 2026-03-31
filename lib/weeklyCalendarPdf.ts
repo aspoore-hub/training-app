@@ -30,6 +30,7 @@ export type WeeklyCalendarPdfDay = {
 
 export type BuildWeeklyCalendarPdfHtmlArgs = {
   weekLabel: string;
+  weekAnnotation?: string;
   generatedAtLabel?: string;
   days: WeeklyCalendarPdfDay[];
 };
@@ -119,6 +120,7 @@ function renderDay(day: WeeklyCalendarPdfDay): string {
 
 export function buildWeeklyCalendarPdfHtml(args: BuildWeeklyCalendarPdfHtmlArgs): string {
   const weekLabel = escapeHtml(args.weekLabel || "");
+  const weekAnnotation = escapeHtml(args.weekAnnotation || "");
   const generatedAtLabel = escapeHtml(args.generatedAtLabel || "");
   const days = Array.isArray(args.days) ? args.days : [];
 
@@ -261,6 +263,7 @@ export function buildWeeklyCalendarPdfHtml(args: BuildWeeklyCalendarPdfHtmlArgs)
       <header class="header">
         <h1 class="title">Weekly Training Plan</h1>
         <div class="sub">Week: ${weekLabel || "-"}</div>
+        ${weekAnnotation ? `<div class="sub">${weekAnnotation}</div>` : ""}
         ${generatedAtLabel ? `<div class="sub">Generated: ${generatedAtLabel}</div>` : ""}
       </header>
       <table class="schedule-table">

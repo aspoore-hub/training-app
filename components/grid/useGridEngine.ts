@@ -27,6 +27,7 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
     colKeys,
     getValue,
     setValue,
+    setValuesBatch,
     isEditorHandlingKeys,
     onFillDown,
     onSelectionChange,
@@ -34,6 +35,7 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
   } = options;
   const refs = useRef<Record<string, any>>({});
   const historyRef = useRef<Array<Array<GridChange<RowId, ColKey>>>>([]);
+  const dragSelectingRef = useRef(false);
   const [clipboardText, setClipboardText] = useState("");
   const [active, setActive] = useState<GridCoord | null>(null);
   const [anchor, setAnchor] = useState<GridCoord | null>(null);
@@ -170,13 +172,17 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
     (changes: Array<GridChange<RowId, ColKey>>, pushHistory = true) => {
       const filtered = changes.filter((c) => c.prev !== c.next);
       if (filtered.length === 0) return;
-      filtered.forEach((c) => setValue(c.rowId, c.colKey, c.next));
+      if (setValuesBatch && filtered.length > 1) {
+        setValuesBatch(filtered.map((c) => ({ rowId: c.rowId, colKey: c.colKey, value: c.next })));
+      } else {
+        filtered.forEach((c) => setValue(c.rowId, c.colKey, c.next));
+      }
       if (pushHistory) historyRef.current.push(filtered);
       if (historyRef.current.length > 60) {
         historyRef.current = historyRef.current.slice(historyRef.current.length - 60);
       }
     },
-    [setValue]
+    [setValue, setValuesBatch]
   );
 
   const applyCellValue = useCallback(
@@ -269,26 +275,42 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
       const startRow = rect?.r1 ?? 0;
       const startCol = rect?.c1 ?? 0;
       const changes: Array<GridChange<RowId, ColKey>> = [];
+      const isSingleValuePaste = matrix.length <= 1 && (matrix[0]?.length ?? 0) <= 1;
 
-      matrix.forEach((row, rOffset) => {
-        row.forEach((value, cOffset) => {
-          const r = startRow + rOffset;
-          const c = startCol + cOffset;
-          if (r < 0 || r >= rowIds.length) return;
-          if (c < 0 || c >= colKeys.length) return;
+      if (isSingleValuePaste && rect) {
+        const single = matrix[0]?.[0] ?? raw;
+        for (let r = rect.r1; r <= rect.r2; r += 1) {
+          for (let c = rect.c1; c <= rect.c2; c += 1) {
+            if (r < 0 || r >= rowIds.length) continue;
+            if (c < 0 || c >= colKeys.length) continue;
+            const rowId = rowIds[r];
+            const colKey = colKeys[c];
+            changes.push({ rowId, colKey, prev: getValue(rowId, colKey), next: single });
+          }
+        }
+      } else {
+        matrix.forEach((row, rOffset) => {
+          row.forEach((value, cOffset) => {
+            const r = startRow + rOffset;
+            const c = startCol + cOffset;
+            if (r < 0 || r >= rowIds.length) return;
+            if (c < 0 || c >= colKeys.length) return;
+            const rowId = rowIds[r];
+            const colKey = colKeys[c];
+            changes.push({ rowId, colKey, prev: getValue(rowId, colKey), next: value });
+          });
+        });
+      }
+      if (!rect && isSingleValuePaste) {
+        const r = startRow;
+        const c = startCol;
+        if (r >= 0 && r < rowIds.length && c >= 0 && c < colKeys.length) {
           const rowId = rowIds[r];
           const colKey = colKeys[c];
-          changes.push({ rowId, colKey, prev: getValue(rowId, colKey), next: value });
-        });
-      });
-
-      if (matrix.length <= 1 && (matrix[0]?.length ?? 0) <= 1) {
-        const rowId = rowIds[startRow];
-        const colKey = colKeys[startCol];
-        if (rowId && colKey) {
           changes.push({ rowId, colKey, prev: getValue(rowId, colKey), next: matrix[0]?.[0] ?? raw });
         }
       }
+
       applyChanges(changes);
       setClipboardText(raw);
     },
@@ -373,8 +395,12 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
   const undo = useCallback(() => {
     const changes = historyRef.current.pop();
     if (!changes || changes.length === 0) return;
+    if (setValuesBatch && changes.length > 1) {
+      setValuesBatch(changes.map((c) => ({ rowId: c.rowId, colKey: c.colKey, value: c.prev })));
+      return;
+    }
     changes.forEach((c) => setValue(c.rowId, c.colKey, c.prev));
-  }, [setValue]);
+  }, [setValue, setValuesBatch]);
 
   const handleKeyDown = useCallback(
     (e: any) => {
@@ -506,12 +532,40 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
         const rowId = rowIds[active.rowIndex];
         const colKey = colKeys[active.colIndex];
         if (!rowId || !colKey) return false;
-        if (onFillDown) onFillDown(rowId, colKey);
-        else {
-          const value = getValue(rowId, colKey);
-          for (let i = active.rowIndex + 1; i < rowIds.length; i += 1) {
-            setValue(rowIds[i], colKey, value);
+        if (onFillDown) {
+          onFillDown(rowId, colKey);
+        } else {
+          const rect = selectionRect;
+          const changes: Array<GridChange<RowId, ColKey>> = [];
+          if (rect && rect.r2 > rect.r1) {
+            for (let r = rect.r1 + 1; r <= rect.r2; r += 1) {
+              for (let c = rect.c1; c <= rect.c2; c += 1) {
+                if (r < 0 || r >= rowIds.length) continue;
+                if (c < 0 || c >= colKeys.length) continue;
+                const targetRowId = rowIds[r];
+                const targetColKey = colKeys[c];
+                const sourceRowId = rowIds[rect.r1];
+                const sourceColKey = colKeys[c];
+                changes.push({
+                  rowId: targetRowId,
+                  colKey: targetColKey,
+                  prev: getValue(targetRowId, targetColKey),
+                  next: getValue(sourceRowId, sourceColKey),
+                });
+              }
+            }
+          } else {
+            const value = getValue(rowId, colKey);
+            for (let i = active.rowIndex + 1; i < rowIds.length; i += 1) {
+              changes.push({
+                rowId: rowIds[i],
+                colKey,
+                prev: getValue(rowIds[i], colKey),
+                next: value,
+              });
+            }
           }
+          applyChanges(changes);
         }
         return true;
       }
@@ -549,8 +603,10 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
       editingCell,
       moveActiveBy,
       onFillDown,
+      applyChanges,
       pasteFromClipboard,
       rowIds,
+      selectionRect,
       selection,
       setValue,
       stopEditing,
@@ -613,11 +669,27 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
         if (e?.shiftKey && anchor) {
           setSelection(makeRect(anchor, coord));
           setActive(coord);
+          dragSelectingRef.current = true;
           return;
         }
+        dragSelectingRef.current = true;
         setAnchor(coord);
         setActive(coord);
         setSelection(null);
+      };
+
+      const onMouseEnter = (e: any) => {
+        if (!(enabled && Platform.OS === "web")) return;
+        if (!dragSelectingRef.current) return;
+        if (isEditingCell(rowId, colKey)) return;
+        if (e?.buttons === 0) {
+          dragSelectingRef.current = false;
+          return;
+        }
+        const coord = { rowIndex, colIndex };
+        const fixed = anchor ?? active ?? coord;
+        setActive(coord);
+        setSelection(makeRect(fixed, coord));
       };
 
       const onFocus = () => {
@@ -631,12 +703,19 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
         if (!anchor) setAnchor(coord);
       };
 
+      const onBlur = () => {
+        if (!(enabled && Platform.OS === "web")) return;
+        if (!isEditingCell(rowId, colKey)) return;
+        // Blur should always end edit mode so stale "editing" state does not persist.
+        stopEditing();
+      };
+
       return {
         cellId,
         ref: (el: any) => {
           refs.current[cellId] = el;
         },
-        handlers: { onKeyDown, onPaste, onCopy, onMouseDown, onFocus },
+        handlers: { onKeyDown, onPaste, onCopy, onMouseDown, onMouseEnter, onFocus, onBlur },
       };
     },
     [
@@ -656,6 +735,8 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
       pasteTextAtSelection,
       rowIndexById,
       selection,
+      stopEditing,
+      active,
     ]
   );
 
@@ -693,9 +774,10 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
       const rowIndex = rowIndexById.get(rowId);
       if (rowIndex == null) return;
       if (colKeys.length === 0) return;
-      const from = shift && anchor ? anchor : { rowIndex, colIndex: 0 };
-      const to = { rowIndex, colIndex: colKeys.length - 1 };
-      const rect = makeRect(from, to);
+      const startRow = shift && anchor ? anchor.rowIndex : rowIndex;
+      const fixed = { rowIndex: startRow, colIndex: 0 };
+      const edge = { rowIndex, colIndex: colKeys.length - 1 };
+      const rect = makeRect(fixed, edge);
       setSelection(rect);
       setActive({ rowIndex, colIndex: 0 });
       if (!shift || !anchor) setAnchor({ rowIndex, colIndex: 0 });
@@ -712,6 +794,17 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
     },
     [rowIndexById, selection]
   );
+
+  useEffect(() => {
+    if (!(enabled && Platform.OS === "web")) return;
+    const onMouseUp = () => {
+      dragSelectingRef.current = false;
+    };
+    window.addEventListener("mouseup", onMouseUp, { capture: true });
+    return () => {
+      window.removeEventListener("mouseup", onMouseUp, true);
+    };
+  }, [enabled]);
 
   useEffect(() => {
     onSelectionChange?.({ rowIds: selectedRowIds, colKeys: selectedColKeys });

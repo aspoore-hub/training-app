@@ -77,6 +77,7 @@ export function GridCell({
 
   const displayValue = String(value ?? "");
   const resolvedStyle = style ?? {};
+  const singleLineEditor = numberOfLines <= 1;
   if (!gridEditing) {
     return (
       <Pressable
@@ -135,8 +136,16 @@ export function GridCell({
       style={style}
       editable={editable}
       selectTextOnFocus={false}
-      multiline={numberOfLines > 1}
+      multiline={!singleLineEditor}
       numberOfLines={numberOfLines}
+      blurOnSubmit={singleLineEditor}
+      onKeyPress={(e: any) => {
+        if (!(isWeb && singleLineEditor)) return;
+        const key = String(e?.nativeEvent?.key ?? "");
+        if (key !== "Enter") return;
+        // Spreadsheet cells are strict single-line inputs on web.
+        e?.preventDefault?.();
+      }}
       {...rest}
       {...(Platform.OS === "web" ? (binding?.handlers as any) : null)}
     />

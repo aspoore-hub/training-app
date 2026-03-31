@@ -5,7 +5,12 @@ import { normalizeWorkoutTimeInput } from "./time";
 import { CATEGORIES_KEY } from "./categories";
 import { normalizeCategories } from "./categories";
 import { DISTANCE_UNIT_KEY, DEFAULT_DISTANCE_UNIT, type DistanceUnit, normalizeDistanceUnit } from "./units";
-import { PRACTICE_DEFAULTS_KEY, type PracticeTimeDefaults, emptyPracticeTimeDefaults } from "./practiceDefaults";
+import {
+  PRACTICE_DEFAULTS_KEY,
+  type PracticeTimeDefaults,
+  emptyPracticeTimeDefaults,
+  loadPracticeTimeDefaults,
+} from "./practiceDefaults";
 import { loadJSON, saveJSON } from "./storage";
 import type { WorkoutCategory } from "./types";
 
@@ -26,13 +31,20 @@ export type CoachAppSettings = {
   defaultSessionTimes: Record<WeekdayKey, SessionTimeMap>;
   distanceUnit: DistanceUnit;
 };
+export type CoachCoreSettings = Pick<CoachAppSettings, "categories" | "distanceUnit">;
+export type CoachCategorySettings = Pick<CoachAppSettings, "categories">;
+
+export type WeekStartSetting = "sunday" | "monday";
+export const WEEK_START_KEY = "training_app_week_start_v1";
+export const COACH_WEEK_LABELS_KEY = "training_app_week_labels_v1";
 
 export const COACH_SETTINGS_LOAD_SOURCE_TEAM = "team_kv_blobs + local key cache";
-export const COACH_SETTINGS_LOAD_SOURCE_LEGACY = "legacy kv_blobs fallback";
 export const COACH_SETTINGS_LOAD_SOURCE_DEFAULTS = "local defaults (no stored settings found)";
 export const COACH_SETTINGS_SAVE_SOURCE = "team_kv_blobs + local key cache";
 export const COACH_CATEGORIES_SOURCE = "team_kv_blobs (team-scoped)";
 export const COACH_CATEGORIES_KEY = CATEGORIES_KEY;
+let cachedCoachCategories: WorkoutCategory[] = [];
+let inFlightCoachCategoriesRefresh: Promise<WorkoutCategory[]> | null = null;
 
 let lastCoachSettingsLoadSource =
   COACH_SETTINGS_LOAD_SOURCE_DEFAULTS;
@@ -41,42 +53,102 @@ export function getLastCoachSettingsLoadSource(): string {
   return lastCoachSettingsLoadSource;
 }
 
-function isHexColor(value: unknown): value is string {
-  return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value.trim());
+export function normalizeWeekStartSetting(raw: unknown): WeekStartSetting {
+  if (raw === 0 || raw === "sunday") return "sunday";
+  if (raw === 1 || raw === "monday") return "monday";
+  return "monday";
 }
 
-// Persisted category normalization must not auto-fallback to defaults.
-function normalizeStoredCategories(input: unknown): WorkoutCategory[] {
-  const list = Array.isArray(input) ? input : [];
-  const out: WorkoutCategory[] = [];
-  const seen = new Set<string>();
+export async function loadWeekStartSetting(): Promise<{
+  raw: WeekStartSetting | 0 | 1;
+  normalized: WeekStartSetting;
+}> {
+  const raw = await loadJSON<WeekStartSetting | 0 | 1>(WEEK_START_KEY, "monday");
+  return {
+    raw,
+    normalized: normalizeWeekStartSetting(raw),
+  };
+}
 
-  for (const raw of list as any[]) {
-    const name = String(raw?.name ?? "").trim();
-    if (!name) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const id = String(raw?.id ?? "").trim() || `cat-${key}`;
-    const color = isHexColor(raw?.color) ? String(raw.color).trim() : undefined;
-    out.push({ id, name, color });
+export async function saveWeekStartSetting(next: WeekStartSetting): Promise<void> {
+  await saveJSON<WeekStartSetting>(WEEK_START_KEY, normalizeWeekStartSetting(next));
+}
+
+export type CoachWeekLabels = Record<string, string>;
+
+function normalizeCoachWeekLabels(raw: unknown): CoachWeekLabels {
+  const root = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const out: CoachWeekLabels = {};
+  for (const [weekStartISO, value] of Object.entries(root)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(weekStartISO ?? ""))) continue;
+    const text = String(value ?? "").trim();
+    if (!text) continue;
+    out[weekStartISO] = text;
   }
-
   return out;
 }
 
-export async function loadCoachCategoriesFromTeamKV(): Promise<WorkoutCategory[]> {
-  const local = await loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []);
+export async function loadCoachWeekLabels(): Promise<CoachWeekLabels> {
+  const raw = await loadJSON<CoachWeekLabels>(COACH_WEEK_LABELS_KEY, {});
+  return normalizeCoachWeekLabels(raw);
+}
 
-  if (Array.isArray(local) && local.length > 0) {
-    return normalizeCategories(local);
+export async function saveCoachWeekLabel(weekStartISO: string, labelText: string): Promise<CoachWeekLabels> {
+  const normalizedWeek = String(weekStartISO ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedWeek)) {
+    throw new Error("Invalid week start key.");
   }
+  const current = await loadCoachWeekLabels();
+  const next: CoachWeekLabels = { ...current };
+  const text = String(labelText ?? "").trim();
+  if (!text) delete next[normalizedWeek];
+  else next[normalizedWeek] = text;
+  await saveJSON<CoachWeekLabels>(COACH_WEEK_LABELS_KEY, next);
+  return next;
+}
+
+export async function loadCoachCategoriesFromTeamKV(): Promise<WorkoutCategory[]> {
+  // Local-first read for fast UI hydration (do not block on remote).
+  try {
+    const rawLocal = await AsyncStorage.getItem(CATEGORIES_KEY);
+    if (rawLocal) {
+      const parsedLocal = JSON.parse(rawLocal);
+      if (Array.isArray(parsedLocal) && parsedLocal.length > 0) {
+        const normalizedLocal = normalizeCategories(parsedLocal);
+        cachedCoachCategories = normalizedLocal;
+
+        // Refresh in the background so local-first reads still converge to cloud.
+        if (!inFlightCoachCategoriesRefresh) {
+          inFlightCoachCategoriesRefresh = (async () => {
+            try {
+              const refreshed = await fetchCoachCategoriesFromTeamKV();
+              cachedCoachCategories = refreshed;
+              return refreshed;
+            } finally {
+              inFlightCoachCategoriesRefresh = null;
+            }
+          })();
+        }
+
+        return normalizedLocal;
+      }
+    }
+  } catch {}
+
+  // Fall back to remote fetch when local cache is missing/empty.
+  const fetched = await fetchCoachCategoriesFromTeamKV();
+  cachedCoachCategories = fetched;
+  return fetched;
+}
+
+async function fetchCoachCategoriesFromTeamKV(): Promise<WorkoutCategory[]> {
+  if (inFlightCoachCategoriesRefresh) return await inFlightCoachCategoriesRefresh;
 
   try {
     const teamId = await getCurrentTeamId();
     if (!teamId) {
       console.warn("[settings] loadCoachCategoriesFromTeamKV: missing team id");
-      return [];
+      return cachedCoachCategories;
     }
 
     const { data, error } = await supabase
@@ -88,22 +160,27 @@ export async function loadCoachCategoriesFromTeamKV(): Promise<WorkoutCategory[]
 
     if (error) {
       console.warn("[settings] loadCoachCategoriesFromTeamKV: supabase error", error);
-      return [];
+      return cachedCoachCategories;
     }
 
     const rawValue = (data as any)?.data;
     if (!Array.isArray(rawValue)) {
       console.warn("[settings] loadCoachCategoriesFromTeamKV: value is not an array", rawValue);
-      return [];
+      return cachedCoachCategories;
     }
 
     const categories = normalizeCategories(rawValue);
     await saveJSON(CATEGORIES_KEY, categories);
+    cachedCoachCategories = categories;
     return categories;
   } catch (err) {
     console.warn("[settings] loadCoachCategoriesFromTeamKV: fallback load failed", err);
-    return [];
+    return cachedCoachCategories;
   }
+}
+
+export function getCachedCoachCategories(): WorkoutCategory[] {
+  return cachedCoachCategories;
 }
 
 export async function saveCoachCategoriesToTeamKV(next: WorkoutCategory[]): Promise<WorkoutCategory[]> {
@@ -137,6 +214,7 @@ export async function saveCoachCategoriesToTeamKV(next: WorkoutCategory[]): Prom
   }
 
   await saveJSON(CATEGORIES_KEY, normalized);
+  cachedCoachCategories = normalized;
   return normalized;
 }
 
@@ -226,7 +304,10 @@ export function getDefaultSessionTime(settings: CoachAppSettings | null | undefi
   return raw ? normalizeTime(raw) ?? raw : "";
 }
 
-export function getCategoryOptions(settings: CoachAppSettings | null | undefined, options?: { excludeOther?: boolean }): WorkoutCategory[] {
+export function getCategoryOptions(
+  settings: CoachCategorySettings | null | undefined,
+  options?: { excludeOther?: boolean }
+): WorkoutCategory[] {
   const list = Array.isArray(settings?.categories) ? settings.categories : [];
   const seen = new Set<string>();
   const out: WorkoutCategory[] = [];
@@ -266,48 +347,30 @@ export function toPracticeDefaults(settings: CoachAppSettings): PracticeTimeDefa
   return result;
 }
 
-export function practiceDefaultsFromCoachSettings(settings: CoachAppSettings | null | undefined): PracticeTimeDefaults {
-  const result: PracticeTimeDefaults = emptyPracticeTimeDefaults();
-  if (!settings) return result;
-
-  WEEKDAY_KEYS.forEach((day, idx) => {
-    const source = settings.defaultSessionTimes?.[day] ?? {};
-    const am = String(source.AM ?? "").trim();
-    const pm = String(source.PM ?? "").trim();
-    if (am) result[String(idx)].am = am;
-    if (pm) result[String(idx)].pm = pm;
-  });
-
-  return result;
-}
-
-export function parsePracticeDefaultsToSessionTimes(defaults: PracticeTimeDefaults | null | undefined): Record<WeekdayKey, SessionTimeMap> {
-  const merged = emptySessionTimes();
-  if (!defaults || typeof defaults !== "object") return merged;
-
-  WEEKDAY_KEYS.forEach((dayKey, idx) => {
-    const raw = (defaults as any)[String(idx)] as any;
-    if (!raw || typeof raw !== "object") return;
-    merged[dayKey] = {
-      AM: normalizeTime(String((raw as any).am ?? "")),
-      PM: normalizeTime(String((raw as any).pm ?? "")),
-    };
-  });
-
-  return merged;
-}
-
-export async function loadCoachSettings(): Promise<CoachAppSettings> {
-  const [storedCategories, storedDefaults, storedDistanceUnit] = await Promise.all([
+export async function loadCoreCoachSettings(): Promise<CoachCoreSettings> {
+  const [storedCategories, storedDistanceUnit] = await Promise.all([
     loadCoachCategoriesFromTeamKV(),
-    loadJSON<PracticeTimeDefaults>(PRACTICE_DEFAULTS_KEY, emptyPracticeTimeDefaults()),
     loadJSON<DistanceUnit>(DISTANCE_UNIT_KEY, DEFAULT_DISTANCE_UNIT),
   ]);
 
-  const teamBacked = normalizeCoachSettings({
-    categories: storedCategories,
-    practiceDefaults: storedDefaults,
+  return {
+    categories: normalizeCategories(storedCategories),
     distanceUnit: normalizeDistanceUnit(storedDistanceUnit),
+  };
+}
+
+// Compatibility aggregate loader: keep for legacy/aggregate reads.
+// New code should prefer loadCoreCoachSettings() + dedicated domain helpers (for example, practice defaults).
+export async function loadCoachSettings(): Promise<CoachAppSettings> {
+  const [core, storedDefaults] = await Promise.all([
+    loadCoreCoachSettings(),
+    loadJSON<PracticeTimeDefaults>(PRACTICE_DEFAULTS_KEY, emptyPracticeTimeDefaults()),
+  ]);
+
+  const teamBacked = normalizeCoachSettings({
+    categories: core.categories,
+    practiceDefaults: storedDefaults,
+    distanceUnit: core.distanceUnit,
   });
 
   const [hasCategoriesKey, hasDefaultsKey, hasDistanceKey] = await Promise.all([
@@ -338,17 +401,30 @@ export async function loadCoachSettings(): Promise<CoachAppSettings> {
 export async function saveCoachSettings(next: Partial<CoachAppSettings>): Promise<CoachAppSettings> {
   console.log("[settings] saveCoachSettings: payload", next);
   try {
-    const current = await loadCoachSettings();
+    const hasDefaultSessionTimesOverride = Object.prototype.hasOwnProperty.call(next, "defaultSessionTimes");
+    const [core, practiceDefaults] = await Promise.all([
+      loadCoreCoachSettings(),
+      hasDefaultSessionTimesOverride ? Promise.resolve(undefined) : loadPracticeTimeDefaults(),
+    ]);
+    const current = normalizeCoachSettings({
+      categories: core.categories,
+      distanceUnit: core.distanceUnit,
+      ...(practiceDefaults ? { practiceDefaults } : {}),
+    });
     const merged = normalizeCoachSettings({
       ...current,
       ...next,
     });
 
-    await Promise.all([
+    const writes: Array<Promise<unknown>> = [
       saveCoachCategoriesToTeamKV(merged.categories),
-      saveJSON(PRACTICE_DEFAULTS_KEY, toPracticeDefaults(merged)),
       saveJSON(DISTANCE_UNIT_KEY, merged.distanceUnit),
-    ]);
+    ];
+    if (hasDefaultSessionTimesOverride) {
+      writes.push(saveJSON(PRACTICE_DEFAULTS_KEY, toPracticeDefaults(merged)));
+    }
+
+    await Promise.all(writes);
     console.log("[settings] saveCoachSettings: success", {
       source: COACH_SETTINGS_SAVE_SOURCE,
       categoriesCount: merged.categories.length,
@@ -359,4 +435,21 @@ export async function saveCoachSettings(next: Partial<CoachAppSettings>): Promis
     console.error("[settings] saveCoachSettings: failed", error);
     throw error;
   }
+}
+
+export async function saveCoreCoachSettings(
+  next: Partial<CoachCoreSettings>
+): Promise<CoachCoreSettings> {
+  const current = await loadCoreCoachSettings();
+  const merged: CoachCoreSettings = {
+    categories: Array.isArray(next.categories) ? normalizeCategories(next.categories) : current.categories,
+    distanceUnit: normalizeDistanceUnit(next.distanceUnit ?? current.distanceUnit),
+  };
+
+  await Promise.all([
+    saveCoachCategoriesToTeamKV(merged.categories),
+    saveJSON(DISTANCE_UNIT_KEY, merged.distanceUnit),
+  ]);
+
+  return merged;
 }

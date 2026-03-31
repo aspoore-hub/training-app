@@ -18,6 +18,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { AppText } from "../../../components/ui/AppText";
 import { Screen } from "../../../components/ui/Screen";
 import { useAppTheme } from "../../../components/ui/useAppTheme";
+import { InlineSaveStatus } from "../../../components/shared/InlineSaveStatus";
 import { loadJSON, saveJSON } from "../../../lib/storage";
 import { supabase } from "../../../lib/supabase";
 import { getCurrentTeamId } from "../../../lib/team";
@@ -25,11 +26,17 @@ import { buildTeamWorkoutInsertRows, createTeamWorkoutBatch } from "../../../lib
 import { normalizeWorkoutTimeInput } from "../../../lib/time";
 import { loadCustomAthleteGroups, type CustomAthleteGroup } from "../../../lib/customGroups";
 import {
-  getDefaultSessionTime,
-  loadCoachSettings,
-  loadCoachCategoriesFromTeamKV,
-  type CoachAppSettings,
+  loadCoreCoachSettings,
+  loadWeekStartSetting,
+  type CoachCoreSettings,
+  type WeekStartSetting,
 } from "../../../lib/settings";
+import {
+  emptyPracticeTimeDefaults,
+  getDefaultPracticeTime,
+  loadPracticeTimeDefaults,
+  type PracticeTimeDefaults,
+} from "../../../lib/practiceDefaults";
 import { loadWorkoutTemplates, type WorkoutTemplate } from "../../../lib/workoutTemplates";
 import { deletePlannerDraft, loadPlannerDrafts, upsertPlannerDraft } from "../../../lib/plannerDrafts";
 import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
@@ -38,7 +45,6 @@ import {
   normalizeCategoryRoutineKey,
   type CategoryRoutineDefaults,
 } from "../../../lib/categoryRoutineDefaults";
-import { MILEAGE_PLANS_KEY, WEEK_START_KEY } from "../../../lib/mileagePlan";
 import {
   compareAthleteDisplayNamesByLastName,
   normalizeTeamRosterAthlete,
@@ -46,14 +52,13 @@ import {
   sortRosterByName,
   type TeamRosterAthlete,
 } from "../../../lib/teamRoster";
-import { teamStore } from "../../../lib/teamStore";
+import { teamDataStore } from "../../../lib/teamDataStore";
 import { useAppRuntime } from "../../../lib/appState";
 
 import type { WorkoutCategory } from "../../../lib/types";
 
 const KEY_PLANNER_SELECTED_ATHLETES = "training_app_planner_selected_athletes_v1";
 
-type WeekStartSetting = "sunday" | "monday" | 0 | 1;
 type PlannerFieldKey =
   | "date"
   | "session"
@@ -73,17 +78,9 @@ type MileageValue =
   | null
   | undefined;
 
-type MileageDay = {
-  am?: MileageValue;
-  pm?: MileageValue;
-  AM?: MileageValue;
-  PM?: MileageValue;
-};
-
-type WeeklyMileagePlan = {
-  athleteId: string;
-  weekStartISO: string;
-  days: Record<string, MileageDay> | MileageDay[];
+type CreateFooterStatus = {
+  status: "idle" | "saving" | "saved" | "error";
+  message?: string;
 };
 
 function isoDateOnly(d: Date): string {
@@ -241,7 +238,7 @@ function mileageValueToPlannedDistance(v: MileageValue): number | null {
 }
 
 function weekStartsOn(setting: WeekStartSetting): 0 | 1 {
-  if (setting === "sunday" || setting === 0) return 0;
+  if (setting === "sunday") return 0;
   return 1;
 }
 
@@ -258,18 +255,24 @@ function createBatchId(dateISO: string): string {
   return `bat_${dateISO}_${suffix}`;
 }
 
+function resolveDefaultSessionSlotAndTimeForDate(
+  dateISO: string,
+  defaults: PracticeTimeDefaults,
+  fallbackSession: "AM" | "PM" = "AM",
+  fallbackTime = ""
+): { session: "AM" | "PM"; timeText: string } {
+  const amTime = getDefaultPracticeTime(defaults, dateISO, "AM") ?? "";
+  const pmTime = getDefaultPracticeTime(defaults, dateISO, "PM") ?? "";
+  if (amTime) return { session: "AM", timeText: amTime };
+  if (pmTime) return { session: "PM", timeText: pmTime };
+  return { session: fallbackSession, timeText: fallbackTime };
+}
+
 function dayIndexInWeek(dateISO: string, weekStartISO: string): number {
   const a = parseISODateOnly(weekStartISO);
   const b = parseISODateOnly(dateISO);
   const diffMs = b.getTime() - a.getTime();
   return Math.round(diffMs / (1000 * 60 * 60 * 24));
-}
-
-function asPlanArray(raw: any): WeeklyMileagePlan[] {
-  if (!raw) return [];
-  if (Array.isArray(raw)) return raw as WeeklyMileagePlan[];
-  if (typeof raw === "object") return Object.values(raw) as WeeklyMileagePlan[];
-  return [];
 }
 
 function Chip({
@@ -364,19 +367,22 @@ export default function PlannerScreen() {
     return Array.isArray(raw) ? String(raw[0] ?? "") : String(raw ?? "");
   }, [params?.applyDraftToken]);
 
-  const [dateISO, setDateISO] = useState<string>(isoDateOnly(new Date()));
+  const [dateISO, setDateISO] = useState<string>(() => {
+    const fromParams = String(dateParam ?? "").trim();
+    if (fromParams && isISODateOnly(fromParams)) return fromParams;
+    return isoDateOnly(new Date());
+  });
   const [datePickerOpen, setDatePickerOpen] = useState(false);
   const [pickerMonth, setPickerMonth] = useState<Date>(() => monthStart(new Date()));
   const [showSavedBanner, setShowSavedBanner] = useState(false);
   const [creating, setCreating] = useState(false);
   const [submitDebug, setSubmitDebug] = useState("idle");
+  const [createFooterStatus, setCreateFooterStatus] = useState<CreateFooterStatus>({ status: "idle" });
   const [weekStartSetting, setWeekStartSetting] = useState<WeekStartSetting>("monday");
 
   const [roster, setRoster] = useState<TeamRosterAthlete[]>([]);
   const [selectedAthleteIds, setSelectedAthleteIds] = useState<string[]>([]);
-  const [plans, setPlans] = useState<WeeklyMileagePlan[]>([]);
 
-  const [athleteSelectorOpen, setAthleteSelectorOpen] = useState(false);
   const [athleteDropdownOpen, setAthleteDropdownOpen] = useState(false);
   const [athleteSearch, setAthleteSearch] = useState("");
 
@@ -387,7 +393,8 @@ export default function PlannerScreen() {
   const [location, setLocation] = useState("");
   const [timeText, setTimeText] = useState("");
   const [timeManuallyEdited, setTimeManuallyEdited] = useState(false);
-  const [coachSettings, setCoachSettings] = useState<CoachAppSettings | null>(null);
+  const [coreCoachSettings, setCoreCoachSettings] = useState<CoachCoreSettings | null>(null);
+  const [practiceDefaults, setPracticeDefaults] = useState<PracticeTimeDefaults>(emptyPracticeTimeDefaults());
   const [session, setSession] = useState<"AM" | "PM">("AM");
   const [categoryIds, setCategoryIds] = useState<string[]>([]);
   const [categoryDropdownOpen, setCategoryDropdownOpen] = useState(false);
@@ -443,6 +450,8 @@ export default function PlannerScreen() {
   const lastAppliedTemplateTokenRef = useRef("");
   const lastAppliedDraftTokenRef = useRef("");
   const baselineRef = useRef("");
+  const isDirtyRef = useRef(false);
+  const suppressPromptRef = useRef(false);
   const [suppressPrompt, setSuppressPrompt] = useState(false);
 
   const snapshot = useMemo(
@@ -465,6 +474,14 @@ export default function PlannerScreen() {
   const isDirty = baselineRef.current !== "" && baselineRef.current !== snapshot;
 
   useEffect(() => {
+    isDirtyRef.current = isDirty;
+  }, [isDirty]);
+
+  useEffect(() => {
+    suppressPromptRef.current = suppressPrompt;
+  }, [suppressPrompt]);
+
+  useEffect(() => {
     const next = String(dateParam ?? "").trim();
     if (!next || !isISODateOnly(next)) return;
     setDateISO(next);
@@ -485,30 +502,26 @@ export default function PlannerScreen() {
         patchAppRuntime({ lastSettingsLoadStatus: "loading" });
 
         try {
-          const ws: WeekStartSetting =
-            (await loadJSON<WeekStartSetting>(WEEK_START_KEY, "monday").catch(() => "monday" as WeekStartSetting)) ??
-            "monday";
-
-          await teamStore.actions.refreshRoster({ force: true }).catch((error) => {
-            console.warn("[planner] teamStore refreshRoster failed", error);
+          const weekStartResult = await loadWeekStartSetting().catch(() => ({
+            raw: "monday" as WeekStartSetting,
+            normalized: "monday" as WeekStartSetting,
+          }));
+          const ws = weekStartResult.normalized;
+          console.log("[planner] week start loaded via shared helper", {
+            raw: weekStartResult.raw,
+            normalized: ws,
           });
 
-          const storeRoster = teamStore.getState().roster ?? [];
+          await teamDataStore.actions.refreshRoster({ force: true }).catch((error) => {
+            console.warn("[planner] teamDataStore refreshRoster failed", error);
+          });
+
+          const storeRoster = teamDataStore.getState().roster ?? [];
           const rosterResult = sortRosterByName(
             storeRoster
               .map((row) => normalizeTeamRosterAthlete(row))
               .filter((row): row is TeamRosterAthlete => !!row)
           );
-
-          const plannerCategories = await loadCoachCategoriesFromTeamKV().catch((error) => {
-            console.warn("[planner] loadCoachCategoriesFromTeamKV failed", error);
-            return [];
-          });
-
-          const rawPlans = await loadJSON<any>(MILEAGE_PLANS_KEY, []).catch((error) => {
-            console.warn("[planner] mileage plans load failed", error);
-            return [];
-          });
 
           const savedSelected = await loadJSON<string[]>(KEY_PLANNER_SELECTED_ATHLETES, []).catch((error) => {
             console.warn("[planner] selected athletes load failed", error);
@@ -520,9 +533,13 @@ export default function PlannerScreen() {
             return [];
           });
 
-          const savedSettings = await loadCoachSettings().catch((error) => {
-            console.warn("[planner] coach settings load failed", error);
-            return null as CoachAppSettings | null;
+          const savedCoreSettings = await loadCoreCoachSettings().catch((error) => {
+            console.warn("[planner] core coach settings load failed", error);
+            return null as CoachCoreSettings | null;
+          });
+          const savedPracticeDefaults = await loadPracticeTimeDefaults().catch((error) => {
+            console.warn("[planner] practice defaults load failed", error);
+            return emptyPracticeTimeDefaults();
           });
 
           const savedTemplates = await loadWorkoutTemplates().catch((error) => {
@@ -542,31 +559,43 @@ export default function PlannerScreen() {
 
           if (!mounted) return;
 
-          console.log("[planner] roster from teamStore", rosterResult.length, rosterResult);
-          console.log("[planner] categories from team kv", plannerCategories.length, plannerCategories);
+          console.log("[planner] roster from teamDataStore", rosterResult.length, rosterResult);
+          const plannerCategories = Array.isArray(savedCoreSettings?.categories) ? savedCoreSettings.categories : [];
+          console.log("[planner] categories from coach settings", plannerCategories.length, plannerCategories);
 
           setWeekStartSetting(ws);
           setRoster(rosterResult);
-          setCategories(Array.isArray(plannerCategories) ? plannerCategories : []);
-          setPlans(asPlanArray(rawPlans));
+          setCategories(plannerCategories);
           setCustomGroups(Array.isArray(savedGroups) ? savedGroups : []);
-          setCoachSettings(savedSettings);
+          setCoreCoachSettings(savedCoreSettings);
+          setPracticeDefaults(savedPracticeDefaults);
           setTemplates(Array.isArray(savedTemplates) ? savedTemplates : []);
           setAuxiliaryRoutines(Array.isArray(savedAuxiliaryRoutines) ? savedAuxiliaryRoutines : []);
           setCategoryRoutineDefaults(savedCategoryRoutineDefaults ?? {});
 
+          const shouldPreserveInProgressForm = isDirtyRef.current && !suppressPromptRef.current;
+          if (shouldPreserveInProgressForm) {
+            patchAppRuntime({
+              lastSettingsLoadStatus: "loaded",
+              lastSaveError: null,
+            });
+            return;
+          }
+
           const rosterIdSet = new Set(rosterResult.map((a) => a.id));
           const cleaned = (savedSelected ?? []).filter((id) => rosterIdSet.has(id));
-
+          const defaultsForDate = resolveDefaultSessionSlotAndTimeForDate(dateISO, savedPracticeDefaults, "AM", "");
           setSelectedAthleteIds(cleaned);
           setActiveDraftId(null);
+          setSession(defaultsForDate.session);
+          setTimeText(defaultsForDate.timeText);
           setTimeManuallyEdited(false);
 
           baselineRef.current = JSON.stringify({
             dateISO,
-            session,
+            session: defaultsForDate.session,
             location: "",
-            timeText: "",
+            timeText: defaultsForDate.timeText,
             title: "",
             details: "",
             categoryIds: [],
@@ -587,7 +616,6 @@ export default function PlannerScreen() {
 
           setRoster([]);
           setCategories([]);
-          setPlans([]);
           setCustomGroups([]);
           setTemplates([]);
           setAuxiliaryRoutines([]);
@@ -615,6 +643,12 @@ export default function PlannerScreen() {
   }, [patchAppRuntime, submitDebug]);
 
   useEffect(() => {
+    if (createFooterStatus.status !== "saved") return;
+    const timer = setTimeout(() => setCreateFooterStatus({ status: "idle" }), 2200);
+    return () => clearTimeout(timer);
+  }, [createFooterStatus.status]);
+
+  useEffect(() => {
     if (!suppressPrompt) return;
     const timer = setTimeout(() => setSuppressPrompt(false), 250);
     return () => clearTimeout(timer);
@@ -628,23 +662,18 @@ export default function PlannerScreen() {
     return m;
   }, [roster]);
 
-  const plansByWeekAndAthlete = useMemo(() => {
-    const m = new Map<string, WeeklyMileagePlan>();
-    for (const p of plans) {
-      const athleteId = String((p as any)?.athleteId ?? "");
-      const weekStart = String((p as any)?.weekStartISO ?? "");
-      if (!athleteId || !weekStart) continue;
-      m.set(`${weekStart}__${athleteId}`, p);
-    }
-    return m;
-  }, [plans]);
-
   const ws = useMemo(() => weekStartsOn(weekStartSetting), [weekStartSetting]);
   const weekStartISO = useMemo(() => getWeekStartISO(dateISO, ws), [dateISO, ws]);
 
+  useEffect(() => {
+    void teamDataStore.actions.loadMileageWeek(weekStartISO).catch((error) => {
+      console.warn("[planner] loadMileageWeek failed", error);
+    });
+  }, [weekStartISO]);
+
   const resolvedDefaultTime = useMemo(
-    () => getDefaultSessionTime(coachSettings, dateISO, session),
-    [coachSettings, dateISO, session]
+    () => getDefaultPracticeTime(practiceDefaults, dateISO, session) ?? "",
+    [practiceDefaults, dateISO, session]
   );
 
   const pickerMonthLabel = useMemo(
@@ -714,6 +743,93 @@ export default function PlannerScreen() {
     () => Array.from(new Set([...postRoutineIds, ...derivedAutoPostRoutineIds])),
     [postRoutineIds, derivedAutoPostRoutineIds]
   );
+
+  const footerSummary = useMemo(() => {
+    const normalizedTime = normalizeWorkoutTimeInput(timeText.trim() || "") || timeText.trim() || "—";
+    const categorySummary =
+      selectedCategories.length > 0 ? selectedCategories.map((c) => c.name).join(", ") : "—";
+
+    const selectedSet = new Set(selectedAthleteIds.map((id) => String(id)));
+    const dayIdx = dayIndexInWeek(dateISO, weekStartISO);
+    const mileageWeekCells = teamDataStore.getState().mileageCellsByWeek[weekStartISO] ?? [];
+    const matchedAthletes = new Set<string>();
+    for (const row of mileageWeekCells as any[]) {
+      const athleteProfileId = String(row?.athlete_profile_id ?? "").trim();
+      const rowDayIdx = Number(row?.day_idx);
+      const rowSession = String(row?.session ?? "").toUpperCase();
+      if (!athleteProfileId || !selectedSet.has(athleteProfileId)) continue;
+      if (!Number.isInteger(rowDayIdx) || rowDayIdx !== dayIdx) continue;
+      const sessionKey = rowSession === "PM" ? "PM" : "AM";
+      if (sessionKey !== session) continue;
+      const plannedValue = mileageValueToPlannedDistance(row?.value as MileageValue);
+      if (typeof plannedValue === "number" && Number.isFinite(plannedValue)) {
+        matchedAthletes.add(athleteProfileId);
+      }
+    }
+
+    return {
+      date: formatShortDateLabel(dateISO),
+      session,
+      time: normalizedTime,
+      title: title.trim() || "Workout",
+      category: categorySummary,
+      athleteCount: selectedAthleteIds.length,
+      preCount: effectivePreRoutineIds.length,
+      postCount: effectivePostRoutineIds.length,
+      mileageCoverage: `${matchedAthletes.size}/${selectedAthleteIds.length}`,
+    };
+  }, [
+    dateISO,
+    effectivePostRoutineIds.length,
+    effectivePreRoutineIds.length,
+    selectedAthleteIds,
+    selectedCategories,
+    session,
+    timeText,
+    title,
+    weekStartISO,
+  ]);
+
+  const preSubmitWarnings = useMemo(() => {
+    const warnings: string[] = [];
+    const selectedCount = selectedAthleteIds.length;
+
+    if (selectedCount === 0) {
+      warnings.push("No athletes selected.");
+    }
+
+    const [matchedRaw, selectedRaw] = String(footerSummary.mileageCoverage ?? "0/0").split("/");
+    const matched = Number(matchedRaw);
+    const selectedFromCoverage = Number(selectedRaw);
+    if (
+      Number.isFinite(matched) &&
+      Number.isFinite(selectedFromCoverage) &&
+      selectedFromCoverage > 0 &&
+      matched < selectedFromCoverage
+    ) {
+      warnings.push(`Mileage match is low (${matched}/${selectedFromCoverage}).`);
+    }
+
+    if (!title.trim()) {
+      warnings.push('Title is blank (will use fallback "Workout").');
+    }
+
+    if (!details.trim()) {
+      warnings.push("Details are blank.");
+    }
+
+    const rawTime = timeText.trim();
+    if (rawTime) {
+      const normalized = normalizeWorkoutTimeInput(rawTime);
+      if (!normalized) {
+        warnings.push("Time format looks unusual.");
+      } else if (normalized !== rawTime) {
+        warnings.push(`Time will be normalized to ${normalized}.`);
+      }
+    }
+
+    return warnings;
+  }, [details, footerSummary.mileageCoverage, selectedAthleteIds.length, timeText, title]);
 
   const selectedTemplate = useMemo(
     () => templates.find((item) => item.id === selectedTemplateId) ?? null,
@@ -1161,10 +1277,12 @@ export default function PlannerScreen() {
     setSubmitDebug("button pressed");
 
     if (creating) return;
+    setCreateFooterStatus({ status: "saving" });
 
     if (selectedAthleteIds.length === 0) {
       setSubmitDebug("no athletes selected");
       Alert.alert("No athletes selected", "Select at least one athlete before creating workouts.");
+      setCreateFooterStatus({ status: "error", message: "Select at least one athlete." });
       return;
     }
 
@@ -1182,6 +1300,7 @@ export default function PlannerScreen() {
       if (rawTime && !normalizedTime) {
         setSubmitDebug("invalid time");
         Alert.alert("Invalid time", "Enter time like 8a, 12p, 8:00am, or 20:00.");
+        setCreateFooterStatus({ status: "error", message: "Invalid time format." });
         return;
       }
 
@@ -1189,7 +1308,7 @@ export default function PlannerScreen() {
       const primaryCategory = categoryNames[0] ?? null;
       const masterTitle = title.trim() || "Workout";
       const masterLocation = location.trim();
-      const plannedDistanceUnit = coachSettings?.distanceUnit ?? "mi";
+      const plannedDistanceUnit = coreCoachSettings?.distanceUnit ?? "mi";
 
       const orderedAthleteIds = [...selectedAthleteIds].sort((aId, bId) => {
         const aName = String(rosterById.get(aId)?.displayName ?? "");
@@ -1199,17 +1318,27 @@ export default function PlannerScreen() {
 
       const dayIdx = dayIndexInWeek(dateISO, weekStartISO);
       const plannedDistanceByAthlete = new Map<string, number | null>();
+      const mileageWeekCells = teamDataStore.getState().mileageCellsByWeek[weekStartISO] ?? [];
+      const mileageByAthleteDaySession = new Map<string, any>();
+      for (const row of mileageWeekCells as any[]) {
+        const athleteProfileId = String(row?.athlete_profile_id ?? "").trim();
+        const rowDayIdx = Number(row?.day_idx);
+        const rowSession = String(row?.session ?? "").toUpperCase();
+        if (!athleteProfileId || !Number.isInteger(rowDayIdx) || rowDayIdx < 0 || rowDayIdx > 6) continue;
+        const sessionKey = rowSession === "PM" ? "PM" : "AM";
+        mileageByAthleteDaySession.set(
+          `${athleteProfileId}__${rowDayIdx}__${sessionKey}`,
+          row?.value ?? null
+        );
+      }
 
       const createdBy = (await supabase.auth.getSession()).data.session?.user?.id ?? null;
 
       orderedAthleteIds.forEach((athleteId) => {
-        const planKey = `${weekStartISO}__${athleteId}`;
-        const plan = plansByWeekAndAthlete.get(planKey);
-        const daysAny: any = plan?.days ?? {};
-        const day = Array.isArray(daysAny) ? daysAny[dayIdx] : daysAny[String(dayIdx)];
-        const plannedValue = mileageValueToPlannedDistance(
-          session === "AM" ? (day?.am ?? day?.AM) : (day?.pm ?? day?.PM)
-        );
+        const mileageValue = mileageByAthleteDaySession.get(
+          `${athleteId}__${dayIdx}__${session}`
+        ) as MileageValue;
+        const plannedValue = mileageValueToPlannedDistance(mileageValue);
 
         plannedDistanceByAthlete.set(
           String(athleteId),
@@ -1242,7 +1371,6 @@ export default function PlannerScreen() {
       const navigationParams = {
         date: dateISO,
         batch: newBatchId,
-        refresh: Date.now().toString(),
       };
 
       const insertedRows = await createTeamWorkoutBatch(payload);
@@ -1257,22 +1385,24 @@ export default function PlannerScreen() {
       setSuppressPrompt(true);
       setTimeManuallyEdited(false);
       setSubmitDebug(`navigating: ${JSON.stringify(navigationParams)}`);
+      setCreateFooterStatus({ status: "saved" });
 
       router.push({
-        pathname: "/(coach)/(tabs)/calendar",
+        pathname: "/(coach)/workouts",
         params: navigationParams,
       });
     } catch (e: any) {
       const message = String(e?.message ?? e ?? "Unknown error");
       setSubmitDebug(`insert error: ${message}`);
       Alert.alert("Create session failed", message);
+      setCreateFooterStatus({ status: "error", message });
       patchAppRuntime({ lastSaveError: message });
     } finally {
       setCreating(false);
     }
   }, [
     activeDraftId,
-    coachSettings?.distanceUnit,
+    coreCoachSettings?.distanceUnit,
     creating,
     dateISO,
     details,
@@ -1280,7 +1410,6 @@ export default function PlannerScreen() {
     effectivePreRoutineIds,
     location,
     patchAppRuntime,
-    plansByWeekAndAthlete,
     rosterById,
     router,
     selectedAthleteIds,
@@ -2583,99 +2712,6 @@ export default function PlannerScreen() {
             </View>
           </Modal>
 
-          <Modal
-            visible={athleteSelectorOpen}
-            animationType={isWeb ? "fade" : "slide"}
-            transparent
-            onRequestClose={() => setAthleteSelectorOpen(false)}
-          >
-            <View style={menuModalContainerStyle}>
-              <View style={menuModalCardStyle}>
-                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                  <Text style={{ fontSize: 18, fontWeight: "900" }}>Select Athletes</Text>
-                  <Pressable onPress={() => setAthleteSelectorOpen(false)}>
-                    <Text style={{ fontWeight: "800", color: "#111" }}>Done</Text>
-                  </Pressable>
-                </View>
-
-                <View style={{ flexDirection: "row", gap: 10, marginTop: 12, marginBottom: 12 }}>
-                  <Pressable
-                    onPress={async () => {
-                      const next = rosterSorted.map((a) => a.id);
-                      setSelectedAthleteIds(next);
-                      await saveJSON(KEY_PLANNER_SELECTED_ATHLETES, next);
-                    }}
-                    style={{
-                      borderWidth: 1,
-                      borderColor: "#ddd",
-                      borderRadius: 10,
-                      paddingVertical: 8,
-                      paddingHorizontal: 12,
-                      backgroundColor: "#fafafa",
-                    }}
-                  >
-                    <Text style={{ fontWeight: "800" }}>Select all</Text>
-                  </Pressable>
-
-                  <Pressable
-                    onPress={async () => {
-                      setSelectedAthleteIds([]);
-                      await saveJSON(KEY_PLANNER_SELECTED_ATHLETES, []);
-                    }}
-                    style={{
-                      borderWidth: 1,
-                      borderColor: "#ddd",
-                      borderRadius: 10,
-                      paddingVertical: 8,
-                      paddingHorizontal: 12,
-                      backgroundColor: "#fafafa",
-                    }}
-                  >
-                    <Text style={{ fontWeight: "800" }}>Clear</Text>
-                  </Pressable>
-                </View>
-
-                <ScrollView contentContainerStyle={{ paddingBottom: 16 }}>
-                  {rosterSorted.map((a) => {
-                    const active = selectedAthleteIds.includes(a.id);
-                    return (
-                      <Pressable
-                        key={a.id}
-                        onPress={() => {
-                          void toggleAthlete(a.id);
-                        }}
-                        style={{
-                          flexDirection: "row",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          paddingVertical: 10,
-                          borderBottomWidth: 1,
-                          borderBottomColor: "#efefef",
-                        }}
-                      >
-                        <Text style={{ fontWeight: "700", color: "#111", flex: 1, paddingRight: 12 }}>{a.displayName}</Text>
-                        <View
-                          style={{
-                            width: 22,
-                            height: 22,
-                            borderRadius: 11,
-                            borderWidth: 1.5,
-                            borderColor: active ? "#111" : "#cfcfcf",
-                            backgroundColor: active ? "#111" : "white",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          {active ? <Text style={{ color: "white", fontWeight: "900", fontSize: 12 }}>✓</Text> : null}
-                        </View>
-                      </Pressable>
-                    );
-                  })}
-                  {rosterSorted.length === 0 ? <Text style={{ color: "#666" }}>No roster found.</Text> : null}
-                </ScrollView>
-              </View>
-            </View>
-          </Modal>
         </View>
       </ScrollView>
 
@@ -2685,10 +2721,7 @@ export default function PlannerScreen() {
           left: 16,
           right: 16,
           bottom: 14,
-          flexDirection: "row",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 10,
+          gap: 8,
           paddingHorizontal: 10,
           paddingVertical: 8,
           borderWidth: 1,
@@ -2697,6 +2730,62 @@ export default function PlannerScreen() {
           backgroundColor: "#fff",
         }}
       >
+        <View
+          style={{
+            borderWidth: 1,
+            borderColor: "#e6ebf3",
+            borderRadius: 8,
+            backgroundColor: "#f8fafc",
+            paddingHorizontal: 8,
+            paddingVertical: 6,
+          }}
+        >
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <View style={{ flexDirection: "row", alignItems: "center", minWidth: 960 }}>
+              {[
+                { label: "Date", value: footerSummary.date, width: 118 },
+                { label: "AM/PM", value: footerSummary.session, width: 80 },
+                { label: "Time", value: footerSummary.time, width: 104 },
+                { label: "Title", value: footerSummary.title, width: 180 },
+                { label: "Category", value: footerSummary.category, width: 180 },
+                { label: "Athletes", value: `${footerSummary.athleteCount}`, width: 84 },
+                { label: "Pre", value: `${footerSummary.preCount}`, width: 70 },
+                { label: "Post", value: `${footerSummary.postCount}`, width: 70 },
+                { label: "Mileage", value: footerSummary.mileageCoverage, width: 116 },
+              ].map((col, idx) => (
+                <View key={`footer-preview-${idx}`} style={{ width: col.width, paddingRight: 8 }}>
+                  <Text style={{ fontSize: 10, fontWeight: "900", color: "#64748b", marginBottom: 2 }}>{col.label}</Text>
+                  <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "800", color: "#0f172a" }}>
+                    {col.value}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </ScrollView>
+        </View>
+
+        {preSubmitWarnings.length > 0 ? (
+          <View
+            style={{
+              borderWidth: 1,
+              borderColor: "#f1e5be",
+              borderRadius: 8,
+              backgroundColor: "#fffbeb",
+              paddingHorizontal: 8,
+              paddingVertical: 6,
+              gap: 2,
+            }}
+          >
+            <Text style={{ fontSize: 10, fontWeight: "900", color: "#7c5e10" }}>Pre-submit checks</Text>
+            {preSubmitWarnings.map((warning) => (
+              <Text key={warning} style={{ fontSize: 11, fontWeight: "700", color: "#8a6a15" }}>
+                • {warning}
+              </Text>
+            ))}
+          </View>
+        ) : null}
+
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
         <Pressable
           onPress={() =>
             router.push({
@@ -2758,23 +2847,11 @@ export default function PlannerScreen() {
             {creating ? "Creating..." : "Create Session"}
           </Text>
         </Pressable>
-      </View>
+        </View>
 
-      <View
-        style={{
-          position: "absolute",
-          left: 16,
-          right: 16,
-          bottom: 68,
-          backgroundColor: "#111827",
-          borderWidth: 1,
-          borderColor: "#334155",
-          borderRadius: 8,
-          paddingHorizontal: 12,
-          paddingVertical: 8,
-        }}
-      >
-        <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>Create debug: {submitDebug}</Text>
+        <View style={{ minHeight: 18 }}>
+          <InlineSaveStatus status={createFooterStatus.status} message={createFooterStatus.message} size="md" />
+        </View>
       </View>
 
       {showSavedBanner ? (

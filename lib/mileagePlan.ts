@@ -5,9 +5,6 @@ import {
 } from "./workoutEntryParser";
 import { DEFAULT_PACE_SEC } from "./pace";
 
-export const WEEK_START_KEY = "training_app_week_start_v1";
-export const MILEAGE_PLANS_KEY = "training_app_mileage_plans_v1";
-
 export function toISODate(d: Date) {
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -260,15 +257,4 @@ export function formatSum(sum: { min: number; max: number }) {
   if (sum.min === 0 && sum.max === 0) return "";
   if (Math.abs(sum.min - sum.max) < 1e-9) return String(Math.round(sum.min * 10) / 10);
   return `${Math.round(sum.min * 10) / 10}-${Math.round(sum.max * 10) / 10}`;
-}
-
-export function emptyWeek(): Record<string, DailyMileageTarget> {
-  const days: Record<string, DailyMileageTarget> = {};
-  for (let i = 0; i < 7; i++) days[String(i)] = {};
-  return days;
-}
-
-export function getDayTarget(plan: WeeklyMileagePlan | undefined, idx: number): DailyMileageTarget {
-  if (!plan) return {};
-  return plan.days[String(idx)] ?? {};
 }

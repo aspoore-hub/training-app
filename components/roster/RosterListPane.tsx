@@ -1,27 +1,24 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Platform, ScrollView, View } from "react-native";
+import { Alert, Platform, Pressable, ScrollView, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 
-import { loadRoster } from "../../lib/roster";
 import {
   createClaimInvite,
   createTeamAthlete,
-  ensureCoachTeam,
   getCurrentTeamId,
-  listTeamAthletes,
   getMyUserId,
 } from "../../lib/team";
-import { teamStore, type TeamAthlete } from "../../lib/teamStore";
+import { teamDataStore, type TeamAthlete } from "../../lib/teamDataStore";
 import { supabase } from "../../lib/supabase";
 import { AppText } from "../ui/AppText";
 import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { Divider } from "../ui/Divider";
-import { Row } from "../ui/Row";
 import { Screen } from "../ui/Screen";
 import { TextField } from "../ui/TextField";
 import { useAppTheme } from "../ui/useAppTheme";
+import { useResponsive } from "../../lib/useResponsive";
 
 const DEBUG_RLS = false; // flip true only when you need it
 
@@ -44,7 +41,8 @@ function sortKeyForAthlete(a: TeamAthlete) {
 export function RosterListPane() {
   const router = useRouter();
   const { theme } = useAppTheme();
-  const s = teamStore.use();
+  const { isDesktop } = useResponsive();
+  const s = teamDataStore.use();
 
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
@@ -88,7 +86,7 @@ export function RosterListPane() {
   useFocusEffect(
     useCallback(() => {
       // refresh when screen is focused (safe + centralized)
-      void teamStore.actions.refreshRoster();
+      void teamDataStore.actions.refreshRoster();
     }, [])
   );
 
@@ -112,6 +110,35 @@ export function RosterListPane() {
     });
   }, [s.roster, query]);
 
+  const listCountLabel = useMemo(() => {
+    const total = filtered.length;
+    return `${total} athlete${total === 1 ? "" : "s"}`;
+  }, [filtered.length]);
+
+  const pageShellStyle = useMemo(
+    () => ({
+      padding: theme.space.md,
+      gap: 10,
+      flex: 1,
+    }),
+    [theme.space.md]
+  );
+
+  const sectionCardStyle = useMemo(
+    () => ({
+      borderColor: "#dfe6f2",
+      borderRadius: 14,
+      padding: 12,
+      backgroundColor: "#fff",
+      shadowColor: "#111827",
+      shadowOpacity: Platform.OS === "web" ? 0.04 : 0.08,
+      shadowRadius: 10,
+      shadowOffset: { width: 0, height: 2 },
+      elevation: 1,
+    }),
+    []
+  );
+
   async function copyToken(token: string) {
     await Clipboard.setStringAsync(token);
     if (Platform.OS === "web") setStatus("Invite token copied.");
@@ -127,7 +154,7 @@ export function RosterListPane() {
   function isDuplicateFullName(first: string, last: string) {
     const target = normName(`${first} ${last}`);
 
-    return teamStore.getState().roster.some((a) => {
+    return teamDataStore.getState().roster.some((a) => {
       const existing = normName(a.display_name ?? "");
       return existing === target;
     });
@@ -149,7 +176,7 @@ export function RosterListPane() {
       setStatus("");
       try {
         await createTeamAthlete(fn, ln, nextEmail || null);
-        await teamStore.actions.refreshRoster();
+        await teamDataStore.actions.refreshRoster();
         setFirstName("");
         setLastName("");
         setEmail("");
@@ -201,157 +228,202 @@ export function RosterListPane() {
     }
   }, []);
 
-  const importFromLocal = useCallback(async () => {
-    setBusy(true);
-    setStatus("");
-    try {
-      const local = await loadRoster();
-      if (!local.length) {
-        Alert.alert("Nothing to import", "Your local roster is empty on this device.");
-        return;
-      }
-
-      await ensureCoachTeam("My Team");
-      await teamStore.actions.refreshRoster();
-      const existing = await listTeamAthletes();
-      const existingEmails = new Set(
-        existing.map((a) => String(a.email ?? "").trim().toLowerCase()).filter(Boolean)
-      );
-      const existingNames = new Set(
-        existing.map((a) => String(a.display_name ?? "").trim().toLowerCase()).filter(Boolean)
-      );
-
-      let createdCount = 0;
-      let skippedCount = 0;
-
-      for (const a of local) {
-        const first = String(a.firstName ?? "").trim();
-        const last = String(a.lastName ?? "").trim();
-        const em = String(a.email ?? "").trim();
-
-        const display = `${first} ${last}`.trim() || em;
-        if (!display) continue;
-
-        const derivedFirst = first || display.split(/\s+/)[0] || "Athlete";
-        const derivedLast = last || display.split(/\s+/).slice(1).join(" ") || "Profile";
-
-        const emailKey = em.toLowerCase();
-        const nameKey = display.toLowerCase();
-
-        if ((emailKey && existingEmails.has(emailKey)) || existingNames.has(nameKey)) {
-          skippedCount++;
-          continue;
-        }
-
-        try {
-          await createTeamAthlete(derivedFirst, derivedLast, em || null);
-          createdCount++;
-          if (emailKey) existingEmails.add(emailKey);
-          existingNames.add(nameKey);
-        } catch {
-          skippedCount++;
-        }
-      }
-
-      await teamStore.actions.refreshRoster();
-      Alert.alert("Import complete", `Imported ${createdCount} athletes. Skipped ${skippedCount}.`);
-    } catch (e: any) {
-      console.warn("Import failed", e);
-      Alert.alert("Import failed", e?.message ?? "Could not import local roster.");
-    } finally {
-      setBusy(false);
-    }
-  }, []);
-
   return (
     <Screen padded={false} style={{ flex: 1 }}>
-      <View style={{ padding: theme.space.lg, gap: theme.space.lg, flex: 1 }}>
-        <View style={{ gap: 6 }}>
-          <AppText variant="title">Roster</AppText>
-          <AppText variant="caption" color="mutedText">
-            Team athletes are stored in Supabase. Tap an athlete to edit details.
-          </AppText>
-        </View>
+      <View style={pageShellStyle}>
+        <Card
+          style={{
+            ...sectionCardStyle,
+            paddingVertical: 11,
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+          }}
+        >
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <AppText variant="title">Roster</AppText>
+            <AppText variant="caption" color="mutedText" style={{ marginTop: 3 }}>
+              Manage athletes, profile access, and invite workflows.
+            </AppText>
+          </View>
+          <View
+            style={{
+              borderWidth: 1,
+              borderColor: "#d7dfeb",
+              backgroundColor: "#f7f9fd",
+              borderRadius: 999,
+              paddingVertical: 5,
+              paddingHorizontal: 10,
+            }}
+          >
+            <AppText variant="sub" color="mutedText">
+              {listCountLabel}
+            </AppText>
+          </View>
+        </Card>
 
-        {status ? <AppText variant="caption" color="success">{status}</AppText> : null}
-        {s.lastError ? <AppText variant="caption" color="danger">{s.lastError}</AppText> : null}
+        {(status || s.lastError) ? (
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+            {status ? (
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#b8e7ca",
+                  backgroundColor: "#eefaf2",
+                  borderRadius: 999,
+                  paddingHorizontal: 10,
+                  paddingVertical: 4,
+                }}
+              >
+                <AppText variant="caption" color="success">{status}</AppText>
+              </View>
+            ) : null}
+            {s.lastError ? (
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#f4c1c1",
+                  backgroundColor: "#fff1f1",
+                  borderRadius: 999,
+                  paddingHorizontal: 10,
+                  paddingVertical: 4,
+                }}
+              >
+                <AppText variant="caption" color="danger">{s.lastError}</AppText>
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+
         {lastInviteToken ? (
-          <Card style={{ gap: theme.space.xs }}>
+          <Card style={{ ...sectionCardStyle, gap: 3, paddingVertical: 8 }}>
             <AppText variant="caption" color="mutedText">Latest invite token</AppText>
-            <AppText variant="sub">{lastInviteToken}</AppText>
+            <AppText variant="sub" numberOfLines={1}>{lastInviteToken}</AppText>
           </Card>
         ) : null}
 
-        <Card style={{ gap: theme.space.md }}>
-          <TextField
-            label="First name"
-            value={firstName}
-            onChangeText={setFirstName}
-            placeholder="e.g. Amelia"
-            autoCapitalize="words"
-          />
-          <TextField
-            label="Last name"
-            value={lastName}
-            onChangeText={setLastName}
-            placeholder="e.g. Dodds"
-            autoCapitalize="words"
-          />
-          <TextField
-            label="Athlete email (optional for profile)"
-            value={email}
-            onChangeText={setEmail}
-            placeholder="e.g. jane@email.com"
-            keyboardType="email-address"
-            autoCapitalize="none"
-          />
-          <View style={{ flexDirection: "row", gap: theme.space.sm, flexWrap: "wrap" }}>
-            <Button title={busy ? "Working..." : "Create Athlete"} onPress={addAthlete} disabled={busy} />
-            <Button title="Import" variant="secondary" onPress={importFromLocal} disabled={busy} />
+        <Card style={{ ...sectionCardStyle, gap: 9, paddingVertical: 10 }}>
+          <View style={{ gap: 2 }}>
+            <AppText variant="headline">Add athlete</AppText>
+            <AppText variant="caption" color="mutedText">
+              Create a new roster profile.
+            </AppText>
+          </View>
+          <View style={{ flexDirection: isDesktop ? "row" : "column", gap: 8 }}>
+            <TextField
+              label="First name"
+              value={firstName}
+              onChangeText={setFirstName}
+              placeholder="e.g. Amelia"
+              autoCapitalize="words"
+              style={isDesktop ? { flex: 1 } : undefined}
+            />
+            <TextField
+              label="Last name"
+              value={lastName}
+              onChangeText={setLastName}
+              placeholder="e.g. Dodds"
+              autoCapitalize="words"
+              style={isDesktop ? { flex: 1 } : undefined}
+            />
+            <TextField
+              label="Email (optional)"
+              value={email}
+              onChangeText={setEmail}
+              placeholder="e.g. jane@email.com"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              style={isDesktop ? { flex: 1.2 } : undefined}
+            />
+          </View>
+          <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Button
+              title={busy ? "Working..." : "Create Athlete"}
+              onPress={addAthlete}
+              disabled={busy}
+              style={{ height: 36 }}
+            />
             <Button
               title={s.loadingCount > 0 ? "Refreshing..." : "Refresh"}
               variant="secondary"
-              onPress={() => void teamStore.actions.refreshRoster()}
+              onPress={() => void teamDataStore.actions.refreshRoster()}
               disabled={busy || s.loadingCount > 0}
+              style={{ height: 36 }}
             />
           </View>
         </Card>
 
-        <Card style={{ padding: 0, overflow: "hidden", flex: 1 }}>
-          <View style={{ padding: theme.space.lg, gap: theme.space.md }}>
+        <Card style={{ ...sectionCardStyle, padding: 0, overflow: "hidden", flex: 1 }}>
+          <View style={{ paddingHorizontal: theme.space.md, paddingTop: 9, paddingBottom: 8, gap: 7 }}>
+            <View style={{ gap: 2 }}>
+              <View style={{ flexDirection: "row", alignItems: "baseline", justifyContent: "space-between" }}>
+                <AppText variant="headline">Roster list</AppText>
+                <AppText variant="sub" color="mutedText">{listCountLabel}</AppText>
+              </View>
+              <AppText variant="caption" color="mutedText">
+                Search by athlete name, email, or UUID.
+              </AppText>
+            </View>
             <TextField
-              label="Search"
               value={query}
               onChangeText={setQuery}
               placeholder="Name, email, or UUID..."
               autoCapitalize="none"
             />
-            <AppText variant="headline">Athletes ({filtered.length})</AppText>
           </View>
 
           <Divider />
 
-          <ScrollView contentContainerStyle={{ paddingBottom: theme.space.md }}>
+          <ScrollView contentContainerStyle={{ paddingBottom: 6 }}>
             {filtered.map((a, idx) => (
               <View key={a.id}>
-                <Row
-                  title={a.display_name ?? "Unnamed athlete"}
-                  subtitle={a.email ?? a.id}
-                  right={
-                    <Button
-                      title="Invite"
-                      variant="secondary"
-                      disabled={busy}
-                      onPress={() => inviteAthlete(a)}
-                    />
-                  }
+                <Pressable
                   onPress={() =>
                     router.push({
                       pathname: "/(coach)/(tabs)/roster/[id]",
                       params: { id: a.id },
                     })
                   }
-                />
+                  style={({ pressed }) => [{ opacity: pressed ? 0.92 : 1 }]}
+                >
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: theme.space.sm,
+                      paddingHorizontal: theme.space.md,
+                      paddingVertical: 8,
+                      minHeight: 62,
+                    }}
+                  >
+                    <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+                      <AppText variant="sub" numberOfLines={1} style={{ fontSize: 15 }}>
+                        {a.display_name ?? "Unnamed athlete"}
+                      </AppText>
+                      <AppText variant="caption" color="mutedText" numberOfLines={1} style={{ fontSize: 11.5 }}>
+                        {String(a.email ?? "").trim() ? a.email : "No email"}
+                      </AppText>
+                      <AppText
+                        variant="caption"
+                        color="mutedText"
+                        numberOfLines={1}
+                        style={{ fontSize: 10.5, opacity: 0.62 }}
+                      >
+                        ID: {a.id}
+                      </AppText>
+                    </View>
+                    <View style={{ width: 86, alignItems: "flex-end" }}>
+                      <Button
+                        title="Invite"
+                        variant="secondary"
+                        disabled={busy}
+                        onPress={() => inviteAthlete(a)}
+                        style={{ height: 32, minWidth: 80 }}
+                      />
+                    </View>
+                  </View>
+                </Pressable>
                 {idx !== filtered.length - 1 ? <Divider /> : null}
               </View>
             ))}

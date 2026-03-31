@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Platform, Pressable, ScrollView, Text, View } from "react-native";
+import { Alert, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useFocusEffect } from "expo-router";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import { GridCell } from "../../../components/grid/GridCell";
@@ -13,17 +14,17 @@ import { Card } from "../../../components/ui/Card";
 import { Divider } from "../../../components/ui/Divider";
 import { Screen } from "../../../components/ui/Screen";
 import { useAppTheme } from "../../../components/ui/useAppTheme";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { teamDataStore } from "../../../lib/teamDataStore";
 import type { WeekStartDay } from "../../../lib/types";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../../lib/pace";
 import { distanceUnitLabel, type DistanceUnit } from "../../../lib/units";
 import { loadAthletePaceOverrides, resolveAthletePaceSeconds, type AthletePaceOverrides } from "../../../lib/athletePace";
 import { useResponsive } from "../../../lib/useResponsive";
-import { loadCoachSettings } from "../../../lib/settings";
+import { loadCoachWeekLabels, loadCoreCoachSettings, loadWeekStartSetting, saveCoachWeekLabel } from "../../../lib/settings";
+import { loadJSON, saveJSON } from "../../../lib/storage";
+import { getWeekLabelTone } from "../../../lib/weekLabelStyle";
 import { normalizeTeamRosterAthlete, sortRosterByName } from "../../../lib/teamRoster";
 import {
-  WEEK_START_KEY,
   formatMileageForSheet,
   getWeekStartISO,
   parseMileageInput,
@@ -38,6 +39,8 @@ import {
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MILEAGE_GRID_ID = "mileage-grid";
+const MILEAGE_VIEW_PREFS_KEY = "training_app_coach_mileage_view_prefs_v1";
+const MILEAGE_WEEK_CACHE_PREFIX = "coach_mileage_week_cache_v1";
 
 type MileageValue =
   | number
@@ -64,7 +67,12 @@ type SecRange = { min: number; max: number };
 type CellField = "am" | "pm";
 type CellKey = string; // `${athleteId}__${weekStartISO}__${dayIdx}__${field}`
 type OffKey = string; // `${athleteId}__${weekStartISO}__${dayIdx}`
-type CopiedRow = { [k: string]: MileageValue | null }; // keys: `dayIdx__field`
+type WeekClipboard = {
+  sourceWeekStartISO: string;
+  copiedAtMs: number;
+  cells: Array<{ athleteId: string; dayIdx: number; session: "AM" | "PM"; value: MileageValue | null }>;
+  flags: Array<{ athleteId: string; dayIdx: number; ncaaOff: boolean }>;
+};
 
 function buildEmptyWeek() {
   const days: Record<string, any> = {};
@@ -224,6 +232,15 @@ function addDaysISO(iso: string, days: number) {
   return toISODate(d);
 }
 
+function isValidISODate(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function isoDayNumber(iso: string): number {
+  const [y, m, d] = String(iso ?? "").split("-").map(Number);
+  return Math.floor(Date.UTC(y, (m ?? 1) - 1, d ?? 1) / 86400000);
+}
+
 function MiniPill({
   label,
   onPress,
@@ -237,20 +254,35 @@ function MiniPill({
   danger?: boolean;
   compact?: boolean;
 }) {
+  const { colors } = useAppTheme();
   return (
     <Pressable
       onPress={disabled ? undefined : onPress}
-      style={({ pressed }) => ({
-        paddingHorizontal: compact ? 8 : 10,
-        paddingVertical: compact ? 4 : 6,
-        borderRadius: 999,
-        borderWidth: 1,
-        borderColor: danger ? "#d11" : "#cfcfcf",
-        backgroundColor: disabled ? "#f3f3f3" : pressed ? "#eee" : "#fff",
-        opacity: disabled ? 0.55 : 1,
-      })}
+      style={({ pressed }) => {
+        const neutralBorder = "rgba(15,23,42,0.18)";
+        const accentBorder = "rgba(37,99,235,0.42)";
+        const dangerBorder = "rgba(220,38,38,0.46)";
+        return {
+          paddingHorizontal: compact ? 9 : 12,
+          paddingVertical: compact ? 5 : 6,
+          borderRadius: 999,
+          borderWidth: 1,
+          borderColor: danger ? dangerBorder : pressed ? accentBorder : neutralBorder,
+          backgroundColor: disabled
+            ? colors.bg
+            : danger
+              ? pressed
+                ? "rgba(220,38,38,0.12)"
+                : "rgba(220,38,38,0.08)"
+              : pressed
+                ? "rgba(37,99,235,0.14)"
+                : colors.card,
+          opacity: disabled ? 0.52 : 1,
+          ...(Platform.OS === "web" ? ({ cursor: disabled ? "default" : "pointer" } as any) : null),
+        };
+      }}
     >
-      <Text style={{ fontSize: compact ? 10 : 11, fontWeight: "900", color: danger ? "#b00" : "#111" }}>{label}</Text>
+      <Text style={{ fontSize: compact ? 10 : 11, fontWeight: "900", color: danger ? "#991b1b" : colors.text }}>{label}</Text>
     </Pressable>
   );
 }
@@ -288,42 +320,6 @@ function MiniCheck({
   );
 }
 
-function MiniIconButton({
-  icon,
-  onPress,
-  disabled,
-}: {
-  icon: "copy" | "paste";
-  onPress: () => void;
-  disabled?: boolean;
-}) {
-  const glyph = icon === "copy" ? "⧉" : "⎘";
-
-  return (
-    <Pressable
-      onPress={disabled ? undefined : onPress}
-      hitSlop={6}
-      style={{
-        width: 16,
-        height: 16,
-        alignItems: "center",
-        justifyContent: "center",
-        opacity: disabled ? 0.35 : 1,
-        ...(Platform.OS === "web" ? ({ cursor: disabled ? "default" : "pointer" } as any) : null),
-      }}
-    >
-      <Text
-        style={{
-          fontSize: 13,
-          fontWeight: "900",
-          lineHeight: 14,
-        }}
-      >
-        {glyph}
-      </Text>
-    </Pressable>
-  );
-}
 
 function escapeMileagePdfHtml(value: unknown): string {
   return String(value ?? "")
@@ -385,6 +381,7 @@ function getExportCellText(args: {
 
 function buildMileageHandoutHtml(args: {
   weekRangeLabel: string;
+  weekAnnotation?: string;
   weekdayLabels: string[];
   weekDates: string[];
   athletes: Array<{
@@ -465,6 +462,7 @@ function buildMileageHandoutHtml(args: {
   <body>
     <h1 class="title">Weekly Mileage Chart</h1>
     <p class="sub">${escapeMileagePdfHtml(args.weekRangeLabel)}</p>
+    ${String(args.weekAnnotation ?? "").trim() ? `<p class="sub">${escapeMileagePdfHtml(String(args.weekAnnotation ?? "").trim())}</p>` : ""}
     <table>
       <thead>
         <tr>
@@ -487,19 +485,30 @@ function buildMileageHandoutHtml(args: {
 
 export default function CoachMileageTab() {
   const { isDesktop, isWeb } = useResponsive();
-  const { theme, colors } = useAppTheme();
+  const { theme, colors, scheme } = useAppTheme();
   const s = teamDataStore.use();
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
   const [weekAnchorISO, setWeekAnchorISO] = useState(() => toISODate(new Date()));
-  const [copiedRow, setCopiedRow] = useState<CopiedRow | null>(null);
-  const [pasteTargets, setPasteTargets] = useState<Set<string>>(() => new Set());
+  const [weekAnchorReady, setWeekAnchorReady] = useState(false);
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [athletePaceOverrides, setAthletePaceOverrides] = useState<AthletePaceOverrides>({});
   const [invalidCells, setInvalidCells] = useState<Record<string, boolean>>({});
   const [actionBannerText, setActionBannerText] = useState("");
+  const [jumpToWeekOpen, setJumpToWeekOpen] = useState(false);
+  const [jumpDateInput, setJumpDateInput] = useState(() => toISODate(new Date()));
+  const [weekClipboard, setWeekClipboard] = useState<WeekClipboard | null>(null);
+  const [weekLabelsByStart, setWeekLabelsByStart] = useState<Record<string, string>>({});
+  const [weekLabelDraft, setWeekLabelDraft] = useState("");
+  const [isWeekLabelEditing, setIsWeekLabelEditing] = useState(false);
+  const [weekLabelSaveState, setWeekLabelSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   // Standalone export state only; live mileage sheet rendering and grid behavior are untouched.
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [cachedWeekSnapshot, setCachedWeekSnapshot] = useState<{
+    weekStartISO: string;
+    cells: any[];
+    flags: any[];
+  } | null>(null);
   const [activeGridId, setActiveGridId] = useState<string | null>(null);
   const [mileageDraftsByKey, setMileageDraftsByKey] = useState<Record<string, string>>({});
   const actionBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -507,6 +516,47 @@ export default function CoachMileageTab() {
   const mileageDraftsRef = useRef<Record<string, string>>({});
   const mileageSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const pendingDraftSaveKeysRef = useRef<Set<string>>(new Set());
+  const weekLabelSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const weekLabelEditingWeekRef = useRef<string | null>(null);
+  const weekLabelSaveSeqRef = useRef(0);
+  const lastMileageMetaRefreshAtRef = useRef(0);
+  const draftKeyMetaRef = useRef<
+    Record<string, { athleteId: string; dayIdx: number; field: CellField; uiKey: string }>
+  >({});
+  const editingCloudKeyRef = useRef<string | null>(null);
+  const restoredWeekAnchorRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const prefs = await loadJSON<{ weekAnchorISO?: string }>(MILEAGE_VIEW_PREFS_KEY, {});
+      if (!active) return;
+      if (isValidISODate(prefs?.weekAnchorISO)) {
+        setWeekAnchorISO(prefs.weekAnchorISO);
+      }
+      restoredWeekAnchorRef.current = true;
+      setWeekAnchorReady(true);
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!weekAnchorReady || !restoredWeekAnchorRef.current) return;
+    void saveJSON(MILEAGE_VIEW_PREFS_KEY, { weekAnchorISO });
+  }, [weekAnchorISO, weekAnchorReady]);
+
+  const loadMileageWeekStartSetting = useCallback(async () => {
+    const weekStartResult = await loadWeekStartSetting();
+    const resolvedWeekStartsOn: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
+    console.log("[coach-mileage] week start loaded via shared helper", {
+      raw: weekStartResult.raw,
+      normalized: resolvedWeekStartsOn,
+    });
+    setWeekStartsOn(resolvedWeekStartsOn);
+    return resolvedWeekStartsOn;
+  }, []);
 
   const showActionBanner = useCallback((text: string) => {
     if (actionBannerTimerRef.current) clearTimeout(actionBannerTimerRef.current);
@@ -521,6 +571,7 @@ export default function CoachMileageTab() {
     return () => {
       if (actionBannerTimerRef.current) clearTimeout(actionBannerTimerRef.current);
       Object.values(mileageSaveTimersRef.current).forEach((timer) => clearTimeout(timer));
+      if (weekLabelSaveTimerRef.current) clearTimeout(weekLabelSaveTimerRef.current);
     };
   }, []);
 
@@ -551,8 +602,118 @@ export default function CoachMileageTab() {
     return `${startLabel} - ${endLabel}`;
   }, [weekDates, weekStartISO]);
 
-  const weekCells = s.mileageCellsByWeek[weekStartISO] ?? [];
-  const weekFlags = s.mileageFlagsByWeek[weekStartISO] ?? [];
+  const relativeWeekStatus = useMemo(() => {
+    const currentWeekStartISO = getWeekStartISO(toISODate(new Date()), weekStartsOn);
+    const weekOffset = Math.round((isoDayNumber(weekStartISO) - isoDayNumber(currentWeekStartISO)) / 7);
+    if (weekOffset === 0) return { label: "This week", status: "current" as const };
+    if (weekOffset === 1) return { label: "Next week", status: "future" as const };
+    if (weekOffset > 1) return { label: `In ${weekOffset} weeks`, status: "future" as const };
+    if (weekOffset === -1) return { label: "Last week", status: "past" as const };
+    return { label: `${Math.abs(weekOffset)} weeks ago`, status: "past" as const };
+  }, [weekStartISO, weekStartsOn]);
+
+  const currentWeekLabel = useMemo(
+    () => String(weekLabelsByStart[weekStartISO] ?? ""),
+    [weekLabelsByStart, weekStartISO]
+  );
+  const activeWeekLabelText = useMemo(
+    () => String(currentWeekLabel || weekLabelDraft || "").trim(),
+    [currentWeekLabel, weekLabelDraft]
+  );
+  const activeWeekLabelTone = useMemo(
+    () => getWeekLabelTone(activeWeekLabelText),
+    [activeWeekLabelText]
+  );
+  const activeWeekToneColors = useMemo(() => {
+    if (activeWeekLabelTone === "competition") {
+      return { border: "rgba(220,38,38,0.34)", bg: "rgba(220,38,38,0.1)", text: "#991b1b" };
+    }
+    if (activeWeekLabelTone === "break") {
+      return { border: "rgba(14,116,144,0.34)", bg: "rgba(14,116,144,0.1)", text: "#0e7490" };
+    }
+    if (activeWeekLabelTone === "camp") {
+      return { border: "rgba(22,163,74,0.34)", bg: "rgba(22,163,74,0.1)", text: "#166534" };
+    }
+    return { border: "rgba(15,23,42,0.2)", bg: "rgba(15,23,42,0.06)", text: colors.text };
+  }, [activeWeekLabelTone, colors.text]);
+
+  const copiedWeekRangeLabel = useMemo(() => {
+    if (!weekClipboard?.sourceWeekStartISO) return "";
+    const startISO = weekClipboard.sourceWeekStartISO;
+    const endISO = addDaysISO(startISO, 6);
+    const start = parseISODate(startISO);
+    const end = parseISODate(endISO);
+    const startLabel = start.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const endLabel = end.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+    return `${startLabel} - ${endLabel}`;
+  }, [weekClipboard]);
+
+  const viewingCopiedWeek = useMemo(() => {
+    if (!weekClipboard?.sourceWeekStartISO) return false;
+    return weekClipboard.sourceWeekStartISO === weekStartISO;
+  }, [weekClipboard, weekStartISO]);
+
+  useEffect(() => {
+    const editingSameWeek =
+      isWeekLabelEditing && weekLabelEditingWeekRef.current === weekStartISO;
+    if (editingSameWeek) return;
+    setWeekLabelDraft(currentWeekLabel);
+  }, [currentWeekLabel, isWeekLabelEditing, weekStartISO]);
+
+  const jumpToWeekFromDateISO = useCallback(
+    (dateISO: string) => {
+      const trimmed = String(dateISO ?? "").trim();
+      if (!isValidISODate(trimmed)) return false;
+      const targetWeekStartISO = getWeekStartISO(trimmed, weekStartsOn);
+      setWeekAnchorISO(targetWeekStartISO);
+      return true;
+    },
+    [weekStartsOn]
+  );
+
+  const weekCellsFromStore = s.mileageCellsByWeek[weekStartISO] ?? [];
+  const weekFlagsFromStore = s.mileageFlagsByWeek[weekStartISO] ?? [];
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(`${MILEAGE_WEEK_CACHE_PREFIX}:${weekStartISO}`);
+        if (!active || !raw) return;
+        const parsed = JSON.parse(raw) as { cells?: any[]; flags?: any[] };
+        setCachedWeekSnapshot({
+          weekStartISO,
+          cells: Array.isArray(parsed?.cells) ? parsed.cells : [],
+          flags: Array.isArray(parsed?.flags) ? parsed.flags : [],
+        });
+      } catch {
+        if (!active) return;
+        setCachedWeekSnapshot({ weekStartISO, cells: [], flags: [] });
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [weekStartISO]);
+
+  useEffect(() => {
+    if (weekCellsFromStore.length === 0 && weekFlagsFromStore.length === 0) return;
+    const payload = JSON.stringify({ cells: weekCellsFromStore, flags: weekFlagsFromStore, updatedAt: Date.now() });
+    void AsyncStorage.setItem(`${MILEAGE_WEEK_CACHE_PREFIX}:${weekStartISO}`, payload).catch(() => {});
+  }, [weekCellsFromStore, weekFlagsFromStore, weekStartISO]);
+
+  const weekCells =
+    weekCellsFromStore.length > 0
+      ? weekCellsFromStore
+      : cachedWeekSnapshot?.weekStartISO === weekStartISO
+        ? cachedWeekSnapshot.cells
+        : [];
+  const weekFlags =
+    weekFlagsFromStore.length > 0
+      ? weekFlagsFromStore
+      : cachedWeekSnapshot?.weekStartISO === weekStartISO
+        ? cachedWeekSnapshot.flags
+        : [];
 
   const cellsByKey = useMemo(() => {
     const next: Record<CellKey, MileageValue | null> = {};
@@ -689,6 +850,7 @@ export default function CoachMileageTab() {
       console.log("[mileage-pdf] using custom html builder");
       const html = buildMileageHandoutHtml({
         weekRangeLabel,
+        weekAnnotation: currentWeekLabel ? `Week label: ${currentWeekLabel}` : "",
         weekdayLabels,
         weekDates,
         athletes: exportAthletes,
@@ -753,6 +915,7 @@ export default function CoachMileageTab() {
   }, [
     athletesWithIds,
     cellsByKey,
+    currentWeekLabel,
     distanceUnit,
     exportingPdf,
     ncaaOffByKey,
@@ -766,39 +929,83 @@ export default function CoachMileageTab() {
 
   useEffect(() => {
     const run = async () => {
-      const rawWeekStart = await AsyncStorage.getItem(WEEK_START_KEY);
-      const parsedWeekStart = Number(rawWeekStart);
-      const resolvedWeekStartsOn: WeekStartDay =
-        parsedWeekStart === 0 || parsedWeekStart === 1 ? (parsedWeekStart as WeekStartDay) : 1;
-      setWeekStartsOn(resolvedWeekStartsOn);
+      await loadMileageWeekStartSetting();
 
       const [pace, unit, paceOverrides] = await Promise.all([
         loadPaceSecondsPerMile(),
-        loadCoachSettings(),
+        loadCoreCoachSettings(),
         loadAthletePaceOverrides(),
       ]);
       setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
       setDistanceUnit(unit.distanceUnit);
       setAthletePaceOverrides(paceOverrides ?? {});
+      const labels = await loadCoachWeekLabels().catch(() => ({}));
+      setWeekLabelsByStart(labels ?? {});
+      lastMileageMetaRefreshAtRef.current = Date.now();
     };
     void run();
-  }, []);
+  }, [loadMileageWeekStartSetting]);
 
   useFocusEffect(
     useCallback(() => {
-      void teamDataStore.actions.refreshRoster();
-      void teamDataStore.actions.loadMileageWeek(weekStartISO);
-    }, [weekStartISO])
+      void (async () => {
+        const resolvedWeekStartsOn = await loadMileageWeekStartSetting();
+        const focusedWeekStartISO = getWeekStartISO(weekAnchorISO, resolvedWeekStartsOn);
+        const shouldRefreshMeta = Date.now() - lastMileageMetaRefreshAtRef.current > 20_000;
+        const [
+          nextCoachSettings,
+          nextWeekLabels,
+        ] = await Promise.all([
+          shouldRefreshMeta
+            ? loadCoreCoachSettings().catch((error) => {
+                console.warn("[coach-mileage] loadCoreCoachSettings on focus failed", error);
+                return null;
+              })
+            : Promise.resolve(null),
+          shouldRefreshMeta
+            ? loadCoachWeekLabels().catch((error) => {
+                console.warn("[coach-mileage] loadCoachWeekLabels on focus failed", error);
+                return {};
+              })
+            : Promise.resolve(null),
+          teamDataStore.actions.refreshRoster().catch((error) => {
+            console.warn("[coach-mileage] refreshRoster on focus failed", error);
+          }),
+          teamDataStore.actions.loadMileageWeek(focusedWeekStartISO).catch((error) => {
+            console.warn("[coach-mileage] loadMileageWeek on focus failed", error);
+          }),
+        ]);
+        if (nextCoachSettings?.distanceUnit) {
+          setDistanceUnit(nextCoachSettings.distanceUnit);
+          console.log("[coach-mileage] settings reloaded", {
+            distanceUnit: nextCoachSettings.distanceUnit,
+          });
+        }
+        if (nextWeekLabels) {
+          setWeekLabelsByStart(nextWeekLabels ?? {});
+        }
+        if (shouldRefreshMeta) {
+          lastMileageMetaRefreshAtRef.current = Date.now();
+        }
+        const previousWeekStartISO = addDaysISO(focusedWeekStartISO, -7);
+        const nextWeekStartISO = addDaysISO(focusedWeekStartISO, 7);
+        void teamDataStore.actions.loadMileageWeek(previousWeekStartISO).catch(() => {});
+        void teamDataStore.actions.loadMileageWeek(nextWeekStartISO).catch(() => {});
+      })();
+    }, [loadMileageWeekStartSetting, weekAnchorISO])
   );
 
-  function hasAnyCellForWeek(athleteId: string, targetWeekStartISO: string) {
-    for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
-      for (const field of ["am", "pm"] as const) {
-        const v = cellsByKey[cellCloudKey(athleteId, targetWeekStartISO, dayIdx, field)];
-        if (v != null) return true;
-      }
+  function buildWeekCellsLookup(targetWeekStartISO: string, targetWeekCells: any[]): Record<CellKey, MileageValue | null> {
+    const lookup: Record<CellKey, MileageValue | null> = {};
+    for (const row of targetWeekCells ?? []) {
+      const athleteId = String(row?.athlete_profile_id ?? "");
+      const dayIdx = Number(row?.day_idx);
+      const session = String(row?.session ?? "").toUpperCase();
+      if (!athleteId || !Number.isInteger(dayIdx) || dayIdx < 0 || dayIdx > 6) continue;
+      const field: CellField = session === "PM" ? "pm" : "am";
+      lookup[cellCloudKey(athleteId, targetWeekStartISO, dayIdx, field)] = (row?.value ?? null) as MileageValue | null;
     }
-    return false;
+    return lookup;
   }
 
   function cellKey(athleteId: string, dayIdx: number, field: "am" | "pm") {
@@ -821,179 +1028,236 @@ export default function CoachMileageTab() {
     return true;
   }
 
-  function setNCAAOffDayCloud(athleteId: string, dayIdx: number, enabled: boolean) {
-    void teamDataStore.actions.setMileageOffFlag(athleteId, weekStartISO, dayIdx, enabled);
-  }
+  async function copyPreviousWeekAll() {
+    const message =
+      "Copy all AM/PM values from the previous week into the currently visible week?";
 
-  function copyRow(athleteId: string) {
-    blurActiveInput();
-    const row: CopiedRow = {};
-    for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
-      row[`${dayIdx}__am`] = cellsByKey[cellCloudKey(athleteId, weekStartISO, dayIdx, "am")] ?? null;
-      row[`${dayIdx}__pm`] = cellsByKey[cellCloudKey(athleteId, weekStartISO, dayIdx, "pm")] ?? null;
-    }
-    setCopiedRow(row);
-    setPasteTargets(new Set());
-    showActionBanner("Row copied");
-  }
+    const runCopy = async () => {
+      const previousWeekStartISO = addDaysISO(weekStartISO, -7);
+      await teamDataStore.actions.loadMileageWeek(previousWeekStartISO);
 
-  function pasteRowCloud(targetAthleteId: string) {
-    if (!copiedRow) return;
-    for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
-      const am = copiedRow[`${dayIdx}__am`] ?? null;
-      const pm = copiedRow[`${dayIdx}__pm`] ?? null;
-      void teamDataStore.actions.setMileageCell(targetAthleteId, weekStartISO, dayIdx, "AM", am);
-      void teamDataStore.actions.setMileageCell(targetAthleteId, weekStartISO, dayIdx, "PM", pm);
-    }
-  }
+      const refreshedState = teamDataStore.getState();
+      const previousWeekCells =
+        (s.mileageCellsByWeek[previousWeekStartISO] ?? refreshedState.mileageCellsByWeek[previousWeekStartISO] ?? []) as any[];
+      const previousCellsByKey = buildWeekCellsLookup(previousWeekStartISO, previousWeekCells);
 
-  function togglePasteTarget(athleteId: string) {
-    setPasteTargets((prev) => {
-      const next = new Set(prev);
-      if (next.has(athleteId)) next.delete(athleteId);
-      else next.add(athleteId);
-      return next;
-    });
-  }
-
-  function clearPasteTargets() {
-    setPasteTargets(new Set());
-  }
-
-  function selectPasteRange(startIndex: number, count: number) {
-    setPasteTargets((prev) => {
-      const next = new Set(prev);
-      for (let i = startIndex; i < Math.min(athletesWithIds.length, startIndex + count); i++) {
-        const id = athletesWithIds[i]?.id;
-        if (id) next.add(id);
-      }
-      return next;
-    });
-  }
-
-  function confirmPaste(message: string, onConfirm: () => void) {
-    if (Platform.OS === "web") {
-      const ok = typeof window !== "undefined" ? window.confirm(message) : false;
-      if (ok) onConfirm();
-      return;
-    }
-
-    Alert.alert("Paste week plan?", message, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Paste", style: "destructive", onPress: onConfirm },
-    ]);
-  }
-
-  function blurActiveInput() {
-    if (Platform.OS === "web") {
-      (document.activeElement as any)?.blur?.();
-    } else {
-      // RN native: blur focused input if any
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const TextInputNative = require("react-native").TextInput;
-        TextInputNative?.State?.currentlyFocusedInput?.()?.blur?.();
-      } catch {}
-    }
-  }
-
-  function pasteRow(targetAthleteId: string) {
-    blurActiveInput();
-    if (!copiedRow) return;
-    confirmPaste(
-      "This will overwrite the target athlete’s AM/PM values for this week.",
-      () => {
-        pasteRowCloud(targetAthleteId);
-        showActionBanner("Row pasted");
-      }
-    );
-  }
-
-  function pasteToSelected() {
-    blurActiveInput();
-    if (!copiedRow) return;
-    const targets = Array.from(pasteTargets).filter(Boolean);
-    if (targets.length === 0) return;
-    confirmPaste(
-      "This will overwrite the selected athletes’ AM/PM values for this week.",
-      () => {
-        for (const targetAthleteId of targets) {
-          pasteRowCloud(targetAthleteId);
-        }
-        showActionBanner(`Pasted to ${targets.length}`);
-        clearPasteTargets();
-      }
-    );
-  }
-
-  function clearSelectedRows() {
-    blurActiveInput();
-    const targets = Array.from(pasteTargets).filter(Boolean);
-    if (targets.length === 0) return;
-
-    const message = "This will clear ALL AM/PM values (and NCAA Off flags) for this week for the selected rows.";
-    const runClear = async () => {
-      try {
-        for (const athleteId of targets) {
-          for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
-            await teamDataStore.actions.setMileageCell(athleteId, weekStartISO, dayIdx, "AM", null);
-            await teamDataStore.actions.setMileageCell(athleteId, weekStartISO, dayIdx, "PM", null);
-            await teamDataStore.actions.setMileageOffFlag(athleteId, weekStartISO, dayIdx, false);
+      let copiedValueCount = 0;
+      const writePromises: Array<Promise<void>> = [];
+      for (const athlete of athletesWithIds) {
+        const athleteId = athlete.id;
+        if (!athleteId) continue;
+        for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
+          const am = previousCellsByKey[cellCloudKey(athleteId, previousWeekStartISO, dayIdx, "am")] ?? null;
+          const pm = previousCellsByKey[cellCloudKey(athleteId, previousWeekStartISO, dayIdx, "pm")] ?? null;
+          if (am != null) {
+            writePromises.push(teamDataStore.actions.setMileageCell(athleteId, weekStartISO, dayIdx, "AM", am));
+            copiedValueCount += 1;
+          }
+          if (pm != null) {
+            writePromises.push(teamDataStore.actions.setMileageCell(athleteId, weekStartISO, dayIdx, "PM", pm));
+            copiedValueCount += 1;
           }
         }
+      }
+      if (writePromises.length > 0) {
+        await Promise.all(writePromises);
+      }
 
-        showActionBanner(`Cleared ${targets.length} row${targets.length === 1 ? "" : "s"}`);
-        clearPasteTargets();
-      } catch (e) {
-        console.warn("Clear row failed", e);
-        Alert.alert("Clear row failed", "Could not clear one or more rows. Check logs.");
+      if (copiedValueCount > 0) {
+        showActionBanner("Previous week copied");
+      } else {
+        Alert.alert("Copy Previous Week", "No mileage found in previous week");
       }
     };
 
     if (Platform.OS === "web") {
       const ok = typeof window !== "undefined" ? window.confirm(message) : false;
-      if (ok) void runClear();
+      if (ok) await runCopy();
       return;
     }
 
-    Alert.alert(
-      `Clear row for ${targets.length} athlete${targets.length === 1 ? "" : "s"}?`,
-      message,
-      [
-        { text: "Cancel", style: "cancel" },
-        { text: "Clear Row", style: "destructive", onPress: () => void runClear() },
-      ]
-    );
+    Alert.alert("Copy Previous Week?", message, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Copy", style: "destructive", onPress: () => void runCopy() },
+    ]);
   }
 
-  function copyPreviousWeekAll() {
-    const previousWeekStartISO = addDaysISO(weekStartISO, -7);
+  async function clearEntireWeekAll() {
+    const message =
+      "This will clear all AM/PM values and NCAA Off flags for the currently visible week.";
 
+    const runClear = async () => {
+      const clearPromises: Array<Promise<void>> = [];
+      for (const athlete of athletesWithIds) {
+        if (!athlete.id) continue;
+        for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
+          clearPromises.push(teamDataStore.actions.setMileageCell(athlete.id, weekStartISO, dayIdx, "AM", null));
+          clearPromises.push(teamDataStore.actions.setMileageCell(athlete.id, weekStartISO, dayIdx, "PM", null));
+          clearPromises.push(teamDataStore.actions.setMileageOffFlag(athlete.id, weekStartISO, dayIdx, false));
+        }
+      }
+      if (clearPromises.length > 0) {
+        await Promise.all(clearPromises);
+      }
+      setInvalidCells({});
+      showActionBanner("Entire week cleared");
+    };
+
+    if (Platform.OS === "web") {
+      const ok = typeof window !== "undefined" ? window.confirm(message) : false;
+      if (ok) await runClear();
+      return;
+    }
+
+    Alert.alert("Clear Entire Week?", message, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Clear", style: "destructive", onPress: () => void runClear() },
+    ]);
+  }
+
+  function jumpToCurrentWeek() {
+    setWeekAnchorISO(toISODate(new Date()));
+    setJumpToWeekOpen(false);
+    showActionBanner("Showing current week");
+  }
+
+  function applyJumpToWeekInput() {
+    const ok = jumpToWeekFromDateISO(jumpDateInput);
+    if (!ok) {
+      Alert.alert("Jump to Week", "Enter a valid date as YYYY-MM-DD.");
+      return;
+    }
+    setJumpToWeekOpen(false);
+    showActionBanner("Week updated");
+  }
+
+  const persistWeekLabelDraft = useCallback(
+    async (targetWeekStartISO: string, nextDraftRaw: string) => {
+      const seq = ++weekLabelSaveSeqRef.current;
+      setWeekLabelSaveState("saving");
+      try {
+        const next = await saveCoachWeekLabel(targetWeekStartISO, nextDraftRaw);
+        if (seq !== weekLabelSaveSeqRef.current) return;
+        setWeekLabelsByStart(next ?? {});
+        setWeekLabelSaveState("saved");
+      } catch (error: any) {
+        if (seq !== weekLabelSaveSeqRef.current) return;
+        setWeekLabelSaveState("error");
+        Alert.alert("Week label", String(error?.message ?? "Could not save week label."));
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!isWeekLabelEditing) return;
+    if (weekLabelEditingWeekRef.current !== weekStartISO) return;
+    if (weekLabelDraft === currentWeekLabel) return;
+
+    if (weekLabelSaveTimerRef.current) clearTimeout(weekLabelSaveTimerRef.current);
+    setWeekLabelSaveState("idle");
+    weekLabelSaveTimerRef.current = setTimeout(() => {
+      weekLabelSaveTimerRef.current = null;
+      void persistWeekLabelDraft(weekStartISO, weekLabelDraft);
+    }, 650);
+
+    return () => {
+      if (weekLabelSaveTimerRef.current) {
+        clearTimeout(weekLabelSaveTimerRef.current);
+        weekLabelSaveTimerRef.current = null;
+      }
+    };
+  }, [currentWeekLabel, isWeekLabelEditing, persistWeekLabelDraft, weekLabelDraft, weekStartISO]);
+
+  const handleWeekLabelFocus = useCallback(() => {
+    weekLabelEditingWeekRef.current = weekStartISO;
+    setIsWeekLabelEditing(true);
+    setWeekLabelSaveState("idle");
+  }, [weekStartISO]);
+
+  const handleWeekLabelBlur = useCallback(() => {
+    if (weekLabelSaveTimerRef.current) {
+      clearTimeout(weekLabelSaveTimerRef.current);
+      weekLabelSaveTimerRef.current = null;
+    }
+    const editingWeek = weekLabelEditingWeekRef.current;
+    const draftAtBlur = weekLabelDraft;
+    const savedAtBlur = currentWeekLabel;
+    setIsWeekLabelEditing(false);
+    weekLabelEditingWeekRef.current = null;
+    if (editingWeek && draftAtBlur !== savedAtBlur) {
+      void persistWeekLabelDraft(editingWeek, draftAtBlur);
+    }
+  }, [currentWeekLabel, persistWeekLabelDraft, weekLabelDraft]);
+
+  function copyEntireVisibleWeek() {
+    const cells: WeekClipboard["cells"] = [];
+    const flags: WeekClipboard["flags"] = [];
     for (const athlete of athletesWithIds) {
-      const athleteId = athlete.id;
+      const athleteId = String(athlete.id ?? "");
       if (!athleteId) continue;
-      if (!hasAnyCellForWeek(athleteId, previousWeekStartISO)) continue;
       for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
-        const am = cellsByKey[cellCloudKey(athleteId, previousWeekStartISO, dayIdx, "am")] ?? null;
-        const pm = cellsByKey[cellCloudKey(athleteId, previousWeekStartISO, dayIdx, "pm")] ?? null;
-        void teamDataStore.actions.setMileageCell(athleteId, weekStartISO, dayIdx, "AM", am);
-        void teamDataStore.actions.setMileageCell(athleteId, weekStartISO, dayIdx, "PM", pm);
+        cells.push({
+          athleteId,
+          dayIdx,
+          session: "AM",
+          value: (cellsByKey[cellCloudKey(athleteId, weekStartISO, dayIdx, "am")] ?? null) as MileageValue | null,
+        });
+        cells.push({
+          athleteId,
+          dayIdx,
+          session: "PM",
+          value: (cellsByKey[cellCloudKey(athleteId, weekStartISO, dayIdx, "pm")] ?? null) as MileageValue | null,
+        });
+        flags.push({
+          athleteId,
+          dayIdx,
+          ncaaOff: !!ncaaOffByKey[offKey(athleteId, weekStartISO, dayIdx)],
+        });
       }
     }
-    showActionBanner("Previous week copied");
+    setWeekClipboard({
+      sourceWeekStartISO: weekStartISO,
+      copiedAtMs: Date.now(),
+      cells,
+      flags,
+    });
+    showActionBanner("Week copied");
   }
 
-  function clearEntireWeekAll() {
-    for (const athlete of athletesWithIds) {
-      if (!athlete.id) continue;
-      for (let dayIdx = 0; dayIdx < 7; dayIdx++) {
-        void teamDataStore.actions.setMileageCell(athlete.id, weekStartISO, dayIdx, "AM", null);
-        void teamDataStore.actions.setMileageCell(athlete.id, weekStartISO, dayIdx, "PM", null);
-        void teamDataStore.actions.setMileageOffFlag(athlete.id, weekStartISO, dayIdx, false);
+  async function pasteWeekClipboardIntoVisibleWeek() {
+    if (!weekClipboard) return;
+    const message = `Overwrite ${weekRangeLabel} with copied week from ${weekClipboard.sourceWeekStartISO}?`;
+    const runPaste = async () => {
+      const activeIds = new Set(editableAthleteIds);
+      const writes: Array<Promise<void>> = [];
+      for (const row of weekClipboard.cells) {
+        if (!activeIds.has(row.athleteId)) continue;
+        writes.push(
+          teamDataStore.actions.setMileageCell(row.athleteId, weekStartISO, row.dayIdx, row.session, row.value)
+        );
       }
+      for (const row of weekClipboard.flags) {
+        if (!activeIds.has(row.athleteId)) continue;
+        writes.push(teamDataStore.actions.setMileageOffFlag(row.athleteId, weekStartISO, row.dayIdx, !!row.ncaaOff));
+      }
+      if (writes.length > 0) {
+        await Promise.all(writes);
+      }
+      setInvalidCells({});
+      showActionBanner("Week pasted");
+    };
+
+    if (Platform.OS === "web") {
+      const ok = typeof window !== "undefined" ? window.confirm(message) : false;
+      if (ok) await runPaste();
+      return;
     }
-    setInvalidCells({});
-    showActionBanner("Entire week cleared");
+
+    Alert.alert("Paste Week?", message, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Paste", style: "destructive", onPress: () => void runPaste() },
+    ]);
   }
 
   // --- Spreadsheet engine (shared with daily worksheet) ---
@@ -1024,6 +1288,120 @@ export default function CoachMileageTab() {
     [mileageColKey]
   );
 
+  const queueMileageDraftSave = useCallback(
+    (cloudKey: string, delayMs = 420) => {
+      const meta = draftKeyMetaRef.current[cloudKey];
+      if (!meta) return;
+      const existing = mileageSaveTimersRef.current[cloudKey];
+      if (existing) clearTimeout(existing);
+      delete mileageSaveTimersRef.current[cloudKey];
+
+      pendingDraftSaveKeysRef.current.add(cloudKey);
+      mileageSaveTimersRef.current[cloudKey] = setTimeout(async () => {
+        if (editingCloudKeyRef.current === cloudKey) {
+          // Keep the raw draft isolated while the user is actively editing.
+          queueMileageDraftSave(cloudKey, 220);
+          return;
+        }
+
+        const latestText = String(mileageDraftsRef.current[cloudKey] ?? "");
+        const latestTrimmed = latestText.trim();
+        const latestParsed = latestTrimmed ? parseMileageInput(latestTrimmed) : null;
+        const latestInvalid = !!latestTrimmed && !latestParsed;
+
+        if (latestInvalid) {
+          setInvalidCells((prev) => ({ ...prev, [meta.uiKey]: true }));
+          pendingDraftSaveKeysRef.current.delete(cloudKey);
+          delete mileageSaveTimersRef.current[cloudKey];
+          return;
+        }
+
+        try {
+          const ok = await setCellCloud(meta.athleteId, meta.dayIdx, meta.field, latestText);
+          setInvalidCells((prev) => {
+            const next = { ...prev };
+            if (ok) delete next[meta.uiKey];
+            else next[meta.uiKey] = true;
+            return next;
+          });
+          if (ok && editingCloudKeyRef.current !== cloudKey) {
+            const normalized =
+              latestTrimmed && latestParsed
+                ? String(formatMileageForSheet(latestParsed as any) ?? "")
+                : "";
+            setMileageDraftsByKey((prev) => ({
+              ...prev,
+              [cloudKey]: normalized,
+            }));
+          }
+        } catch {
+          // Keep local draft; cloud retry will happen on subsequent edits.
+        } finally {
+          pendingDraftSaveKeysRef.current.delete(cloudKey);
+          delete mileageSaveTimersRef.current[cloudKey];
+        }
+      }, delayMs);
+    },
+    [setCellCloud]
+  );
+
+  const applyMileageValueBatch = useCallback(
+    (changes: Array<{ athleteId: string; colKey: string; value: string }>) => {
+      if (changes.length === 0) return;
+      const draftPatch: Record<string, string> = {};
+      const invalidToSet = new Set<string>();
+      const invalidToClear = new Set<string>();
+
+      for (const change of changes) {
+        const { athleteId, colKey } = change;
+        const { dayIdx, field } = mileageColMeta(colKey);
+        const cloudKey = cellCloudKey(athleteId, weekStartISO, dayIdx, field);
+        const uiKey = cellKey(athleteId, dayIdx, field);
+        const nextText = String(change.value ?? "");
+        const trimmed = nextText.trim();
+        const parsed = trimmed ? parseMileageInput(trimmed) : null;
+        const isInvalid = !!trimmed && !parsed;
+        const isEditingThisCell = editingCloudKeyRef.current === cloudKey;
+
+        draftKeyMetaRef.current[cloudKey] = { athleteId, dayIdx, field, uiKey };
+        draftPatch[cloudKey] = nextText;
+
+        if (isInvalid) invalidToSet.add(uiKey);
+        else invalidToClear.add(uiKey);
+
+        const existing = mileageSaveTimersRef.current[cloudKey];
+        if (existing) clearTimeout(existing);
+        delete mileageSaveTimersRef.current[cloudKey];
+
+        if (isInvalid) {
+          if (isEditingThisCell) pendingDraftSaveKeysRef.current.add(cloudKey);
+          else pendingDraftSaveKeysRef.current.delete(cloudKey);
+          continue;
+        }
+
+        if (isEditingThisCell) {
+          pendingDraftSaveKeysRef.current.add(cloudKey);
+          continue;
+        }
+
+        queueMileageDraftSave(cloudKey, 420);
+      }
+
+      setMileageDraftsByKey((prev) => ({ ...prev, ...draftPatch }));
+      setInvalidCells((prev) => {
+        const next = { ...prev };
+        invalidToSet.forEach((key) => {
+          next[key] = true;
+        });
+        invalidToClear.forEach((key) => {
+          if (!invalidToSet.has(key)) delete next[key];
+        });
+        return next;
+      });
+    },
+    [mileageColMeta, queueMileageDraftSave, weekStartISO]
+  );
+
   const mileageGrid = useGridEngine<string, string>({
     enabled: isWeb && isDesktop,
     rowIds: editableAthleteIds,
@@ -1034,63 +1412,34 @@ export default function CoachMileageTab() {
       const key = cellCloudKey(athleteId, weekStartISO, dayIdx, field);
       return String(mileageDraftsByKey[key] ?? "");
     },
+    setValuesBatch: (changes) => {
+      applyMileageValueBatch(
+        changes.map((change) => ({
+          athleteId: change.rowId,
+          colKey: change.colKey,
+          value: change.value,
+        }))
+      );
+    },
     setValue: (athleteId, colKey, value) => {
-      const { dayIdx, field } = mileageColMeta(colKey);
-      const cloudKey = cellCloudKey(athleteId, weekStartISO, dayIdx, field);
-      const uiKey = cellKey(athleteId, dayIdx, field);
-      const nextText = String(value ?? "");
-      const trimmed = nextText.trim();
-      const parsed = trimmed ? parseMileageInput(trimmed) : null;
-      const isInvalid = !!trimmed && !parsed;
-
-      setMileageDraftsByKey((prev) => ({ ...prev, [cloudKey]: nextText }));
-      setInvalidCells((prev) => {
-        const next = { ...prev };
-        if (isInvalid) next[uiKey] = true;
-        else delete next[uiKey];
-        return next;
-      });
-
-      const existing = mileageSaveTimersRef.current[cloudKey];
-      if (existing) clearTimeout(existing);
-      delete mileageSaveTimersRef.current[cloudKey];
-
-      if (isInvalid) {
-        pendingDraftSaveKeysRef.current.delete(cloudKey);
-        return;
-      }
-
-      pendingDraftSaveKeysRef.current.add(cloudKey);
-      mileageSaveTimersRef.current[cloudKey] = setTimeout(async () => {
-        const latestText = String(mileageDraftsRef.current[cloudKey] ?? "");
-        const latestTrimmed = latestText.trim();
-        const latestParsed = latestTrimmed ? parseMileageInput(latestTrimmed) : null;
-        const latestInvalid = !!latestTrimmed && !latestParsed;
-
-        if (latestInvalid) {
-          setInvalidCells((prev) => ({ ...prev, [uiKey]: true }));
-          pendingDraftSaveKeysRef.current.delete(cloudKey);
-          delete mileageSaveTimersRef.current[cloudKey];
-          return;
-        }
-
-        try {
-          const ok = await setCellCloud(athleteId, dayIdx, field, latestText);
-          setInvalidCells((prev) => {
-            const next = { ...prev };
-            if (ok) delete next[uiKey];
-            else next[uiKey] = true;
-            return next;
-          });
-        } catch {
-          // Keep local draft; cloud retry will happen on subsequent edits.
-        } finally {
-          pendingDraftSaveKeysRef.current.delete(cloudKey);
-          delete mileageSaveTimersRef.current[cloudKey];
-        }
-      }, 420);
+      applyMileageValueBatch([{ athleteId, colKey, value: String(value ?? "") }]);
     },
   });
+
+  const editingCloudKey = useMemo(() => {
+    const editing = mileageGrid.editingCell;
+    if (!editing) return null;
+    const { dayIdx, field } = mileageColMeta(editing.colKey);
+    return cellCloudKey(editing.rowId, weekStartISO, dayIdx, field);
+  }, [mileageColMeta, mileageGrid.editingCell, weekStartISO]);
+
+  useEffect(() => {
+    const prev = editingCloudKeyRef.current;
+    editingCloudKeyRef.current = editingCloudKey;
+    if (prev && prev !== editingCloudKey && pendingDraftSaveKeysRef.current.has(prev)) {
+      queueMileageDraftSave(prev, 80);
+    }
+  }, [editingCloudKey, queueMileageDraftSave]);
 
   useEffect(() => {
     const nextDrafts: Record<string, string> = {};
@@ -1107,9 +1456,10 @@ export default function CoachMileageTab() {
     setMileageDraftsByKey((prev) => {
       const merged = { ...nextDrafts };
       Object.keys(nextDrafts).forEach((key) => {
+        const isCurrentlyEditing = editingCloudKeyRef.current === key;
         const hasPendingSave =
           pendingDraftSaveKeysRef.current.has(key) || !!mileageSaveTimersRef.current[key];
-        if (hasPendingSave && key in prev) {
+        if ((hasPendingSave || isCurrentlyEditing) && key in prev) {
           merged[key] = prev[key];
         }
       });
@@ -1191,23 +1541,24 @@ export default function CoachMileageTab() {
   const fillSelectedMileage = useCallback(() => {
     const rect = mileageGrid.getSelectionRect();
     if (!rect) return;
+    if (rect.r2 <= rect.r1) return;
     const sourceId = editableAthleteIds[rect.r1];
     if (!sourceId) return;
-    const selectedCols = new Set(mileageGrid.getSelectedColKeys());
-    const selectedRowIds = mileageGrid.selectedRowIds;
     const changes: Array<{ rowId: string; colKey: string; prev: string; next: string }> = [];
-    selectedRowIds.forEach((rowId) => {
-      if (rowId === sourceId) return;
-      mileageColKeys.forEach((colKey) => {
-        if (!selectedCols.has(colKey)) return;
+    for (let r = rect.r1 + 1; r <= rect.r2; r += 1) {
+      const rowId = editableAthleteIds[r];
+      if (!rowId) continue;
+      for (let c = rect.c1; c <= rect.c2; c += 1) {
+        const colKey = mileageColKeys[c];
+        if (!colKey) continue;
         changes.push({
           rowId,
           colKey,
           prev: getMileageDraftValue(rowId, colKey),
           next: getMileageDraftValue(sourceId, colKey),
         });
-      });
-    });
+      }
+    }
     mileageGrid.applyChanges(changes as any);
   }, [editableAthleteIds, getMileageDraftValue, mileageColKeys, mileageGrid]);
 
@@ -1243,8 +1594,9 @@ export default function CoachMileageTab() {
 
   const showStickyAthleteCol = isWeb && isDesktop;
   const showStickySelectCol = isWeb && isDesktop;
-  const stickyHeaderRow1Bg = "#f3f6fb";
-  const stickyHeaderRow2Bg = "#f7f9fc";
+  const stickyHeaderRow1Bg = scheme === "dark" ? "#1f2937" : "#e9eff8";
+  const stickyHeaderRow2Bg = scheme === "dark" ? "#243244" : "#f2f6fc";
+  const headerStrongTextColor = scheme === "dark" ? "#e5e7eb" : "#0f172a";
   const stickyAthleteStyle = showStickyAthleteCol
     ? ({ position: "sticky", left: 0, zIndex: 130 } as any)
     : null;
@@ -1261,6 +1613,15 @@ export default function CoachMileageTab() {
 
   const radiusCell = 6;
   const borderThin = 1;
+  const rowSelectedBg = "#eef4ff";
+  const rowSelectedPinnedBg = "#e6efff";
+  const rangeSelectionOutline = "1px solid rgba(37,99,235,0.35)";
+  const rangeSelectionFill = "rgba(37,99,235,0.08)";
+  const activeCellOutline = "2px solid #1d4ed8";
+  const activeCellFill = "rgba(29,78,216,0.12)";
+  const editingCellOutline = "2px solid #0f766e";
+  const editingCellFill = "rgba(15,118,110,0.13)";
+  const invalidCellFill = "rgba(220,38,38,0.08)";
   const dayColumnsWidth = dayGroupWidth * 7;
   const pinnedHeaderWidth = athleteColWidth + selectColWidth;
   const webHeaderDaysScrollRef = useRef<any>(null);
@@ -1293,7 +1654,7 @@ export default function CoachMileageTab() {
           }}
         >
           <Text style={{ fontWeight: "900", color: colors.text, fontSize: fontHeader }}>Athlete</Text>
-          <Text style={{ fontSize: fontTiny, color: colors.mutedText, fontWeight: "700" }}>
+          <Text style={{ fontSize: fontTiny, color: colors.mutedText, fontWeight: "800", letterSpacing: 0.3 }}>
             AM / PM per day
           </Text>
         </View>
@@ -1370,12 +1731,21 @@ export default function CoachMileageTab() {
               width: dayGroupWidth,
               padding: cellPad,
               borderLeftWidth: borderThin,
-              borderLeftColor: colors.border,
+              borderLeftColor: "rgba(15,23,42,0.14)",
               backgroundColor: stickyHeaderRow1Bg,
             }}
           >
-            <Text style={{ fontWeight: "900", color: colors.text, fontSize: fontHeader }}>{lbl}</Text>
-            <Text style={{ fontSize: fontTiny, color: colors.mutedText, fontWeight: "700" }}>{weekDates[i]}</Text>
+            <Text style={{ fontWeight: "900", color: headerStrongTextColor, fontSize: fontHeader, letterSpacing: 0.2 }}>{lbl}</Text>
+            <Text
+              style={{
+                marginTop: 1,
+                fontSize: fontTiny,
+                color: colors.mutedText,
+                fontWeight: "800",
+              }}
+            >
+              {weekDates[i]}
+            </Text>
           </View>
         ))}
       </View>
@@ -1396,7 +1766,7 @@ export default function CoachMileageTab() {
                 width: dayGroupWidth,
                 padding: cellPad,
                 borderLeftWidth: borderThin,
-                borderLeftColor: colors.border,
+                borderLeftColor: "rgba(15,23,42,0.12)",
                 backgroundColor: stickyHeaderRow2Bg,
               }}
             >
@@ -1443,6 +1813,10 @@ export default function CoachMileageTab() {
       {athletesWithIds.map((a, rowIndex) => {
         const canEdit = !!a.id;
         const rowSelected = mileageGrid.isRowSelected(a.id);
+        const baseRowBg = rowIndex % 2 === 0 ? colors.card : colors.bg;
+        const rowBgColor = rowSelected ? rowSelectedBg : baseRowBg;
+        const pinnedBgColor = rowSelected ? rowSelectedPinnedBg : baseRowBg;
+        const rowAccentColor = rowSelected ? "#1d4ed8" : "transparent";
         return (
           <View
             key={a.id || `row_${rowIndex}`}
@@ -1450,8 +1824,10 @@ export default function CoachMileageTab() {
               flexDirection: "row",
               borderBottomWidth: borderThin,
               borderBottomColor: colors.border,
+              borderLeftWidth: rowAccentColor === "transparent" ? 0 : 3,
+              borderLeftColor: rowAccentColor,
               minWidth: gridMinWidth,
-              backgroundColor: rowSelected ? "#eef4ff" : rowIndex % 2 === 0 ? colors.card : colors.bg,
+              backgroundColor: rowBgColor,
             }}
           >
             <View
@@ -1463,7 +1839,7 @@ export default function CoachMileageTab() {
                 justifyContent: "center",
                 borderRightWidth: borderThin,
                 borderRightColor: colors.border,
-                backgroundColor: rowSelected ? "#e6efff" : rowIndex % 2 === 0 ? colors.card : colors.bg,
+                backgroundColor: pinnedBgColor,
                 ...(stickyAthleteStyle ?? {}),
                 overflow: "hidden",
                 zIndex: 50,
@@ -1492,18 +1868,6 @@ export default function CoachMileageTab() {
                   })()}
                 </View>
 
-                {canEdit ? (
-                  <View
-                    style={{
-                      alignItems: "flex-end",
-                      gap: 4,
-                      marginLeft: 6,
-                    }}
-                  >
-                    <MiniIconButton icon="copy" onPress={() => copyRow(a.id)} />
-                    <MiniIconButton icon="paste" onPress={() => pasteRow(a.id)} disabled={!copiedRow} />
-                  </View>
-                ) : null}
               </View>
 
               {!canEdit ? (
@@ -1523,7 +1887,7 @@ export default function CoachMileageTab() {
                   borderLeftColor: colors.border,
                   alignItems: "center",
                   justifyContent: "center",
-                  backgroundColor: rowSelected ? "#e6efff" : rowIndex % 2 === 0 ? colors.card : colors.bg,
+                  backgroundColor: pinnedBgColor,
                   ...(stickySelectStyle ?? {}),
                   overflow: "hidden",
                   zIndex: 45,
@@ -1546,22 +1910,21 @@ export default function CoachMileageTab() {
                     }}
                   >
                     <MiniCheck
-                      checked={pasteTargets.has(a.id)}
+                      checked={rowSelected}
                       hitSlopSize={0}
                       onPress={() => {
                         setActiveGridId(MILEAGE_GRID_ID);
-                        togglePasteTarget(a.id);
+                        mileageGrid.selectRow(a.id, false);
                       }}
                     />
                   </div>
                 ) : (
                   <MiniCheck
-                    checked={pasteTargets.has(a.id)}
+                    checked={rowSelected}
                     hitSlopSize={0}
                     onPress={() => {
                       mileageGrid.selectRow(a.id, false);
                       setActiveGridId(MILEAGE_GRID_ID);
-                      togglePasteTarget(a.id);
                     }}
                   />
                 )}
@@ -1573,13 +1936,16 @@ export default function CoachMileageTab() {
               const pmKey = cellCloudKey(a.id, weekStartISO, dayIdx, "pm");
               const amDraft = String(mileageDraftsByKey[amKey] ?? "");
               const pmDraft = String(mileageDraftsByKey[pmKey] ?? "");
-              const ncaaOff = !!ncaaOffByKey[offKey(a.id, weekStartISO, dayIdx)];
               const amCol = mileageColKey(dayIdx, "am");
               const pmCol = mileageColKey(dayIdx, "pm");
               const amSelected = mileageGrid.isCellSelected(a.id, amCol);
               const amActive = mileageGrid.isCellActive(a.id, amCol);
+              const amEditing = mileageGrid.isEditingCell(a.id, amCol);
+              const amInvalid = !!invalidCells[cellKey(a.id, dayIdx, "am")];
               const pmSelected = mileageGrid.isCellSelected(a.id, pmCol);
               const pmActive = mileageGrid.isCellActive(a.id, pmCol);
+              const pmEditing = mileageGrid.isEditingCell(a.id, pmCol);
+              const pmInvalid = !!invalidCells[cellKey(a.id, dayIdx, "pm")];
 
               return (
                 <View
@@ -1600,12 +1966,23 @@ export default function CoachMileageTab() {
                           style={{
                             width: subColWidth,
                             borderWidth: borderThin,
-                            borderColor: invalidCells[cellKey(a.id, dayIdx, "am")] ? colors.danger : colors.border,
+                            borderColor: amInvalid ? colors.danger : colors.border,
                             borderRadius: radiusCell,
-                            backgroundColor: canEdit ? colors.card : colors.bg,
+                            backgroundColor: !canEdit
+                              ? colors.bg
+                              : amEditing
+                                ? editingCellFill
+                                : amActive
+                                  ? activeCellFill
+                                  : amSelected
+                                    ? rangeSelectionFill
+                                    : amInvalid
+                                      ? invalidCellFill
+                                      : colors.card,
                             overflow: "hidden",
-                            ...(amSelected ? ({ outline: "1px solid rgba(15,23,42,0.55)", outlineOffset: -1 } as any) : null),
-                            ...(amActive ? ({ outline: "2px solid #111827", outlineOffset: -2 } as any) : null),
+                            ...(amSelected ? ({ outline: rangeSelectionOutline, outlineOffset: -1 } as any) : null),
+                            ...(amActive ? ({ outline: activeCellOutline, outlineOffset: -2 } as any) : null),
+                            ...(amEditing ? ({ outline: editingCellOutline, outlineOffset: -2, boxShadow: "inset 0 0 0 1px rgba(15,118,110,0.35), 0 0 0 1px rgba(15,118,110,0.2)" } as any) : null),
                           }}
                         >
                           <GridCell
@@ -1614,8 +1991,8 @@ export default function CoachMileageTab() {
                             editable={canEdit}
                             value={amDraft}
                             onChangeText={(v) => mileageGrid.applyCellValue(a.id, amCol, v)}
-                            placeholder="AM"
-                            gridEditing={mileageGrid.isEditingCell(a.id, amCol)}
+                            placeholder=""
+                            gridEditing={amEditing}
                             editIntent={
                               mileageGrid.editIntentRef.current?.rowId === a.id &&
                               mileageGrid.editIntentRef.current?.colKey === amCol
@@ -1642,12 +2019,23 @@ export default function CoachMileageTab() {
                           style={{
                             width: subColWidth,
                             borderWidth: borderThin,
-                            borderColor: invalidCells[cellKey(a.id, dayIdx, "pm")] ? colors.danger : colors.border,
+                            borderColor: pmInvalid ? colors.danger : colors.border,
                             borderRadius: radiusCell,
-                            backgroundColor: canEdit ? colors.card : colors.bg,
+                            backgroundColor: !canEdit
+                              ? colors.bg
+                              : pmEditing
+                                ? editingCellFill
+                                : pmActive
+                                  ? activeCellFill
+                                  : pmSelected
+                                    ? rangeSelectionFill
+                                    : pmInvalid
+                                      ? invalidCellFill
+                                      : colors.card,
                             overflow: "hidden",
-                            ...(pmSelected ? ({ outline: "1px solid rgba(15,23,42,0.55)", outlineOffset: -1 } as any) : null),
-                            ...(pmActive ? ({ outline: "2px solid #111827", outlineOffset: -2 } as any) : null),
+                            ...(pmSelected ? ({ outline: rangeSelectionOutline, outlineOffset: -1 } as any) : null),
+                            ...(pmActive ? ({ outline: activeCellOutline, outlineOffset: -2 } as any) : null),
+                            ...(pmEditing ? ({ outline: editingCellOutline, outlineOffset: -2, boxShadow: "inset 0 0 0 1px rgba(15,118,110,0.35), 0 0 0 1px rgba(15,118,110,0.2)" } as any) : null),
                           }}
                         >
                           <GridCell
@@ -1656,8 +2044,8 @@ export default function CoachMileageTab() {
                             editable={canEdit}
                             value={pmDraft}
                             onChangeText={(v) => mileageGrid.applyCellValue(a.id, pmCol, v)}
-                            placeholder="PM"
-                            gridEditing={mileageGrid.isEditingCell(a.id, pmCol)}
+                            placeholder=""
+                            gridEditing={pmEditing}
                             editIntent={
                               mileageGrid.editIntentRef.current?.rowId === a.id &&
                               mileageGrid.editIntentRef.current?.colKey === pmCol
@@ -1681,85 +2069,6 @@ export default function CoachMileageTab() {
                         </View>
                       </View>
 
-                      {Platform.OS === "web" ? (
-                        <button
-                          type="button"
-                          disabled={!canEdit}
-                          onClick={(e: any) => {
-                            e.stopPropagation();
-                            if (!canEdit) return;
-                            setNCAAOffDayCloud(a.id, dayIdx, !ncaaOff);
-                          }}
-                          onPointerDown={(e: any) => {
-                            e.stopPropagation();
-                          }}
-                          style={{
-                            marginTop: 6,
-                            display: "flex",
-                            flexDirection: "row",
-                            alignItems: "center",
-                            gap: 6,
-                            opacity: canEdit ? 1 : 0.55,
-                            cursor: canEdit ? "pointer" : "default",
-                            userSelect: "none",
-                            padding: 0,
-                            border: "none",
-                            background: "transparent",
-                          }}
-                        >
-                          <div
-                            style={{
-                              width: 14,
-                              height: 14,
-                              borderRadius: 3,
-                              border: `1px solid ${ncaaOff ? colors.tint : colors.border}`,
-                              backgroundColor: ncaaOff ? colors.tint : colors.card,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              flexShrink: 0,
-                            }}
-                          >
-                            {ncaaOff ? (
-                              <Text style={{ color: colors.card, fontSize: 10, fontWeight: "900", lineHeight: 11 }}>✓</Text>
-                            ) : null}
-                          </div>
-                          <Text style={{ fontSize: 10, fontWeight: "800", color: colors.mutedText }}>Off</Text>
-                        </button>
-                      ) : (
-                        <Pressable
-                          disabled={!canEdit}
-                          onPress={() => {
-                            if (!canEdit) return;
-                            setNCAAOffDayCloud(a.id, dayIdx, !ncaaOff);
-                          }}
-                          style={{
-                            marginTop: 6,
-                            flexDirection: "row",
-                            alignItems: "center",
-                            gap: 6,
-                            opacity: canEdit ? 1 : 0.55,
-                          }}
-                        >
-                          <View
-                            style={{
-                              width: 14,
-                              height: 14,
-                              borderRadius: 3,
-                              borderWidth: 1,
-                              borderColor: ncaaOff ? colors.tint : colors.border,
-                              backgroundColor: ncaaOff ? colors.tint : colors.card,
-                              alignItems: "center",
-                              justifyContent: "center",
-                            }}
-                          >
-                            {ncaaOff ? (
-                              <Text style={{ color: colors.card, fontSize: 10, fontWeight: "900", lineHeight: 11 }}>✓</Text>
-                            ) : null}
-                          </View>
-                          <Text style={{ fontSize: 10, fontWeight: "800", color: colors.mutedText }}>Off</Text>
-                        </Pressable>
-                      )}
                     </>
                   ) : null}
                 </View>
@@ -1800,68 +2109,253 @@ export default function CoachMileageTab() {
   return (
     <Screen padded={false} style={{ flex: 1 }}>
       <View style={{ padding: theme.space.sm, gap: theme.space.sm, flex: 1 }}>
-        <Card style={{ gap: 8, paddingVertical: 8 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-            <Button
-              title="Prev"
-              variant="secondary"
-              onPress={() => setWeekAnchorISO(addDaysISO(weekAnchorISO, -7))}
-            />
+        <Card
+          style={{
+            gap: 6,
+            paddingVertical: 6,
+            backgroundColor: colors.card,
+            borderColor: colors.border,
+          }}
+        >
+          <View
+            style={{
+              borderWidth: 1,
+              borderColor: "rgba(15,23,42,0.08)",
+              borderRadius: 12,
+              paddingHorizontal: 8,
+              paddingVertical: 6,
+              backgroundColor: "rgba(37,99,235,0.04)",
+              gap: 6,
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <Button
+                  title="Prev"
+                  variant="secondary"
+                  onPress={() => setWeekAnchorISO(addDaysISO(weekAnchorISO, -7))}
+                />
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 5,
+                    borderWidth: 1,
+                    borderColor: "rgba(15,23,42,0.12)",
+                    borderRadius: 999,
+                    paddingHorizontal: 7,
+                    paddingVertical: 3,
+                    backgroundColor: colors.card,
+                  }}
+                >
+                  <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText }}>Week label</Text>
+                  <TextInput
+                    value={weekLabelDraft}
+                    onChangeText={setWeekLabelDraft}
+                    placeholder="Week label"
+                    autoCorrect={false}
+                    onFocus={handleWeekLabelFocus}
+                    onBlur={handleWeekLabelBlur}
+                    style={{
+                      width: 118,
+                      height: 26,
+                      borderWidth: 1,
+                      borderColor: activeWeekToneColors.border,
+                      borderRadius: 999,
+                      paddingHorizontal: 9,
+                      color: colors.text,
+                      backgroundColor: colors.bg,
+                      fontSize: 11,
+                      fontWeight: "600",
+                    }}
+                  />
+                  <Text style={{ fontSize: 9, fontWeight: "700", color: colors.mutedText }}>
+                    {weekLabelSaveState === "saving"
+                      ? "Saving..."
+                      : weekLabelSaveState === "saved"
+                        ? "Saved"
+                        : weekLabelSaveState === "error"
+                          ? "Error"
+                          : ""}
+                  </Text>
+                </View>
+              </View>
 
-            <View style={{ alignItems: "center", flex: 1, gap: 2 }}>
-              <AppText variant="sub">{weekRangeLabel}</AppText>
-              <AppText variant="caption" color="mutedText">Week range</AppText>
+              <View style={{ alignItems: "center", flex: 1, gap: 0 }}>
+                <AppText variant="caption" color="mutedText" style={{ letterSpacing: 0.5 }}>
+                  MILEAGE WEEK
+                </AppText>
+                <AppText variant="sub" style={{ fontWeight: "800" }}>{weekRangeLabel}</AppText>
+                <View
+                  style={{
+                    marginTop: 2,
+                    paddingHorizontal: 8,
+                    paddingVertical: 2,
+                    borderRadius: 999,
+                    borderWidth: 1,
+                    borderColor:
+                      relativeWeekStatus.status === "current"
+                        ? "rgba(34,197,94,0.35)"
+                        : relativeWeekStatus.status === "past"
+                          ? "rgba(100,116,139,0.35)"
+                          : "rgba(245,158,11,0.4)",
+                    backgroundColor:
+                      relativeWeekStatus.status === "current"
+                        ? "rgba(34,197,94,0.12)"
+                        : relativeWeekStatus.status === "past"
+                          ? "rgba(100,116,139,0.1)"
+                          : "rgba(245,158,11,0.12)",
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 10,
+                      fontWeight: "800",
+                      color:
+                        relativeWeekStatus.status === "current"
+                          ? colors.success
+                          : relativeWeekStatus.status === "past"
+                            ? colors.mutedText
+                            : colors.warning,
+                    }}
+                    numberOfLines={1}
+                  >
+                    {relativeWeekStatus.label}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                <Button title="Current Week" variant="secondary" onPress={jumpToCurrentWeek} />
+                <Button
+                  title={jumpToWeekOpen ? "Cancel Jump" : "Jump to Week"}
+                  variant="secondary"
+                  onPress={() => {
+                    setJumpDateInput(weekStartISO);
+                    setJumpToWeekOpen((prev) => !prev);
+                  }}
+                />
+                <Button
+                  title="Next"
+                  variant="secondary"
+                  onPress={() => setWeekAnchorISO(addDaysISO(weekAnchorISO, 7))}
+                />
+              </View>
             </View>
-
-            <Button
-              title="Next"
-              variant="secondary"
-              onPress={() => setWeekAnchorISO(addDaysISO(weekAnchorISO, 7))}
-            />
+            {jumpToWeekOpen ? (
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderColor: "rgba(15,23,42,0.1)",
+                  borderRadius: 10,
+                  paddingHorizontal: 8,
+                  paddingVertical: 6,
+                  backgroundColor: colors.card,
+                  gap: 5,
+                }}
+              >
+                <Text style={{ fontSize: 11, fontWeight: "700", color: colors.mutedText }}>
+                  Enter any date (YYYY-MM-DD) to jump to that week
+                </Text>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <TextInput
+                    value={jumpDateInput}
+                    onChangeText={setJumpDateInput}
+                    placeholder="YYYY-MM-DD"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType={Platform.OS === "ios" ? "numbers-and-punctuation" : "default"}
+                    style={{
+                      minWidth: 150,
+                      height: 34,
+                      borderWidth: 1,
+                      borderColor: colors.border,
+                      borderRadius: 8,
+                      paddingHorizontal: 10,
+                      color: colors.text,
+                      backgroundColor: colors.bg,
+                    }}
+                  />
+                  <Button title="Go" variant="secondary" onPress={applyJumpToWeekInput} />
+                </View>
+              </View>
+            ) : null}
           </View>
 
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-            <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-              <Button title="Copy Previous Week" variant="secondary" onPress={copyPreviousWeekAll} />
-              <Button title="Clear Entire Week" variant="secondary" onPress={clearEntireWeekAll} />
-              <Button
-                title={exportingPdf ? "Exporting..." : "Export PDF"}
-                variant="secondary"
-                onPress={() => void handleExportMileagePdf()}
-                disabled={exportingPdf}
-              />
+          <View
+            style={{
+              borderWidth: 1,
+              borderColor: "rgba(15,23,42,0.08)",
+              borderRadius: 12,
+              paddingHorizontal: 8,
+              paddingVertical: 6,
+              backgroundColor: "rgba(15,23,42,0.02)",
+              gap: 5,
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+              <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <AppText variant="caption" color="mutedText" style={{ fontWeight: "800", marginRight: 2 }}>
+                  WEEK ACTIONS
+                </AppText>
+                <Button title="Copy Week" variant="secondary" onPress={copyEntireVisibleWeek} />
+                <Button
+                  title="Paste Week"
+                  variant="secondary"
+                  onPress={() => void pasteWeekClipboardIntoVisibleWeek()}
+                  disabled={!weekClipboard}
+                />
+                <Button title="Copy Previous Week" variant="secondary" onPress={copyPreviousWeekAll} />
+                <Button title="Clear Entire Week" variant="secondary" onPress={clearEntireWeekAll} />
+                <Button
+                  title={exportingPdf ? "Exporting..." : "Export PDF"}
+                  variant="secondary"
+                  onPress={() => void handleExportMileagePdf()}
+                  disabled={exportingPdf}
+                />
+                {weekClipboard ? (
+                  <View
+                    style={{
+                      borderWidth: 1,
+                      borderColor: "rgba(37,99,235,0.28)",
+                      backgroundColor: "rgba(37,99,235,0.08)",
+                      borderRadius: 999,
+                      paddingHorizontal: 8,
+                      paddingVertical: 3,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 5,
+                    }}
+                  >
+                    <Text style={{ fontSize: 10, fontWeight: "800", color: colors.text }}>
+                      Copied: {copiedWeekRangeLabel}
+                    </Text>
+                    <Text style={{ fontSize: 9, fontWeight: "700", color: colors.mutedText }}>
+                      {viewingCopiedWeek ? "Viewing" : "Ready"}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+
+              <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText }}>
+                Grid: {mileageSelectedRowsCount} row{mileageSelectedRowsCount === 1 ? "" : "s"} selected
+              </Text>
             </View>
 
             <View
               style={{
                 flexDirection: "row",
-                gap: 4,
+                gap: 3,
                 flexWrap: "wrap",
                 alignItems: "center",
                 ...(isDesktop
-                  ? ({ marginLeft: "auto", justifyContent: "flex-end" } as any)
-                  : ({ width: "100%", justifyContent: "flex-start" } as any)),
+                  ? ({ justifyContent: "flex-end" } as any)
+                  : ({ justifyContent: "flex-start" } as any)),
               }}
             >
-              <MiniPill
-                compact
-                label={`Paste to selected (${pasteTargets.size})`}
-                onPress={pasteToSelected}
-                disabled={!copiedRow || pasteTargets.size === 0}
-              />
-              <MiniPill
-                compact
-                label="Unselect All"
-                onPress={clearPasteTargets}
-                disabled={pasteTargets.size === 0}
-              />
-              <MiniPill
-                compact
-                label="Clear Row"
-                onPress={clearSelectedRows}
-                disabled={pasteTargets.size === 0}
-                danger
-              />
+              <AppText variant="caption" color="mutedText" style={{ fontWeight: "800", marginRight: 2 }}>
+                GRID TOOLS
+              </AppText>
               <MiniPill
                 compact
                 label="Copy"
@@ -1906,9 +2400,6 @@ export default function CoachMileageTab() {
                 }}
                 disabled={editableAthleteIds.length < 2}
               />
-              <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText }}>
-                Grid: {mileageSelectedRowsCount} row{mileageSelectedRowsCount === 1 ? "" : "s"} selected
-              </Text>
             </View>
           </View>
         </Card>

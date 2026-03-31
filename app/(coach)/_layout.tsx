@@ -8,8 +8,6 @@ export default function CoachLayout() {
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="workouts" options={{ headerShown: false }} />
         <Stack.Screen name="workout/[id]" options={{ headerShown: false }} />
-        <Stack.Screen name="workout-batch/[batchId]" options={{ headerShown: false }} />
-        <Stack.Screen name="workout-batch/[batchId]/groups" options={{ headerShown: false }} />
       </Stack>
     </CoachShell>
   );

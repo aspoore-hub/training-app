@@ -1,12 +1,11 @@
 export const TEAM_KEYS = [
   // Shared team data
-  "training_app_roster_v2",
   "training_app_categories_v1",
-  "training_app_mileage_plans_v1",
   "training_app_workout_templates_v1",
 
   // Shared settings (coach-defined)
   "training_app_week_start_v1",
+  "training_app_week_labels_v1",
   "training_app_default_practice_times_v1",
   "training_app_custom_groups_v1",
   "training_app_category_routine_defaults_v1",

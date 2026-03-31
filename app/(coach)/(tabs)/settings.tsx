@@ -1,12 +1,11 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions } from "react-native";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { supabase } from "../../../lib/supabase";
 import { CategoriesContent } from "./categories";
 import { formatPace, loadPaceSecondsPerMile, parsePace, savePaceSecondsPerMile } from "../../../lib/pace";
-import { loadJSON, saveJSON } from "../../../lib/storage";
-import { MILEAGE_PLANS_KEY, WEEK_START_KEY } from "../../../lib/mileagePlan";
-import type { WeekStartDay, WorkoutCategory } from "../../../lib/types";
+import { loadJSON } from "../../../lib/storage";
+import type { WorkoutCategory } from "../../../lib/types";
 import {
   convertDistance,
   convertPaceSecondsPerUnit,
@@ -32,6 +31,9 @@ import {
   savePracticeTimeDefaults,
   type PracticeTimeDefaults,
 } from "../../../lib/practiceDefaults";
+// Practice defaults editor path in this screen stays dedicated:
+// use loadPracticeTimeDefaults/savePracticeTimeDefaults and do not bind
+// this editor directly to coachSettings.defaultSessionTimes.
 import { normalizeWorkoutTimeInput } from "../../../lib/time";
 import {
   createAuxiliaryRoutine,
@@ -42,9 +44,12 @@ import {
 } from "../../../lib/auxiliaryRoutines";
 import {
   COACH_SETTINGS_SAVE_SOURCE,
-  loadCoachCategoriesFromTeamKV,
-  loadCoachSettings,
-  saveCoachSettings,
+  getLastCoachSettingsLoadSource,
+  loadCoreCoachSettings,
+  loadWeekStartSetting,
+  saveCoreCoachSettings,
+  saveWeekStartSetting,
+  type WeekStartSetting,
 } from "../../../lib/settings";
 import {
   loadFeedbackFlagSettings,
@@ -60,86 +65,23 @@ const FEEDBACK_WINDOW_OPTIONS: Array<{ mode: FeedbackWarningMode; label: string 
   { mode: "last_7_days", label: "Previous 7 days" },
   { mode: "since_date", label: "From a specific date" },
 ];
+const WEEK_START_OPTIONS: WeekStartSetting[] = ["sunday", "monday"];
+
+function countNonEmptyPracticeDefaults(defaults: PracticeTimeDefaults): number {
+  let count = 0;
+  for (let day = 0; day < 7; day++) {
+    const key = String(day);
+    const am = String(defaults[key]?.am ?? "").trim();
+    const pm = String(defaults[key]?.pm ?? "").trim();
+    if (am) count += 1;
+    if (pm) count += 1;
+  }
+  return count;
+}
 
 function round2(n: number) {
   if (!Number.isFinite(n)) return n;
   return Math.round(n * 100) / 100;
-}
-
-function formatNumber(n: number) {
-  return String(round2(n));
-}
-
-function convertDistanceString(raw: string, from: DistanceUnit, to: DistanceUnit): string {
-  const trimmed = String(raw ?? "").trim();
-  if (!trimmed) return trimmed;
-  if (trimmed.includes(":")) return trimmed;
-
-  const lower = trimmed.toLowerCase();
-  if (lower.includes("xt") || lower.includes("min") || lower.includes("hr")) return trimmed;
-
-  const range = trimmed.match(/^(-?\d*\.?\d+)\s*-\s*(-?\d*\.?\d+)\s*(mi|km)?$/i);
-  if (range) {
-    const a = Number(range[1]);
-    const b = Number(range[2]);
-    if (Number.isFinite(a) && Number.isFinite(b)) {
-      return `${formatNumber(convertDistance(a, from, to))}-${formatNumber(convertDistance(b, from, to))}`;
-    }
-    return trimmed;
-  }
-
-  const single = trimmed.match(/^(-?\d*\.?\d+)\s*(mi|km)?$/i);
-  if (single) {
-    const v = Number(single[1]);
-    if (Number.isFinite(v)) return formatNumber(convertDistance(v, from, to));
-  }
-
-  return trimmed;
-}
-
-function convertMileageValue(value: any, from: DistanceUnit, to: DistanceUnit): any {
-  if (from === to) return value;
-  if (value == null) return value;
-
-  if (typeof value === "number") return round2(convertDistance(value, from, to));
-  if (typeof value === "string") return convertDistanceString(value, from, to);
-  if (typeof value !== "object") return value;
-
-  const kind = value.kind;
-  if (kind === "exact" && typeof value.value === "number") {
-    return { ...value, value: round2(convertDistance(value.value, from, to)) };
-  }
-  if (kind === "range" && typeof value.min === "number" && typeof value.max === "number") {
-    return {
-      ...value,
-      min: round2(convertDistance(value.min, from, to)),
-      max: round2(convertDistance(value.max, from, to)),
-    };
-  }
-
-  return value;
-}
-
-function convertMileagePlans(rawPlans: any[], from: DistanceUnit, to: DistanceUnit): any[] {
-  return (rawPlans ?? []).map((plan: any) => {
-    const days = plan?.days ?? {};
-    const nextDays: Record<string, any> = {};
-
-    for (let i = 0; i < 7; i++) {
-      const key = String(i);
-      const day: any = days[key] ?? {};
-      const amRaw = day.am ?? day.AM;
-      const pmRaw = day.pm ?? day.PM;
-      const nextDay: any = { ...day };
-      nextDay.am = convertMileageValue(amRaw, from, to);
-      nextDay.pm = convertMileageValue(pmRaw, from, to);
-      delete nextDay.AM;
-      delete nextDay.PM;
-      nextDays[key] = nextDay;
-    }
-
-    return { ...plan, days: nextDays, updatedAt: Date.now() };
-  });
 }
 
 function convertWorkoutDistances(rawWorkouts: any[], from: DistanceUnit, to: DistanceUnit): any[] {
@@ -159,7 +101,7 @@ export default function CoachSettingsTab() {
   const isDesktopWeb = Platform.OS === "web" && width >= 1100;
   const [paceText, setPaceText] = useState("");
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
-  const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
+  const [weekStartSetting, setWeekStartSetting] = useState<WeekStartSetting>("monday");
   const [feedbackFlagsEnabled, setFeedbackFlagsEnabled] = useState(false);
   const [feedbackWarningMode, setFeedbackWarningMode] = useState<FeedbackWarningMode>("all");
   const [feedbackStartDateText, setFeedbackStartDateText] = useState("");
@@ -193,27 +135,40 @@ export default function CoachSettingsTab() {
   const lastAuxiliarySavedSnapshotRef = React.useRef("");
   const suppressAuxiliaryAutosaveRef = React.useRef(false);
 
-  useEffect(() => {
-    (async () => {
+  const loadSettingsScreenData = useCallback(
+    async (isActive?: () => boolean) => {
       try {
-        const [paceSec, coachSettings, loadedCategories, loadedRoster, loadedGroups, loadedOverrides, weekStart, loadedRoutines, feedbackFlagSettings] = await Promise.all([
+        const [paceSec, coreSettings, loadedRoster, loadedGroups, loadedOverrides, weekStartResult, loadedRoutines, feedbackFlagSettings] = await Promise.all([
           loadPaceSecondsPerMile(),
-          loadCoachSettings(),
-          loadCoachCategoriesFromTeamKV(),
+          loadCoreCoachSettings(),
           getSortableRoster(),
           loadCustomAthleteGroups(),
           loadAthletePaceOverrides(),
-          loadJSON<WeekStartDay>(WEEK_START_KEY, 1),
+          loadWeekStartSetting(),
           loadAuxiliaryRoutines(),
           loadFeedbackFlagSettings(),
         ]);
         const defaults = await loadPracticeTimeDefaults();
-        const loadedCategoryOptions = loadedCategories;
+        if (isActive && !isActive()) return;
+
+        console.log("[settings] practice defaults loaded", {
+          nonEmptyCount: countNonEmptyPracticeDefaults(defaults),
+        });
         setPaceText(formatPace(paceSec));
-        setDistanceUnit(coachSettings.distanceUnit);
-        setWeekStartsOn((weekStart ?? 1) as WeekStartDay);
+        setDistanceUnit(coreSettings.distanceUnit);
+        const normalizedWeekStart = weekStartResult.normalized;
+        console.log("[settings] week start loaded via shared helper", {
+          raw: weekStartResult.raw,
+          normalized: normalizedWeekStart,
+        });
+        console.log("[coach-settings] load summary", {
+          source: getLastCoachSettingsLoadSource(),
+          categoriesCount: coreSettings.categories.length,
+          distanceUnit: coreSettings.distanceUnit,
+        });
+        setWeekStartSetting(normalizedWeekStart);
         setRoster(loadedRoster);
-        setCategories(loadedCategoryOptions);
+        setCategories(coreSettings.categories ?? []);
         setAuxiliaryRoutines(loadedRoutines);
         setFeedbackFlagsEnabled(!!feedbackFlagSettings.enabled);
         setFeedbackWarningMode(feedbackFlagSettings.mode ?? "all");
@@ -229,12 +184,32 @@ export default function CoachSettingsTab() {
         }
         setAthletePaceTextById(textById);
       } catch (error: any) {
+        if (isActive && !isActive()) return;
         const message = error instanceof Error ? error.message : String(error ?? "Unknown settings load error");
         console.error("[settings-screen] load failed", error);
         Alert.alert("Settings load failed", message);
       }
-    })();
-  }, []);
+    },
+    []
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadSettingsScreenData(() => !cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSettingsScreenData]);
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      void loadSettingsScreenData(() => !cancelled);
+      return () => {
+        cancelled = true;
+      };
+    }, [loadSettingsScreenData])
+  );
 
   const rosterById = useMemo(() => {
     const map = new Map<string, TeamRosterAthlete>();
@@ -478,14 +453,18 @@ export default function CoachSettingsTab() {
   async function switchDistanceUnit(nextUnit: DistanceUnit) {
     if (nextUnit === distanceUnit) return;
 
-    const [rawPlans, rawWorkouts, currentPace, currentOverrides] = await Promise.all([
-      loadJSON<any[]>(MILEAGE_PLANS_KEY, []),
+    const [rawWorkouts, currentPace, currentOverrides] = await Promise.all([
       listTeamWorkoutsInRange("1900-01-01", "9999-12-31"),
       loadPaceSecondsPerMile(),
       loadAthletePaceOverrides(),
     ]);
+    console.log("[coach-settings] workouts fetch", {
+      purpose: "distance-unit-conversion",
+      start: "1900-01-01",
+      end: "9999-12-31",
+      count: (rawWorkouts as TeamWorkoutRow[])?.length ?? 0,
+    });
 
-    const nextPlans = convertMileagePlans(rawPlans, distanceUnit, nextUnit);
     const nextWorkouts = convertWorkoutDistances(rawWorkouts as TeamWorkoutRow[], distanceUnit, nextUnit);
     const nextPace = Math.max(1, Math.round(convertPaceSecondsPerUnit(currentPace, distanceUnit, nextUnit)));
     const nextOverrides: AthletePaceOverrides = {};
@@ -518,11 +497,10 @@ export default function CoachSettingsTab() {
 
     try {
       await Promise.all([
-        saveJSON(MILEAGE_PLANS_KEY, nextPlans),
         workoutPatches.length > 0 ? bulkUpdateTeamWorkouts(workoutPatches) : Promise.resolve(),
         savePaceSecondsPerMile(nextPace),
         saveAthletePaceOverrides(nextOverrides),
-        saveCoachSettings({ distanceUnit: nextUnit }),
+        saveCoreCoachSettings({ distanceUnit: nextUnit }),
       ]);
       console.log("[settings-screen] save response", {
         action: "switchDistanceUnit",
@@ -591,9 +569,10 @@ export default function CoachSettingsTab() {
     Alert.alert("Cleared", "All athletes now use the team default conversion.");
   }
 
-  async function saveWeekStart(next: WeekStartDay) {
-    setWeekStartsOn(next);
-    await saveJSON(WEEK_START_KEY, next);
+  async function saveWeekStart(next: WeekStartSetting) {
+    setWeekStartSetting(next);
+    console.log("[settings] week start save", { value: next });
+    await saveWeekStartSetting(next);
   }
 
   async function toggleFeedbackFlags(enabled: boolean) {
@@ -674,6 +653,10 @@ export default function CoachSettingsTab() {
       return;
     }
 
+    console.log("[settings] practice defaults save", {
+      nonEmptyCount: countNonEmptyPracticeDefaults(next),
+    });
+
     console.log("[settings-screen] save payload", {
       action: "savePracticeDefaults",
       source: COACH_SETTINGS_SAVE_SOURCE,
@@ -687,6 +670,7 @@ export default function CoachSettingsTab() {
     try {
       await savePracticeTimeDefaults(next);
       setPracticeDefaults(next);
+      console.log("[settings] practice defaults saved");
       console.log("[settings-screen] save response", {
         action: "savePracticeDefaults",
         status: "success",
@@ -776,32 +760,24 @@ export default function CoachSettingsTab() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Settings</Text>
-      <Text style={styles.subtitle}>Manage app preferences and coaching tools.</Text>
-      <Pressable
-        onPress={() => router.replace("/(auth)/login")}
-        style={{
-          marginTop: 10,
-          alignSelf: "flex-start",
-          borderWidth: 1,
-          borderColor: "#ddd",
-          borderRadius: 10,
-          backgroundColor: "#fff",
-          paddingVertical: 8,
-          paddingHorizontal: 12,
-        }}
-      >
-        <Text style={{ fontWeight: "900", color: "#111" }}>Back to Role Select</Text>
-      </Pressable>
+      <View style={styles.pageHeader}>
+        <View style={styles.pageHeaderTextWrap}>
+          <Text style={styles.title}>Settings</Text>
+          <Text style={styles.subtitle}>Manage app preferences and coaching tools.</Text>
+        </View>
+        <Pressable onPress={() => router.replace("/(auth)/login")} style={styles.utilityBtn}>
+          <Text style={styles.utilityBtnText}>Back to Role Select</Text>
+        </Pressable>
+      </View>
 
       <ScrollView
         automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
-        contentContainerStyle={{ paddingBottom: 24, paddingTop: 10 }}
+        contentContainerStyle={styles.scrollContent}
         keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
         keyboardShouldPersistTaps="handled"
       >
         <View style={isDesktopWeb ? styles.desktopWorkspace : undefined}>
-        <View style={[styles.card, isDesktopWeb && styles.desktopCard]}>
+        <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}>
           <Text style={styles.cardTitle}>General</Text>
           <Text style={styles.cardHint}>Core planning preferences used across the app.</Text>
 
@@ -832,7 +808,7 @@ export default function CoachSettingsTab() {
               >
                 <Text style={styles.lineLabel}>First day of week</Text>
                 <View style={styles.dropdownValueWrap}>
-                  <Text style={styles.dropdownValue}>{WEEKDAY_LABELS[weekStartsOn]}</Text>
+                  <Text style={styles.dropdownValue}>{weekStartSetting === "sunday" ? "Sunday" : "Monday"}</Text>
                   <View style={styles.chevronTapTarget}>
                     <Text style={styles.dropdownChevron}>{weekStartMenuOpen ? "▴" : "▾"}</Text>
                   </View>
@@ -840,18 +816,19 @@ export default function CoachSettingsTab() {
               </Pressable>
               {weekStartMenuOpen ? (
                 <View style={styles.dropdownPanel}>
-                  {WEEKDAY_LABELS.map((label, day) => {
-                    const active = day === weekStartsOn;
+                  {WEEK_START_OPTIONS.map((value, idx) => {
+                    const label = value === "sunday" ? "Sunday" : "Monday";
+                    const active = value === weekStartSetting;
                     return (
                       <Pressable
-                        key={`settings-week-start-${label}`}
+                        key={`settings-week-start-${value}`}
                         onPress={async () => {
-                          await saveWeekStart(day as WeekStartDay);
+                          await saveWeekStart(value);
                           setWeekStartMenuOpen(false);
                         }}
                         style={[
                           styles.dropdownOption,
-                          day > 0 && styles.dropdownOptionBorder,
+                          idx > 0 && styles.dropdownOptionBorder,
                           active && styles.dropdownOptionActive,
                         ]}
                       >
@@ -1050,7 +1027,7 @@ export default function CoachSettingsTab() {
           </View>
         </View>
 
-        <View style={[styles.card, { marginTop: 12 }, isDesktopWeb && styles.desktopCard]}> 
+        <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}> 
           <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setPracticeDefaultsOpen((prev) => !prev)}>
             <Text style={styles.cardTitle}>Default Practice Times</Text>
             <View style={styles.chevronTapTarget}>
@@ -1067,17 +1044,15 @@ export default function CoachSettingsTab() {
                   return (
                     <View
                       key={`default-time-${key}`}
-                      style={{
-                        borderBottomWidth: dayIdx === WEEKDAY_LABELS.length - 1 ? 0 : 1,
-                        borderBottomColor: "#f0f0f0",
-                        paddingBottom: 10,
-                        marginBottom: 10,
-                      }}
+                      style={[
+                        styles.practiceDayRow,
+                        dayIdx === WEEKDAY_LABELS.length - 1 && styles.practiceDayRowLast,
+                      ]}
                     >
                       <Text style={styles.label}>{label}</Text>
-                      <View style={{ flexDirection: "row", gap: 8 }}>
+                      <View style={styles.practiceDayInputs}>
                         <View style={{ flex: 1 }}>
-                          <Text style={[styles.cardHint, { marginBottom: 4 }]}>AM</Text>
+                          <Text style={styles.practiceFieldLabel}>AM</Text>
                           <TextInput
                             value={practiceDefaults[key]?.am ?? ""}
                             onChangeText={(t) => updatePracticeDefault(dayIdx, "am", t)}
@@ -1088,7 +1063,7 @@ export default function CoachSettingsTab() {
                           />
                         </View>
                         <View style={{ flex: 1 }}>
-                          <Text style={[styles.cardHint, { marginBottom: 4 }]}>PM</Text>
+                          <Text style={styles.practiceFieldLabel}>PM</Text>
                           <TextInput
                             value={practiceDefaults[key]?.pm ?? ""}
                             onChangeText={(t) => updatePracticeDefault(dayIdx, "pm", t)}
@@ -1115,7 +1090,7 @@ export default function CoachSettingsTab() {
           ) : null}
         </View>
 
-        <View style={[styles.card, { marginTop: 12 }, isDesktopWeb && styles.desktopCard]}> 
+        <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}> 
           <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setWorkoutTypesOpen((prev) => !prev)}>
             <Text style={styles.cardTitle}>Workout Types</Text>
             <View style={styles.chevronTapTarget}>
@@ -1144,7 +1119,7 @@ export default function CoachSettingsTab() {
           ) : null}
         </View>
 
-        <View style={[styles.card, { marginTop: 12 }, isDesktopWeb && styles.desktopCard]}>
+        <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
           <Pressable
             style={styles.sectionHeader}
             hitSlop={10}
@@ -1296,7 +1271,7 @@ export default function CoachSettingsTab() {
           ) : null}
         </View>
 
-        <View style={[styles.card, { marginTop: 12 }, isDesktopWeb && styles.desktopCard]}> 
+        <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}> 
           <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setCustomGroupsOpen((prev) => !prev)}>
             <Text style={styles.cardTitle}>Custom Groups</Text>
             <View style={styles.chevronTapTarget}>
@@ -1413,21 +1388,17 @@ export default function CoachSettingsTab() {
           ) : null}
         </View>
 
-        <Pressable
-          onPress={signOut}
-          style={{
-            backgroundColor: "#c33",
-            padding: 14,
-            borderRadius: 12,
-            alignItems: "center",
-            marginTop: 30,
-            ...(isDesktopWeb ? { width: "100%" as const } : null),
-          }}
-        >
-          <Text style={{ color: "white", fontWeight: "600", fontSize: 16 }}>
-            Sign Out
-          </Text>
-        </Pressable>
+        <View style={styles.signOutWrap}>
+          <Pressable
+            onPress={signOut}
+            style={[
+              styles.signOutBtn,
+              isDesktopWeb ? styles.signOutBtnDesktop : null,
+            ]}
+          >
+            <Text style={styles.signOutBtnText}>Sign Out</Text>
+          </Pressable>
+        </View>
         </View>
       </ScrollView>
     </View>
@@ -1435,9 +1406,39 @@ export default function CoachSettingsTab() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, paddingHorizontal: 16, paddingTop: 14, backgroundColor: "#fff" },
+  container: { flex: 1, paddingHorizontal: 16, paddingTop: 12, backgroundColor: "#f4f6fb" },
+  pageHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#e2e7f0",
+    borderRadius: 14,
+    backgroundColor: "#ffffff",
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+  },
+  pageHeaderTextWrap: {
+    flex: 1,
+    minWidth: 0,
+    paddingTop: 2,
+  },
   title: { fontSize: 22, fontWeight: "900", color: "#111" },
-  subtitle: { marginTop: 4, color: "#666", fontWeight: "700" },
+  subtitle: { marginTop: 2, color: "#596071", fontWeight: "700" },
+  utilityBtn: {
+    alignSelf: "flex-start",
+    borderWidth: 1,
+    borderColor: "#d6dce6",
+    borderRadius: 10,
+    backgroundColor: "#f7f9fc",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginTop: 0,
+  },
+  utilityBtnText: { fontWeight: "900", color: "#1d2433", fontSize: 12 },
+  scrollContent: { paddingBottom: 22, paddingTop: 4 },
   desktopWorkspace: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -1445,26 +1446,44 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   desktopCard: {
-    flexBasis: "48%",
+    flexBasis: "49%",
     flexGrow: 1,
     marginTop: 0,
   },
 
-  card: { borderWidth: 1, borderColor: "#eee", backgroundColor: "#fafafa", borderRadius: 14, padding: 12 },
+  card: {
+    borderWidth: 1,
+    borderColor: "#e0e6ef",
+    backgroundColor: "#ffffff",
+    borderRadius: 14,
+    padding: 12,
+    shadowColor: "#111827",
+    shadowOpacity: Platform.OS === "web" ? 0.05 : 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  sectionCard: { marginTop: 10 },
+  primarySectionCard: {
+    borderColor: "#dbe3f2",
+  },
+  secondarySectionCard: {
+    backgroundColor: "#fcfdff",
+  },
   cardTitle: { fontSize: 16, fontWeight: "900", color: "#111" },
-  cardHint: { marginTop: 4, marginBottom: 10, color: "#666", fontWeight: "700", fontSize: 12 },
+  cardHint: { marginTop: 4, marginBottom: 9, color: "#5e6678", fontWeight: "700", fontSize: 12 },
   settingsRows: {
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#e8e8e8",
-    backgroundColor: "#fff",
+    borderColor: "#e1e7f2",
+    backgroundColor: "#fbfcff",
     overflow: "hidden",
   },
   lineRow: {
     paddingHorizontal: 12,
-    paddingVertical: 11,
+    paddingVertical: 9,
     borderTopWidth: 1,
-    borderTopColor: "#efefef",
+    borderTopColor: "#edf1f7",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
@@ -1486,23 +1505,23 @@ const styles = StyleSheet.create({
     minHeight: 40,
   },
   dropdownValueWrap: { flexDirection: "row", alignItems: "center", gap: 8 },
-  dropdownValue: { fontSize: 13, fontWeight: "800", color: "#444" },
-  dropdownChevron: { fontWeight: "900", color: "#666", fontSize: 14 },
+  dropdownValue: { fontSize: 13, fontWeight: "800", color: "#384054" },
+  dropdownChevron: { fontWeight: "900", color: "#66708a", fontSize: 14 },
   dropdownPanel: {
     marginTop: 10,
     borderWidth: 1,
-    borderColor: "#e6e6e6",
+    borderColor: "#dce3ef",
     borderRadius: 10,
     padding: 10,
-    backgroundColor: "#fafafa",
+    backgroundColor: "#f8faff",
   },
   dropdownOption: { paddingVertical: 10, paddingHorizontal: 10, backgroundColor: "#fff" },
-  dropdownOptionBorder: { borderTopWidth: 1, borderTopColor: "#efefef" },
+  dropdownOptionBorder: { borderTopWidth: 1, borderTopColor: "#ecf1f8" },
   dropdownOptionActive: { backgroundColor: "rgba(10,132,255,0.10)" },
   dropdownOptionText: { fontWeight: "800", color: "#111" },
   dropdownOptionTextActive: { color: "#0a84ff" },
-  sectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 40 },
-  chev: { fontSize: 16, fontWeight: "900", color: "#666" },
+  sectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 36 },
+  chev: { fontSize: 16, fontWeight: "900", color: "#66708a" },
   chevronTapTarget: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
   collapsibleBody: { marginTop: 2 },
   auxWorkspaceDesktop: {
@@ -1589,7 +1608,28 @@ const styles = StyleSheet.create({
     paddingVertical: 20,
   },
 
-  placeholder: { borderRadius: 12, borderWidth: 1, borderColor: "#e8e8e8", backgroundColor: "#fff", padding: 12 },
+  placeholder: { borderRadius: 12, borderWidth: 1, borderColor: "#e1e7f2", backgroundColor: "#fff", padding: 10 },
+  practiceDayRow: {
+    borderBottomWidth: 1,
+    borderBottomColor: "#f0f0f0",
+    paddingBottom: 8,
+    marginBottom: 8,
+  },
+  practiceDayRowLast: {
+    borderBottomWidth: 0,
+    paddingBottom: 0,
+    marginBottom: 8,
+  },
+  practiceDayInputs: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  practiceFieldLabel: {
+    color: "#666",
+    fontWeight: "800",
+    fontSize: 11,
+    marginBottom: 3,
+  },
   label: { fontSize: 12, fontWeight: "900", color: "#666", marginBottom: 6 },
   unitBtn: {
     flex: 1,
@@ -1605,7 +1645,7 @@ const styles = StyleSheet.create({
   unitBtnTextActive: { color: "#fff" },
   input: {
     borderWidth: 1,
-    borderColor: "#ddd",
+    borderColor: "#d3dbe8",
     borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -1615,9 +1655,9 @@ const styles = StyleSheet.create({
   saveBtn: {
     marginTop: 8,
     borderWidth: 1,
-    borderColor: "#111",
+    borderColor: "#10131a",
     borderRadius: 12,
-    backgroundColor: "#111",
+    backgroundColor: "#10131a",
     alignItems: "center",
     paddingVertical: 10,
   },
@@ -1626,7 +1666,7 @@ const styles = StyleSheet.create({
   groupCard: {
     marginTop: 8,
     borderWidth: 1,
-    borderColor: "#eee",
+    borderColor: "#e3e8f2",
     borderRadius: 12,
     padding: 10,
     backgroundColor: "#fff",
@@ -1634,14 +1674,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   groupName: { fontWeight: "900", color: "#111" },
-  groupMeta: { marginTop: 3, color: "#666", fontWeight: "700", fontSize: 12 },
+  groupMeta: { marginTop: 3, color: "#5f677a", fontWeight: "700", fontSize: 12 },
   groupActionBtn: {
     borderWidth: 1,
-    borderColor: "#ddd",
+    borderColor: "#d3dbe8",
     borderRadius: 10,
     paddingHorizontal: 10,
     paddingVertical: 8,
-    backgroundColor: "#fafafa",
+    backgroundColor: "#f8faff",
   },
   groupActionBtnText: { fontWeight: "900", color: "#111" },
   groupDeleteBtn: {
@@ -1667,4 +1707,26 @@ const styles = StyleSheet.create({
   },
   autoRoutineChipText: { fontWeight: "800", color: "#222" },
   autoRoutineChipTextActive: { color: "#fff" },
+  signOutWrap: {
+    marginTop: 14,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#e1e7f2",
+    width: "100%",
+  },
+  signOutBtn: {
+    backgroundColor: "#c33",
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    alignItems: "center",
+  },
+  signOutBtnDesktop: {
+    alignSelf: "stretch",
+  },
+  signOutBtnText: {
+    color: "white",
+    fontWeight: "700",
+    fontSize: 15,
+  },
 });

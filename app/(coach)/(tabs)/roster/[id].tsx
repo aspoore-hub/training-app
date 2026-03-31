@@ -11,7 +11,7 @@ import { Screen } from "../../../../components/ui/Screen";
 import { TextField } from "../../../../components/ui/TextField";
 import { useAppTheme } from "../../../../components/ui/useAppTheme";
 import { useResponsive } from "../../../../lib/useResponsive";
-import { teamStore } from "../../../../lib/teamStore";
+import { teamDataStore } from "../../../../lib/teamDataStore";
 import { createClaimInvite } from "../../../../lib/team";
 
 function isUuid(v: string) {
@@ -25,7 +25,7 @@ export default function CoachEditTeamAthlete() {
 
   const { theme } = useAppTheme();
   const { isDesktop } = useResponsive();
-  const s = teamStore.use();
+  const s = teamDataStore.use();
 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -70,14 +70,14 @@ export default function CoachEditTeamAthlete() {
       setLoading(true);
       try {
         // Ensure roster is loaded at least once
-        if (!teamStore.getState?.().rosterLoaded) {
-          await teamStore.actions.refreshRoster({ throwOnError: true });
+        if (!teamDataStore.getState?.().rosterLoaded) {
+          await teamDataStore.actions.refreshRoster({ throwOnError: true });
         }
 
         if (cancelled) return;
 
         // Read fresh state AFTER refresh
-        const a = teamStore.getAthleteById(athleteId);
+        const a = teamDataStore.getAthleteById(athleteId);
         if (!a) {
           Alert.alert("Not found", "This athlete may have been deleted.");
           safeGoBack();
@@ -111,7 +111,7 @@ export default function CoachEditTeamAthlete() {
 
     setBusy(true);
     try {
-      await teamStore.actions.updateAthlete(athleteId, {
+      await teamDataStore.actions.updateAthlete(athleteId, {
         display_name: name.trim(),
         email: email.trim() || null,
       });
@@ -161,7 +161,7 @@ export default function CoachEditTeamAthlete() {
     const runDelete = async () => {
       setBusy(true);
       try {
-        await teamStore.actions.deleteAthlete(athleteId);
+        await teamDataStore.actions.deleteAthlete(athleteId);
 
         // Web: navigate immediately
         if (Platform.OS === "web") {
@@ -191,25 +191,56 @@ export default function CoachEditTeamAthlete() {
   }
 
   return (
-    <Screen style={{ gap: theme.space.lg }}>
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-        <View style={{ gap: 4, flex: 1 }}>
-          <AppText variant="title" numberOfLines={1}>
-            {name.trim() ? name : "Athlete Details"}
-          </AppText>
-          <AppText variant="caption" color="mutedText" numberOfLines={1}>
-            {athleteId}
-          </AppText>
-          <AppText variant="caption" color="mutedText">
-            {claimed ? "Claimed" : "Not claimed"}
-          </AppText>
+    <Screen style={{ gap: 10 }}>
+      <Card
+        style={{
+          borderColor: "#dde4f0",
+          backgroundColor: "#fff",
+          shadowColor: "#111827",
+          shadowOpacity: Platform.OS === "web" ? 0.04 : 0.08,
+          shadowRadius: 10,
+          shadowOffset: { width: 0, height: 2 },
+          elevation: 1,
+          paddingVertical: 11,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+          <View style={{ gap: 3, flex: 1 }}>
+            <AppText variant="caption" color="mutedText">
+              Roster profile
+            </AppText>
+            <AppText variant="title" numberOfLines={1}>
+              {name.trim() ? name : "Athlete Details"}
+            </AppText>
+            <AppText variant="caption" color="mutedText" numberOfLines={1}>
+              {athleteId}
+            </AppText>
+          </View>
+
+          <View
+            style={{
+              borderWidth: 1,
+              borderColor: "#d7dfeb",
+              backgroundColor: claimed ? "#eefaf2" : "#f7f9fd",
+              borderRadius: 999,
+              paddingVertical: 5,
+              paddingHorizontal: 10,
+            }}
+          >
+            <AppText variant="caption" color={claimed ? "success" : "mutedText"}>
+              {claimed ? "Claimed" : "Not claimed"}
+            </AppText>
+          </View>
+
+          {!isDesktop ? <Button title="Back" variant="secondary" onPress={safeGoBack} /> : null}
         </View>
+      </Card>
 
-        {!isDesktop ? <Button title="Back" variant="secondary" onPress={safeGoBack} /> : null}
-      </View>
-
-      <Card style={{ gap: theme.space.md }}>
-        <AppText variant="headline">Profile</AppText>
+      <Card style={{ gap: theme.space.md, borderColor: "#dde4f0", backgroundColor: "#fff" }}>
+        <View style={{ gap: 4 }}>
+          <AppText variant="headline">Profile</AppText>
+          <AppText variant="caption" color="mutedText">Edit athlete identity and invite contact details.</AppText>
+        </View>
         <Divider />
         <TextField
           label="Display name"
@@ -225,7 +256,7 @@ export default function CoachEditTeamAthlete() {
           placeholder="athlete@email.com"
           keyboardType="email-address"
         />
-        <View style={{ flexDirection: "row", gap: theme.space.sm, flexWrap: "wrap" }}>
+        <View style={{ flexDirection: "row", gap: theme.space.sm, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <Button title={busy || loading ? "Saving..." : "Save"} onPress={save} disabled={busy || loading} />
           <Button title="Create invite" variant="secondary" onPress={invite} disabled={busy || loading} />
         </View>
@@ -237,7 +268,7 @@ export default function CoachEditTeamAthlete() {
         ) : null}
       </Card>
 
-      <Card style={{ gap: theme.space.md }}>
+      <Card style={{ gap: theme.space.md, borderColor: "#f2d7d7", backgroundColor: "#fff" }}>
         <AppText variant="headline">Danger zone</AppText>
         <Divider />
         <AppText variant="caption" color="mutedText">

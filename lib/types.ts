@@ -42,7 +42,6 @@ export type AthleteWorkout = {
   groupId?: string;          // optional subgroup number within a batch ("1", "2", ...)
   dateISO: string;           // YYYY-MM-DD
   session?: "AM" | "PM";     // AM or PM
-  location?: string;         // optional location label
   time?: string;             // optional start time label, independent from AM/PM
   preRoutineIds?: string[];  // optional auxiliary routines before main workout
   postRoutineIds?: string[]; // optional auxiliary routines after main workout
@@ -56,7 +55,6 @@ export type AthleteWorkout = {
   splitsOrPace?: string;     // athlete-reported splits / pace notes
   additionalFeedback?: string; // athlete extra notes
   feedback?: string;         // later
-  createdAt: number;
 };
 
 export type WeekStartDay = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0 Sun ... 6 Sat

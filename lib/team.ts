@@ -259,36 +259,3 @@ export async function getMyClaimedAthleteProfileId(teamId?: string | null): Prom
   if (error) throw error;
   return (data?.id as string) ?? null;
 }
-
-// Make a local roster entry that matches the team athlete
-export async function mirrorTeamAthleteIntoLocalRoster(teamAthlete: {
-  id: string;
-  display_name: string;
-  email: string | null;
-}) {
-  const { loadRoster, saveRoster } = await import("./roster");
-  const name = (teamAthlete.display_name ?? "").trim();
-  const parts = name.split(" ").filter(Boolean);
-  const firstName = parts.slice(0, 1).join(" ");
-  const lastName = parts.slice(1).join(" ");
-
-  const roster = await loadRoster();
-
-  // Avoid duplicates: if any existing roster athlete has same id OR same email, skip
-  const already = roster.some(
-    (a) => a.id === teamAthlete.id || (!!teamAthlete.email && a.email?.toLowerCase() === teamAthlete.email.toLowerCase())
-  );
-  if (already) return;
-
-  const next = [
-    ...roster,
-    {
-      id: teamAthlete.id, // IMPORTANT: reuse team athlete id
-      firstName,
-      lastName,
-      email: teamAthlete.email ?? undefined,
-    },
-  ];
-
-  await saveRoster(next);
-}

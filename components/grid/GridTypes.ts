@@ -5,7 +5,9 @@ export type GridBindHandlers = {
   onPaste?: (e: any) => void;
   onCopy?: (e: any) => void;
   onMouseDown?: (e: any) => void;
+  onMouseEnter?: (e: any) => void;
   onFocus?: (e: any) => void;
+  onBlur?: (e: any) => void;
 };
 
 export type GridCellBinding = {
@@ -20,6 +22,7 @@ export type GridEngineOptions<RowId extends string, ColKey extends string> = {
   colKeys: ColKey[];
   getValue: (rowId: RowId, colKey: ColKey) => string;
   setValue: (rowId: RowId, colKey: ColKey, value: string) => void;
+  setValuesBatch?: (changes: Array<{ rowId: RowId; colKey: ColKey; value: string }>) => void;
   isEditorHandlingKeys?: () => boolean;
   onFillDown?: (rowId: RowId, colKey: ColKey) => void;
   onSelectionChange?: (selection: { rowIds: RowId[]; colKeys: ColKey[] }) => void;

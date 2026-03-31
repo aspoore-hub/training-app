@@ -13,8 +13,6 @@ export function DevDebugPanel() {
       ["route", pathname || "-"],
       ["team", state.currentTeamId || "-"],
       ["date", state.activeDateISO || "-"],
-      ["batch", state.activeBatchId || "-"],
-      ["batch highlight", state.selectedBatchHighlight || "-"],
       ["planner debug", state.lastPlannerSubmitDebug || "-"],
       ["save error", state.lastSaveError || "-"],
       ["settings", state.lastSettingsLoadStatus || "-"],

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { supabase } from "./supabase";
 import {
   fetchMileageCellsForWeek,
@@ -6,7 +7,7 @@ import {
   upsertMileageCell,
   upsertMileageDayFlag,
 } from "./mileageCloud";
-import type { TeamWorkoutRow as TeamWorkoutRowBase } from "./teamWorkoutsCloud";
+import { listTeamWorkoutsInRange, type TeamWorkoutRow as TeamWorkoutRowBase } from "./teamWorkoutsCloud";
 
 export type TeamAthlete = {
   id: string;
@@ -37,6 +38,20 @@ export type TeamWorkoutRow = TeamWorkoutRowBase;
 
 type WeekKey = string; // weekStartISO
 type DayKey = string;  // dateISO
+type MileageCellPendingByWeek = Record<WeekKey, TeamMileageCellRow[]>;
+type MileageFlagPendingByWeek = Record<WeekKey, MileageDayFlagRow[]>;
+
+const MILEAGE_PENDING_CELLS_STORAGE_PREFIX = "training_app_mileage_pending_cells_team_v1";
+const MILEAGE_PENDING_FLAGS_STORAGE_PREFIX = "training_app_mileage_pending_flags_team_v1";
+const TEAM_ROSTER_CACHE_STORAGE_PREFIX = "training_app_team_roster_cache_v1";
+const USER_LAST_TEAM_ID_STORAGE_PREFIX = "training_app_user_last_team_id_v1";
+const TEAM_ID_VERIFY_TTL_MS = 30_000;
+let pendingPersistTimer: ReturnType<typeof setTimeout> | null = null;
+let lastVerifiedTeamContext: { userId: string | null; teamId: string | null; atMs: number } = {
+  userId: null,
+  teamId: null,
+  atMs: 0,
+};
 
 type StoreState = {
   ready: boolean;
@@ -51,6 +66,9 @@ type StoreState = {
   mileageCellsByWeek: Record<WeekKey, TeamMileageCellRow[]>;
   mileageFlagsByWeek: Record<WeekKey, MileageDayFlagRow[]>;
   mileageLoadedWeeks: Record<WeekKey, boolean>;
+  mileagePendingCellsByWeek: MileageCellPendingByWeek;
+  mileagePendingFlagsByWeek: MileageFlagPendingByWeek;
+  mileagePendingLoadedForTeamId: string | null;
 
   // workouts cache (by day)
   workoutsByDay: Record<DayKey, TeamWorkoutRow[]>;
@@ -71,6 +89,9 @@ let state: StoreState = {
   mileageCellsByWeek: {},
   mileageFlagsByWeek: {},
   mileageLoadedWeeks: {},
+  mileagePendingCellsByWeek: {},
+  mileagePendingFlagsByWeek: {},
+  mileagePendingLoadedForTeamId: null,
 
   workoutsByDay: {},
   workoutsLoadedDays: {},
@@ -84,6 +105,139 @@ function emit() { for (const l of listeners) l(); }
 function setState(patch: Partial<StoreState>) { state = { ...state, ...patch }; emit(); }
 function subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); }
 function getSnapshot() { return state; }
+function getState() { return state; }
+
+function mileagePendingCellsStorageKey(teamId: string) {
+  return `${MILEAGE_PENDING_CELLS_STORAGE_PREFIX}:${teamId}`;
+}
+
+function mileagePendingFlagsStorageKey(teamId: string) {
+  return `${MILEAGE_PENDING_FLAGS_STORAGE_PREFIX}:${teamId}`;
+}
+
+function rosterCacheStorageKey(teamId: string) {
+  return `${TEAM_ROSTER_CACHE_STORAGE_PREFIX}:${teamId}`;
+}
+
+function userLastTeamIdStorageKey(userId: string) {
+  return `${USER_LAST_TEAM_ID_STORAGE_PREFIX}:${userId}`;
+}
+
+function mileageCellIdentity(row: TeamMileageCellRow): string {
+  return `${row.athlete_profile_id}__${row.week_start_iso}__${row.day_idx}__${row.session}`;
+}
+
+function mileageFlagIdentity(row: MileageDayFlagRow): string {
+  return `${row.athlete_profile_id}__${row.week_start_iso}__${row.day_idx}`;
+}
+
+function upsertByIdentity<T>(
+  rows: T[],
+  row: T,
+  identity: (value: T) => string
+): T[] {
+  const key = identity(row);
+  const next = rows.filter((value) => identity(value) !== key);
+  next.push(row);
+  return next;
+}
+
+function removeByIdentity<T>(
+  rows: T[],
+  row: T,
+  identity: (value: T) => string
+): T[] {
+  const key = identity(row);
+  return rows.filter((value) => identity(value) !== key);
+}
+
+function mergeRowsByIdentity<T>(
+  baseRows: T[],
+  overrideRows: T[],
+  identity: (value: T) => string
+): T[] {
+  const byId = new Map<string, T>();
+  for (const row of baseRows) byId.set(identity(row), row);
+  for (const row of overrideRows) byId.set(identity(row), row);
+  return Array.from(byId.values());
+}
+
+async function persistMileagePendingForTeam(teamId: string, cells: MileageCellPendingByWeek, flags: MileageFlagPendingByWeek) {
+  try {
+    await AsyncStorage.multiSet([
+      [mileagePendingCellsStorageKey(teamId), JSON.stringify(cells)],
+      [mileagePendingFlagsStorageKey(teamId), JSON.stringify(flags)],
+    ]);
+  } catch (e) {
+    console.warn("Failed to persist mileage pending queue", e);
+  }
+}
+
+function schedulePersistMileagePendingForTeam(teamId: string, cells: MileageCellPendingByWeek, flags: MileageFlagPendingByWeek) {
+  if (pendingPersistTimer) clearTimeout(pendingPersistTimer);
+  pendingPersistTimer = setTimeout(() => {
+    pendingPersistTimer = null;
+    void persistMileagePendingForTeam(teamId, cells, flags);
+  }, 120);
+}
+
+async function loadMileagePendingForTeam(teamId: string): Promise<{
+  cells: MileageCellPendingByWeek;
+  flags: MileageFlagPendingByWeek;
+}> {
+  try {
+    const [cellsRaw, flagsRaw] = await AsyncStorage.multiGet([
+      mileagePendingCellsStorageKey(teamId),
+      mileagePendingFlagsStorageKey(teamId),
+    ]);
+    const cells = (cellsRaw?.[1] ? JSON.parse(cellsRaw[1]) : {}) as MileageCellPendingByWeek;
+    const flags = (flagsRaw?.[1] ? JSON.parse(flagsRaw[1]) : {}) as MileageFlagPendingByWeek;
+    return {
+      cells: cells && typeof cells === "object" ? cells : {},
+      flags: flags && typeof flags === "object" ? flags : {},
+    };
+  } catch (e) {
+    console.warn("Failed to load mileage pending queue", e);
+    return { cells: {}, flags: {} };
+  }
+}
+
+async function loadRosterCacheForTeam(teamId: string): Promise<TeamAthlete[] | null> {
+  try {
+    const raw = await AsyncStorage.getItem(rosterCacheStorageKey(teamId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { roster?: TeamAthlete[] };
+    const roster = Array.isArray(parsed?.roster) ? parsed.roster : [];
+    return roster as TeamAthlete[];
+  } catch {
+    return null;
+  }
+}
+
+async function persistRosterCacheForTeam(teamId: string, roster: TeamAthlete[]): Promise<void> {
+  try {
+    await AsyncStorage.setItem(
+      rosterCacheStorageKey(teamId),
+      JSON.stringify({ roster: Array.isArray(roster) ? roster : [], updatedAt: Date.now() })
+    );
+  } catch {}
+}
+
+async function loadCachedTeamIdForUser(userId: string): Promise<string | null> {
+  try {
+    const value = await AsyncStorage.getItem(userLastTeamIdStorageKey(userId));
+    const teamId = String(value ?? "").trim();
+    return teamId || null;
+  } catch {
+    return null;
+  }
+}
+
+async function persistCachedTeamIdForUser(userId: string, teamId: string | null): Promise<void> {
+  try {
+    await AsyncStorage.setItem(userLastTeamIdStorageKey(userId), String(teamId ?? ""));
+  } catch {}
+}
 
 function incLoading() { setState({ loadingCount: state.loadingCount + 1 }); }
 function decLoading() { setState({ loadingCount: Math.max(0, state.loadingCount - 1) }); }
@@ -112,10 +266,55 @@ async function ensureSessionAndTeam() {
       mileageCellsByWeek: {},
       mileageFlagsByWeek: {},
       mileageLoadedWeeks: {},
+      mileagePendingCellsByWeek: {},
+      mileagePendingFlagsByWeek: {},
+      mileagePendingLoadedForTeamId: null,
       workoutsByDay: {},
       workoutsLoadedDays: {},
     });
     return { userId: null, teamId: null };
+  }
+
+  const now = Date.now();
+  if (
+    state.ready &&
+    state.userId === userId &&
+    state.teamId &&
+    lastVerifiedTeamContext.userId === userId &&
+    lastVerifiedTeamContext.teamId === state.teamId &&
+    now - lastVerifiedTeamContext.atMs < TEAM_ID_VERIFY_TTL_MS
+  ) {
+    return { userId, teamId: state.teamId };
+  }
+
+  const hydrateLocalTeamCaches = async (teamIdToHydrate: string | null) => {
+    if (!teamIdToHydrate) return;
+    if (state.mileagePendingLoadedForTeamId !== teamIdToHydrate) {
+      const pending = await loadMileagePendingForTeam(teamIdToHydrate);
+      setState({
+        mileagePendingCellsByWeek: pending.cells,
+        mileagePendingFlagsByWeek: pending.flags,
+        mileagePendingLoadedForTeamId: teamIdToHydrate,
+      });
+    }
+    const shouldHydrateRoster =
+      state.teamId !== teamIdToHydrate || !state.rosterLoaded || state.roster.length === 0;
+    if (!shouldHydrateRoster) return;
+    const cachedRoster = await loadRosterCacheForTeam(teamIdToHydrate);
+    if (Array.isArray(cachedRoster) && cachedRoster.length > 0) {
+      setState({
+        roster: cachedRoster,
+        rosterLoaded: true,
+      });
+    }
+  };
+
+  const cachedTeamId = await loadCachedTeamIdForUser(userId);
+  if (cachedTeamId) {
+    setState({ ready: true, userId, teamId: cachedTeamId });
+    await hydrateLocalTeamCaches(cachedTeamId);
+  } else if (!state.ready || state.userId !== userId) {
+    setState({ ready: true, userId, teamId: null });
   }
 
   const { data: profile, error } = await supabase
@@ -124,16 +323,29 @@ async function ensureSessionAndTeam() {
     .eq("id", userId)
     .single();
 
-  if (error) throw error;
+  if (error) {
+    if (cachedTeamId) {
+      return { userId, teamId: cachedTeamId };
+    }
+    throw error;
+  }
 
   const teamId = (profile?.current_team_id as string | null) ?? null;
 
   setState({ ready: true, userId, teamId });
+  await persistCachedTeamIdForUser(userId, teamId);
+  await hydrateLocalTeamCaches(teamId);
+
+  lastVerifiedTeamContext = { userId, teamId, atMs: Date.now() };
   return { userId, teamId };
 }
 
 // ---------- roster ----------
-async function refreshRoster() {
+async function refreshRoster(opts?: { force?: boolean; throwOnError?: boolean }) {
+  const force = !!opts?.force;
+  const throwOnError = !!opts?.throwOnError;
+  // force is accepted for compatibility with teamStore callers.
+  void force;
   incLoading();
   try {
     const { teamId } = await ensureSessionAndTeam();
@@ -151,9 +363,52 @@ async function refreshRoster() {
 
     if (error) throw error;
 
-    setState({ roster: (data ?? []) as TeamAthlete[], rosterLoaded: true, lastError: null });
+    const nextRoster = (data ?? []) as TeamAthlete[];
+    setState({ roster: nextRoster, rosterLoaded: true, lastError: null });
+    if (teamId) {
+      void persistRosterCacheForTeam(teamId, nextRoster);
+    }
   } catch (e) {
     setError(e);
+    if (throwOnError) throw e;
+  } finally {
+    decLoading();
+  }
+}
+
+function getAthleteById(id: string) {
+  return state.roster.find((a) => a.id === id) ?? null;
+}
+
+async function updateAthlete(athleteId: string, patch: { display_name?: string; email?: string | null }) {
+  incLoading();
+  const prevRoster = state.roster;
+  try {
+    const { teamId } = await ensureSessionAndTeam();
+    if (!teamId) throw new Error("No team selected.");
+
+    // optimistic patch
+    setState({
+      roster: state.roster.map((a) => (a.id === athleteId ? { ...a, ...patch } : a)),
+    });
+
+    const update: { display_name?: string; email?: string | null } = {};
+    if (typeof patch.display_name === "string") update.display_name = patch.display_name;
+    if ("email" in patch) update.email = patch.email ?? null;
+
+    const { error } = await supabase
+      .from("team_athletes")
+      .update(update)
+      .eq("team_id", teamId)
+      .eq("id", athleteId);
+
+    if (error) throw error;
+
+    setState({ lastError: null });
+  } catch (e) {
+    setState({ roster: prevRoster });
+    setError(e);
+    throw e;
   } finally {
     decLoading();
   }
@@ -186,6 +441,138 @@ async function deleteAthlete(athleteId: string) {
 }
 
 // ---------- mileage (by week) ----------
+function getPendingCellsForWeek(weekStartISO: string): TeamMileageCellRow[] {
+  return state.mileagePendingCellsByWeek[weekStartISO] ?? [];
+}
+
+function getPendingFlagsForWeek(weekStartISO: string): MileageDayFlagRow[] {
+  return state.mileagePendingFlagsByWeek[weekStartISO] ?? [];
+}
+
+function markMileageCellPending(weekStartISO: string, row: TeamMileageCellRow) {
+  const prevWeekRows = getPendingCellsForWeek(weekStartISO);
+  const nextWeekRows = upsertByIdentity(prevWeekRows, row, mileageCellIdentity);
+  const nextPendingCellsByWeek = {
+    ...state.mileagePendingCellsByWeek,
+    [weekStartISO]: nextWeekRows,
+  };
+  setState({ mileagePendingCellsByWeek: nextPendingCellsByWeek });
+  if (state.teamId) {
+    schedulePersistMileagePendingForTeam(state.teamId, nextPendingCellsByWeek, state.mileagePendingFlagsByWeek);
+  }
+}
+
+function clearMileageCellPending(weekStartISO: string, row: TeamMileageCellRow) {
+  const prevWeekRows = getPendingCellsForWeek(weekStartISO);
+  const nextWeekRows = removeByIdentity(prevWeekRows, row, mileageCellIdentity);
+  const nextPendingCellsByWeek: MileageCellPendingByWeek = { ...state.mileagePendingCellsByWeek };
+  if (nextWeekRows.length > 0) nextPendingCellsByWeek[weekStartISO] = nextWeekRows;
+  else delete nextPendingCellsByWeek[weekStartISO];
+  setState({ mileagePendingCellsByWeek: nextPendingCellsByWeek });
+  if (state.teamId) {
+    schedulePersistMileagePendingForTeam(state.teamId, nextPendingCellsByWeek, state.mileagePendingFlagsByWeek);
+  }
+}
+
+function markMileageFlagPending(weekStartISO: string, row: MileageDayFlagRow) {
+  const prevWeekRows = getPendingFlagsForWeek(weekStartISO);
+  const nextWeekRows = upsertByIdentity(prevWeekRows, row, mileageFlagIdentity);
+  const nextPendingFlagsByWeek = {
+    ...state.mileagePendingFlagsByWeek,
+    [weekStartISO]: nextWeekRows,
+  };
+  setState({ mileagePendingFlagsByWeek: nextPendingFlagsByWeek });
+  if (state.teamId) {
+    schedulePersistMileagePendingForTeam(state.teamId, state.mileagePendingCellsByWeek, nextPendingFlagsByWeek);
+  }
+}
+
+function clearMileageFlagPending(weekStartISO: string, row: MileageDayFlagRow) {
+  const prevWeekRows = getPendingFlagsForWeek(weekStartISO);
+  const nextWeekRows = removeByIdentity(prevWeekRows, row, mileageFlagIdentity);
+  const nextPendingFlagsByWeek: MileageFlagPendingByWeek = { ...state.mileagePendingFlagsByWeek };
+  if (nextWeekRows.length > 0) nextPendingFlagsByWeek[weekStartISO] = nextWeekRows;
+  else delete nextPendingFlagsByWeek[weekStartISO];
+  setState({ mileagePendingFlagsByWeek: nextPendingFlagsByWeek });
+  if (state.teamId) {
+    schedulePersistMileagePendingForTeam(state.teamId, state.mileagePendingCellsByWeek, nextPendingFlagsByWeek);
+  }
+}
+
+async function flushPendingMileageWeek(weekStartISO: string): Promise<void> {
+  const pendingCellsSnapshot = [...getPendingCellsForWeek(weekStartISO)];
+  const pendingFlagsSnapshot = [...getPendingFlagsForWeek(weekStartISO)];
+
+  if (pendingCellsSnapshot.length === 0 && pendingFlagsSnapshot.length === 0) return;
+
+  const cellResults = await Promise.all(
+    pendingCellsSnapshot.map(async (row) => {
+      try {
+        await upsertMileageCell(
+          row.athlete_profile_id,
+          row.week_start_iso,
+          row.day_idx,
+          row.session,
+          row.value
+        );
+        return { ok: true as const, row };
+      } catch {
+        return { ok: false as const, row };
+      }
+    })
+  );
+
+  const flagResults = await Promise.all(
+    pendingFlagsSnapshot.map(async (row) => {
+      try {
+        await upsertMileageDayFlag(
+          row.athlete_profile_id,
+          row.week_start_iso,
+          row.day_idx,
+          row.ncaa_off
+        );
+        return { ok: true as const, row };
+      } catch {
+        return { ok: false as const, row };
+      }
+    })
+  );
+
+  const failedCells = cellResults.filter((r) => !r.ok).map((r) => r.row);
+  const failedFlags = flagResults.filter((r) => !r.ok).map((r) => r.row);
+
+  const snapshotCellIds = new Set(pendingCellsSnapshot.map((row) => mileageCellIdentity(row)));
+  const snapshotFlagIds = new Set(pendingFlagsSnapshot.map((row) => mileageFlagIdentity(row)));
+
+  const cellsAddedDuringFlush = getPendingCellsForWeek(weekStartISO).filter(
+    (row) => !snapshotCellIds.has(mileageCellIdentity(row))
+  );
+  const flagsAddedDuringFlush = getPendingFlagsForWeek(weekStartISO).filter(
+    (row) => !snapshotFlagIds.has(mileageFlagIdentity(row))
+  );
+
+  const nextWeekPendingCells = mergeRowsByIdentity(failedCells, cellsAddedDuringFlush, mileageCellIdentity);
+  const nextWeekPendingFlags = mergeRowsByIdentity(failedFlags, flagsAddedDuringFlush, mileageFlagIdentity);
+
+  const nextPendingCellsByWeek: MileageCellPendingByWeek = { ...state.mileagePendingCellsByWeek };
+  const nextPendingFlagsByWeek: MileageFlagPendingByWeek = { ...state.mileagePendingFlagsByWeek };
+
+  if (nextWeekPendingCells.length > 0) nextPendingCellsByWeek[weekStartISO] = nextWeekPendingCells;
+  else delete nextPendingCellsByWeek[weekStartISO];
+
+  if (nextWeekPendingFlags.length > 0) nextPendingFlagsByWeek[weekStartISO] = nextWeekPendingFlags;
+  else delete nextPendingFlagsByWeek[weekStartISO];
+
+  setState({
+    mileagePendingCellsByWeek: nextPendingCellsByWeek,
+    mileagePendingFlagsByWeek: nextPendingFlagsByWeek,
+  });
+
+  if (state.teamId) {
+    schedulePersistMileagePendingForTeam(state.teamId, nextPendingCellsByWeek, nextPendingFlagsByWeek);
+  }
+}
+
 async function loadMileageWeek(weekStartISO: string, force = false) {
   incLoading();
   try {
@@ -199,21 +586,69 @@ async function loadMileageWeek(weekStartISO: string, force = false) {
       return;
     }
 
-    if (!force && state.mileageLoadedWeeks[weekStartISO]) return;
+    void flushPendingMileageWeek(weekStartISO);
+
+    if (!force && state.mileageLoadedWeeks[weekStartISO]) {
+      const mergedCells = mergeRowsByIdentity(
+        state.mileageCellsByWeek[weekStartISO] ?? [],
+        getPendingCellsForWeek(weekStartISO),
+        mileageCellIdentity
+      );
+      const mergedFlags = mergeRowsByIdentity(
+        state.mileageFlagsByWeek[weekStartISO] ?? [],
+        getPendingFlagsForWeek(weekStartISO),
+        mileageFlagIdentity
+      );
+      setState({
+        mileageCellsByWeek: { ...state.mileageCellsByWeek, [weekStartISO]: mergedCells },
+        mileageFlagsByWeek: { ...state.mileageFlagsByWeek, [weekStartISO]: mergedFlags },
+      });
+      return;
+    }
 
     const [cells, flags] = await Promise.all([
       fetchMileageCellsForWeek(weekStartISO),
       fetchMileageDayFlagsForWeek(weekStartISO),
     ]);
 
+    const mergedCells = mergeRowsByIdentity(
+      (cells ?? []) as TeamMileageCellRow[],
+      getPendingCellsForWeek(weekStartISO),
+      mileageCellIdentity
+    );
+    const mergedFlags = mergeRowsByIdentity(
+      (flags ?? []) as MileageDayFlagRow[],
+      getPendingFlagsForWeek(weekStartISO),
+      mileageFlagIdentity
+    );
+
     setState({
-      mileageCellsByWeek: { ...state.mileageCellsByWeek, [weekStartISO]: cells as any },
-      mileageFlagsByWeek: { ...state.mileageFlagsByWeek, [weekStartISO]: flags as any },
+      mileageCellsByWeek: { ...state.mileageCellsByWeek, [weekStartISO]: mergedCells as any },
+      mileageFlagsByWeek: { ...state.mileageFlagsByWeek, [weekStartISO]: mergedFlags as any },
       mileageLoadedWeeks: { ...state.mileageLoadedWeeks, [weekStartISO]: true },
       lastError: null,
     });
   } catch (e) {
     setError(e);
+    const pendingCells = getPendingCellsForWeek(weekStartISO);
+    const pendingFlags = getPendingFlagsForWeek(weekStartISO);
+    if (pendingCells.length > 0 || pendingFlags.length > 0) {
+      const mergedCells = mergeRowsByIdentity(
+        state.mileageCellsByWeek[weekStartISO] ?? [],
+        pendingCells,
+        mileageCellIdentity
+      );
+      const mergedFlags = mergeRowsByIdentity(
+        state.mileageFlagsByWeek[weekStartISO] ?? [],
+        pendingFlags,
+        mileageFlagIdentity
+      );
+      setState({
+        mileageCellsByWeek: { ...state.mileageCellsByWeek, [weekStartISO]: mergedCells },
+        mileageFlagsByWeek: { ...state.mileageFlagsByWeek, [weekStartISO]: mergedFlags },
+        mileageLoadedWeeks: { ...state.mileageLoadedWeeks, [weekStartISO]: true },
+      });
+    }
   } finally {
     decLoading();
   }
@@ -255,21 +690,24 @@ async function setMileageCell(
   session: "AM" | "PM",
   value: any
 ) {
-  // optimistic local write first
-  upsertCellLocal(weekStartISO, {
+  const row: TeamMileageCellRow = {
     athlete_profile_id: athleteProfileId,
     week_start_iso: weekStartISO,
     day_idx: dayIdx,
     session,
     value,
-  });
+  };
+  // optimistic local write first
+  upsertCellLocal(weekStartISO, row);
+  markMileageCellPending(weekStartISO, row);
 
   try {
     await upsertMileageCell(athleteProfileId, weekStartISO, dayIdx, session, value);
+    clearMileageCellPending(weekStartISO, row);
+    setState({ lastError: null });
   } catch (e) {
     setError(e);
-    // reconcile from server (keeps you “no ambiguity”)
-    await loadMileageWeek(weekStartISO, true);
+    // Keep local-first pending value; retry on next load/sync attempt.
   }
 }
 
@@ -279,19 +717,23 @@ async function setMileageOffFlag(
   dayIdx: number,
   ncaaOff: boolean
 ) {
-  // optimistic local write first
-  upsertFlagLocal(weekStartISO, {
+  const row: MileageDayFlagRow = {
     athlete_profile_id: athleteProfileId,
     week_start_iso: weekStartISO,
     day_idx: dayIdx,
     ncaa_off: ncaaOff,
-  });
+  };
+  // optimistic local write first
+  upsertFlagLocal(weekStartISO, row);
+  markMileageFlagPending(weekStartISO, row);
 
   try {
     await upsertMileageDayFlag(athleteProfileId, weekStartISO, dayIdx, ncaaOff);
+    clearMileageFlagPending(weekStartISO, row);
+    setState({ lastError: null });
   } catch (e) {
     setError(e);
-    await loadMileageWeek(weekStartISO, true);
+    // Keep local-first pending value; retry on next load/sync attempt.
   }
 }
 
@@ -310,16 +752,10 @@ async function loadWorkoutsForDay(dateISO: string, force = false) {
 
     if (!force && state.workoutsLoadedDays[dateISO]) return;
 
-    const { data, error } = await supabase
-      .from("team_workouts")
-      .select("*")
-      .eq("team_id", teamId)
-      .eq("date_iso", dateISO);
-
-    if (error) throw error;
+    const rows = await listTeamWorkoutsInRange(dateISO, dateISO);
 
     setState({
-      workoutsByDay: { ...state.workoutsByDay, [dateISO]: (data ?? []) as any },
+      workoutsByDay: { ...state.workoutsByDay, [dateISO]: (rows ?? []) as any },
       workoutsLoadedDays: { ...state.workoutsLoadedDays, [dateISO]: true },
       lastError: null,
     });
@@ -332,10 +768,13 @@ async function loadWorkoutsForDay(dateISO: string, force = false) {
 
 export const teamDataStore = {
   use: useTeamDataStore,
+  getState,
+  getAthleteById,
   actions: {
     ensureSessionAndTeam,
     refreshRoster,
     deleteAthlete,
+    updateAthlete,
 
     loadMileageWeek,
     setMileageCell,

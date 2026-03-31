@@ -17,7 +17,7 @@ import type { WorkoutCategory } from "../../../lib/types";
 import { type DistanceUnit } from "../../../lib/units";
 import { createWorkoutTemplateFromSource } from "../../../lib/workoutTemplates";
 import { getCurrentTeamId } from "../../../lib/team";
-import { getCategoryOptions, loadCoachSettings } from "../../../lib/settings";
+import { getCategoryOptions, loadCoreCoachSettings } from "../../../lib/settings";
 
 import {
   deleteTeamWorkout,
@@ -29,32 +29,17 @@ import {
 } from "../../../lib/teamWorkoutsCloud";
 import { loadRosterNameMapForTeam, type RosterMap } from "../../../lib/rosterNameMap";
 import { compareAthleteDisplayNamesByLastName, resolveAthleteDisplayName } from "../../../lib/teamRoster";
+import {
+  normalizeWorkoutGroupId,
+  resolveWorkoutAthleteName,
+  splitIntoKGroups,
+  splitIntoPairs,
+  type TeamWorkoutLegacyNameRow,
+} from "../../../lib/teamWorkoutEditorHelpers";
 
 const IOS_ACCESSORY_ID = "edit-workout-accessory";
 
-function normalizeGroupId(groupId?: string): string {
-  const digits = String(groupId ?? "").replace(/[^\d]/g, "");
-  if (!digits) return "1";
-  const parsed = Number(digits);
-  if (!Number.isFinite(parsed) || parsed <= 0) return "1";
-  return String(Math.floor(parsed));
-}
-
-function splitIntoKGroups<T>(items: T[], k: number): T[][] {
-  if (k <= 1) return [items];
-  const groups: T[][] = Array.from({ length: k }, () => []);
-  items.forEach((item, i) => groups[i % k].push(item));
-  return groups.filter((group) => group.length > 0);
-}
-
-function splitIntoPairs<T>(items: T[]): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += 2) out.push(items.slice(i, i + 2));
-  if (out.length >= 2 && out[out.length - 1].length === 1) {
-    out[out.length - 2] = out[out.length - 2].concat(out.pop() as T[]);
-  }
-  return out;
-}
+type TeamWorkoutCloudPatch = Partial<TeamWorkoutRow>;
 
 function formatDisplayDate(iso: string) {
   const [y, m, d] = String(iso ?? "").split("-").map(Number);
@@ -95,7 +80,7 @@ export default function EditWorkoutCloud() {
         setLoading(true);
 
         const [settings] = await Promise.all([
-          loadCoachSettings(),
+          loadCoreCoachSettings(),
         ]);
 
         const teamId = await getCurrentTeamId();
@@ -116,7 +101,7 @@ export default function EditWorkoutCloud() {
 
         const inBatch = found.batch_id ? await listTeamWorkoutsByBatch(found.batch_id) : [];
         const groupDraft = inBatch.reduce<Record<string, string>>((acc, item) => {
-          acc[item.id] = normalizeGroupId(item.group_id ?? undefined);
+          acc[item.id] = normalizeWorkoutGroupId(item.group_id ?? undefined);
           return acc;
         }, {});
 
@@ -148,8 +133,7 @@ export default function EditWorkoutCloud() {
   }, []);
 
   const sortedBatchWorkouts = useMemo(() => {
-    const nameOf = (w: TeamWorkoutRow) =>
-      resolveAthleteDisplayName(w.athlete_profile_id, rosterNameById, String((w as any).athlete_name ?? ""));
+    const nameOf = (w: TeamWorkoutLegacyNameRow) => resolveWorkoutAthleteName(w, rosterNameById);
     return [...batchWorkouts].sort((a, b) =>
       compareAthleteDisplayNamesByLastName(String(nameOf(a)), String(nameOf(b)))
     );
@@ -165,7 +149,7 @@ export default function EditWorkoutCloud() {
           ? [workout.primary_category]
           : ["Other"];
 
-    const patch: Partial<TeamWorkoutRow> = {
+    const patch: TeamWorkoutCloudPatch = {
       session,
       title: String(workout.title ?? "").trim() || "Workout",
       details: String(workout.details ?? "").trim() || null,
@@ -202,7 +186,7 @@ export default function EditWorkoutCloud() {
       // Update all batch rows one by one (simple + reliable for now)
       // You can optimize into a single RPC later.
       for (const item of batchWorkouts) {
-        const nextGroup = normalizeGroupId(groupDraftByWorkoutId[item.id]);
+        const nextGroup = normalizeWorkoutGroupId(groupDraftByWorkoutId[item.id]);
         await updateTeamWorkoutById(item.id, { group_id: nextGroup });
       }
 
@@ -374,12 +358,8 @@ export default function EditWorkoutCloud() {
                 </View>
 
                 {sortedBatchWorkouts.map((item) => {
-                  const displayName = resolveAthleteDisplayName(
-                    item.athlete_profile_id,
-                    rosterNameById,
-                    String((item as any).athlete_name ?? "")
-                  );
-                  const groupId = normalizeGroupId(groupDraftByWorkoutId[item.id]);
+                  const displayName = resolveWorkoutAthleteName(item as TeamWorkoutLegacyNameRow, rosterNameById);
+                  const groupId = normalizeWorkoutGroupId(groupDraftByWorkoutId[item.id]);
                   return (
                     <View
                       key={item.id}
