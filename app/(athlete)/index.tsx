@@ -26,7 +26,7 @@ export default function AthleteIndex() {
         if (id) {
           // Persist selected athlete id for downstream screens that still rely on ATHLETE_KEY.
           await saveJSON(ATHLETE_KEY, id);
-          router.replace("/(athlete)/month");
+          router.replace("/(athlete)/dashboard");
           return;
         }
 

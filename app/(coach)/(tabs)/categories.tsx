@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, FlatList, Pressable, Text, TextInput, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
@@ -61,41 +61,70 @@ function replaceCategoryValues(workout: TeamWorkoutRow, oldName: string, nextNam
 function DraggableRow({
   index,
   children,
-  onSlideUp,
-  onSlideDown,
+  rowId,
+  restingOffsetY = 0,
+  onDropBySteps,
+  onDragStart,
+  onDragStepsChange,
+  onDragEnd,
 }: {
   index: number;
   children: React.ReactNode;
-  onSlideUp: () => void;
-  onSlideDown: () => void;
+  rowId: string;
+  restingOffsetY?: number;
+  onDropBySteps: (steps: number) => void;
+  onDragStart?: (rowId: string, index: number) => void;
+  onDragStepsChange?: (rowId: string, index: number, steps: number) => void;
+  onDragEnd?: (rowId: string, index: number) => void;
 }) {
   const translateY = useSharedValue(0);
   const active = useSharedValue(false);
+  const stepCount = useSharedValue(0);
+  const STEP_PX = 92;
+  const DEAD_ZONE_PX = 20;
 
   const pan = Gesture.Pan()
     .activateAfterLongPress(120)
     .onBegin(() => {
       active.value = true;
+      runOnJS(onDragStart ?? (() => {}))(rowId, index);
     })
     .onUpdate((e) => {
       translateY.value = e.translationY;
+      const absY = Math.abs(e.translationY);
+      let nextSteps = 0;
+      if (absY > DEAD_ZONE_PX) {
+        const magnitude = Math.round(absY / STEP_PX);
+        nextSteps = e.translationY < 0 ? -magnitude : magnitude;
+      }
+      if (stepCount.value !== nextSteps) {
+        stepCount.value = nextSteps;
+        runOnJS(onDragStepsChange ?? (() => {}))(rowId, index, nextSteps);
+      }
     })
-    .onEnd((e) => {
-      const threshold = 36;
-      if (e.translationY < -threshold) runOnJS(onSlideUp)();
-      if (e.translationY > threshold) runOnJS(onSlideDown)();
+    .onEnd(() => {
+      runOnJS(onDropBySteps)(stepCount.value);
       translateY.value = withTiming(0, { duration: 130 });
       active.value = false;
+      stepCount.value = 0;
+      runOnJS(onDragEnd ?? (() => {}))(rowId, index);
     })
     .onFinalize(() => {
       translateY.value = withTiming(0, { duration: 130 });
       active.value = false;
+      stepCount.value = 0;
+      runOnJS(onDragStepsChange ?? (() => {}))(rowId, index, 0);
     });
 
   const animatedStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: translateY.value }],
+    transform: [{ translateY: translateY.value + restingOffsetY }],
     zIndex: active.value ? 2 : 0,
     opacity: active.value ? 0.96 : 1,
+    shadowColor: "#0f172a",
+    shadowOpacity: active.value ? 0.2 : 0,
+    shadowRadius: active.value ? 10 : 0,
+    shadowOffset: { width: 0, height: active.value ? 6 : 0 },
+    elevation: active.value ? 6 : 0,
   }));
 
   return (
@@ -121,6 +150,18 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
   const [debugLoadedCount, setDebugLoadedCount] = useState(0);
   const [debugLastSaveStatus, setDebugLastSaveStatus] = useState("idle");
   const [debugLastSaveError, setDebugLastSaveError] = useState("");
+  const listRef = useRef<FlatList<WorkoutCategory>>(null);
+  const autoScrollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoScrollDirectionRef = useRef<0 | 1 | -1>(0);
+  const autoScrollSpeedRef = useRef(0);
+  const scrollOffsetRef = useRef(0);
+  const viewportHeightRef = useRef(0);
+  const contentHeightRef = useRef(0);
+  const [dragPreview, setDragPreview] = useState<{
+    activeId: string | null;
+    steps: number;
+    targetId: string | null;
+  }>({ activeId: null, steps: 0, targetId: null });
 
   useEffect(() => {
     (async () => {
@@ -147,6 +188,71 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
   }, []);
 
   const ordered = useMemo(() => categories.slice(), [categories]);
+
+  const updateDragPreview = useCallback(
+    (rowId: string, index: number, steps: number) => {
+      if (!steps) {
+        setDragPreview((prev) =>
+          prev.activeId === rowId ? { activeId: rowId, steps: 0, targetId: null } : prev
+        );
+        return;
+      }
+      const targetIndex = Math.max(0, Math.min(ordered.length - 1, index + steps));
+      const targetId = String(ordered[targetIndex]?.id ?? "").trim() || null;
+      setDragPreview({ activeId: rowId, steps, targetId: targetId && targetId !== rowId ? targetId : null });
+    },
+    [ordered]
+  );
+
+  const clearDragPreview = useCallback(() => {
+    setDragPreview({ activeId: null, steps: 0, targetId: null });
+  }, []);
+
+  const stopAutoScroll = useCallback(() => {
+    autoScrollDirectionRef.current = 0;
+    autoScrollSpeedRef.current = 0;
+    if (autoScrollTimerRef.current) {
+      clearInterval(autoScrollTimerRef.current);
+      autoScrollTimerRef.current = null;
+    }
+  }, []);
+
+  const startAutoScroll = useCallback(
+    (direction: 1 | -1, speed: number) => {
+      autoScrollDirectionRef.current = direction;
+      autoScrollSpeedRef.current = speed;
+      if (autoScrollTimerRef.current) return;
+
+      autoScrollTimerRef.current = setInterval(() => {
+        const maxOffset = Math.max(0, contentHeightRef.current - viewportHeightRef.current);
+        if (maxOffset <= 0) return;
+        const current = scrollOffsetRef.current;
+        const delta = autoScrollDirectionRef.current * autoScrollSpeedRef.current;
+        const next = Math.max(0, Math.min(maxOffset, current + delta));
+        if (next === current) return;
+        scrollOffsetRef.current = next;
+        listRef.current?.scrollToOffset({ offset: next, animated: false });
+      }, 16);
+    },
+    []
+  );
+
+  const updateAutoScrollFromSteps = useCallback(
+    (steps: number) => {
+      if (!useVirtualizedList) return;
+      if (!steps) {
+        stopAutoScroll();
+        return;
+      }
+      const direction: 1 | -1 = steps > 0 ? 1 : -1;
+      const magnitude = Math.max(1, Math.abs(steps));
+      const speed = Math.min(22, 8 + magnitude * 4);
+      startAutoScroll(direction, speed);
+    },
+    [startAutoScroll, stopAutoScroll, useVirtualizedList]
+  );
+
+  useEffect(() => () => stopAutoScroll(), [stopAutoScroll]);
 
   async function persist(next: WorkoutCategory[]) {
     setDebugLastSaveStatus("saving");
@@ -175,18 +281,26 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
     }
   }
 
-  async function moveCategory(id: string, dir: "up" | "down") {
+  async function moveCategoryBySteps(id: string, stepsRaw: number) {
+    const steps = Math.trunc(stepsRaw);
+    if (!steps) return;
     const idx = categories.findIndex((c) => c.id === id);
     if (idx < 0) return;
-
-    const target = dir === "up" ? idx - 1 : idx + 1;
+    const target = Math.max(0, Math.min(categories.length - 1, idx + steps));
     if (target < 0 || target >= categories.length) return;
+    if (target === idx) return;
 
     const next = categories.slice();
-    const temp = next[idx];
-    next[idx] = next[target];
-    next[target] = temp;
-    await persist(next);
+    const [moved] = next.splice(idx, 1);
+    if (!moved) return;
+    next.splice(target, 0, moved);
+    const previous = categories.slice();
+    setCategories(next);
+    try {
+      await persist(next);
+    } catch {
+      setCategories(previous);
+    }
   }
 
   async function applyCategoryColor(categoryId: string, color: string) {
@@ -390,7 +504,6 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
 
   return (
     <View style={{ flex: useVirtualizedList ? 1 : undefined, padding: 16, backgroundColor: "#fff" }}>
-      <Text style={{ fontSize: 20, fontWeight: "900", marginBottom: 10 }}>Workout Categories</Text>
       <View style={{ flexDirection: "row", gap: 10, marginBottom: 12 }}>
         <TextInput
           value={draft}
@@ -548,115 +661,142 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
 
       {useVirtualizedList ? (
         <FlatList
+          ref={listRef}
           data={ordered}
           keyExtractor={(item) => item.id}
+          nestedScrollEnabled
+          onLayout={(event) => {
+            viewportHeightRef.current = Number(event.nativeEvent.layout.height ?? 0);
+          }}
+          onContentSizeChange={(_, height) => {
+            contentHeightRef.current = Number(height ?? 0);
+          }}
+          onScroll={(event) => {
+            scrollOffsetRef.current = Number(event.nativeEvent.contentOffset.y ?? 0);
+          }}
+          scrollEventThrottle={16}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           renderItem={({ item, index }) => (
             <DraggableRow
+              rowId={item.id}
               index={index}
-              onSlideUp={() => moveCategory(item.id, "up")}
-              onSlideDown={() => moveCategory(item.id, "down")}
+              restingOffsetY={
+                dragPreview.activeId !== item.id && dragPreview.targetId === item.id
+                  ? dragPreview.steps < 0
+                    ? 10
+                    : -10
+                  : 0
+              }
+              onDropBySteps={(steps) => void moveCategoryBySteps(item.id, steps)}
+              onDragStart={(rowId) => setDragPreview({ activeId: rowId, steps: 0, targetId: null })}
+              onDragStepsChange={(rowId, rowIndex, steps) => {
+                updateDragPreview(rowId, rowIndex, steps);
+                updateAutoScrollFromSteps(steps);
+              }}
+              onDragEnd={() => {
+                clearDragPreview();
+                stopAutoScroll();
+              }}
             >
               {(() => {
                 const permanent = isPermanentCategory(item);
+                const isDragging = dragPreview.activeId === item.id;
+                const isDropTarget = !isDragging && dragPreview.targetId === item.id;
                 return (
               <View
                 style={{
                   borderWidth: 1,
-                  borderColor: "#eee",
+                  borderColor: isDropTarget ? "#93c5fd" : "#eee",
                   borderRadius: 12,
                   padding: 12,
                   backgroundColor: "#fafafa",
                 }}
               >
+                {isDropTarget && dragPreview.steps > 0 ? (
+                  <View style={{ height: 3, borderRadius: 2, backgroundColor: "#3b82f6", marginBottom: 8 }} />
+                ) : null}
                 <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
                     <Text style={{ fontSize: 15, color: "#777", fontWeight: "800" }}>≡</Text>
-                    <Text style={{ fontSize: 14, fontWeight: "900" }}>{item.name}</Text>
-                    {permanent ? (
+                    <Text style={{ fontSize: 14, fontWeight: "900", flexShrink: 1 }}>{item.name}</Text>
+                    <Pressable
+                      onPress={() => setColorPickerForId((prev) => (prev === item.id ? null : item.id))}
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        borderWidth: 1,
+                        borderColor: "#ddd",
+                        borderRadius: 999,
+                        paddingVertical: 4,
+                        paddingHorizontal: 8,
+                        backgroundColor: "#fff",
+                        gap: 6,
+                      }}
+                    >
                       <View
                         style={{
+                          width: 12,
+                          height: 12,
+                          borderRadius: 6,
+                          backgroundColor: item.color ?? "#6B7280",
                           borderWidth: 1,
-                          borderColor: "#d7deea",
-                          borderRadius: 999,
-                          paddingHorizontal: 7,
-                          paddingVertical: 2,
-                          backgroundColor: "#f8faff",
+                          borderColor: "rgba(0,0,0,0.15)",
                         }}
-                      >
-                        <Text style={{ fontSize: 10, fontWeight: "900", color: "#4c5569" }}>Built-in</Text>
-                      </View>
-                    ) : null}
+                      />
+                      <Text style={{ fontSize: 11, fontWeight: "800", color: "#444" }}>Color</Text>
+                    </Pressable>
                   </View>
-                  <Pressable
-                    onPress={() => setColorPickerForId((prev) => (prev === item.id ? null : item.id))}
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      borderWidth: 1,
-                      borderColor: "#ddd",
-                      borderRadius: 999,
-                      paddingVertical: 6,
-                      paddingHorizontal: 10,
-                      backgroundColor: "#fff",
-                      gap: 8,
-                    }}
-                  >
-                    <View
-                      style={{
-                        width: 14,
-                        height: 14,
-                        borderRadius: 7,
-                        backgroundColor: item.color ?? "#6B7280",
-                        borderWidth: 1,
-                        borderColor: "rgba(0,0,0,0.15)",
+                  <View style={{ flexDirection: "row", gap: 8, marginLeft: 10 }}>
+                    <Pressable
+                      onPress={() => {
+                        if (permanent) return;
+                        void renameCategory(item.id, item.name);
                       }}
-                    />
-                    <Text style={{ fontSize: 12, fontWeight: "800", color: "#444" }}>Color</Text>
-                  </Pressable>
-                </View>
+                      style={{
+                        borderWidth: 1,
+                        borderColor: permanent ? "#e8ebf1" : "#ddd",
+                        borderRadius: 9,
+                        paddingVertical: 7,
+                        paddingHorizontal: 12,
+                        alignItems: "center",
+                        backgroundColor: permanent ? "#f7f7f8" : "#fff",
+                        opacity: permanent ? 0.7 : 1,
+                      }}
+                    >
+                      <Text style={{ fontWeight: "900", fontSize: 12 }}>Rename</Text>
+                    </Pressable>
 
-                <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-                  <Pressable
-                    onPress={() => {
-                      if (permanent) return;
-                      void renameCategory(item.id, item.name);
-                    }}
-                    style={{
-                      flex: 1,
-                      borderWidth: 1,
-                      borderColor: permanent ? "#e8ebf1" : "#ddd",
-                      borderRadius: 10,
-                      paddingVertical: 10,
-                      alignItems: "center",
-                      backgroundColor: permanent ? "#f7f7f8" : "#fff",
-                      opacity: permanent ? 0.7 : 1,
-                    }}
-                  >
-                    <Text style={{ fontWeight: "900" }}>Rename</Text>
-                  </Pressable>
-
-                  <Pressable
-                    onPress={() => {
-                      if (permanent) return;
-                      void deleteCategory(item.id, item.name);
-                    }}
-                    style={{
-                      flex: 1,
-                      borderWidth: 1,
-                      borderColor: permanent ? "#eedede" : "#f3c1c1",
-                      borderRadius: 10,
-                      paddingVertical: 10,
-                      alignItems: "center",
-                      backgroundColor: permanent ? "#faf5f5" : "#fff",
-                      opacity: permanent ? 0.7 : 1,
-                    }}
-                  >
-                    <Text style={{ fontWeight: "900", color: "#b00020" }}>
-                      {permanent ? "Protected" : "Delete"}
-                    </Text>
-                  </Pressable>
+                    <Pressable
+                      onPress={() => {
+                        if (permanent) return;
+                        void deleteCategory(item.id, item.name);
+                      }}
+                      style={{
+                        borderWidth: 1,
+                        borderColor: permanent ? "#eedede" : "#f3c1c1",
+                        borderRadius: 9,
+                        paddingVertical: 7,
+                        paddingHorizontal: 12,
+                        alignItems: "center",
+                        backgroundColor: permanent ? "#faf5f5" : "#fff",
+                        opacity: permanent ? 0.7 : 1,
+                      }}
+                    >
+                      <Text style={{ fontWeight: "900", fontSize: 12, color: "#b00020" }}>
+                        {permanent ? "Built-In" : "Delete"}
+                      </Text>
+                    </Pressable>
+                  </View>
                 </View>
+                {isDragging ? (
+                  <Text style={{ marginTop: 8, fontSize: 11, fontWeight: "800", color: "#475569" }}>
+                    {dragPreview.steps < 0
+                      ? "Release to move up"
+                      : dragPreview.steps > 0
+                      ? "Release to move down"
+                      : "Drag up or down to reorder"}
+                  </Text>
+                ) : null}
 
                 {colorPickerForId === item.id ? (
                   <View
@@ -695,6 +835,9 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
                     </View>
                   </View>
                 ) : null}
+                {isDropTarget && dragPreview.steps < 0 ? (
+                  <View style={{ height: 3, borderRadius: 2, backgroundColor: "#3b82f6", marginTop: 8 }} />
+                ) : null}
               </View>
                 );
               })()}
@@ -706,110 +849,125 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
           {ordered.map((item, index) => (
             <View key={item.id} style={{ marginBottom: index === ordered.length - 1 ? 0 : 10 }}>
               <DraggableRow
+                rowId={item.id}
                 index={index}
-                onSlideUp={() => moveCategory(item.id, "up")}
-                onSlideDown={() => moveCategory(item.id, "down")}
+                restingOffsetY={
+                  dragPreview.activeId !== item.id && dragPreview.targetId === item.id
+                    ? dragPreview.steps < 0
+                      ? 10
+                      : -10
+                    : 0
+                }
+              onDropBySteps={(steps) => void moveCategoryBySteps(item.id, steps)}
+              onDragStart={(rowId) => setDragPreview({ activeId: rowId, steps: 0, targetId: null })}
+              onDragStepsChange={(rowId, rowIndex, steps) => {
+                updateDragPreview(rowId, rowIndex, steps);
+                updateAutoScrollFromSteps(steps);
+              }}
+              onDragEnd={() => {
+                clearDragPreview();
+                stopAutoScroll();
+              }}
               >
                 {(() => {
                   const permanent = isPermanentCategory(item);
+                  const isDragging = dragPreview.activeId === item.id;
+                  const isDropTarget = !isDragging && dragPreview.targetId === item.id;
                   return (
                 <View
                   style={{
                     borderWidth: 1,
-                    borderColor: "#eee",
+                    borderColor: isDropTarget ? "#93c5fd" : "#eee",
                     borderRadius: 12,
                     padding: 12,
                     backgroundColor: "#fafafa",
                   }}
                 >
+                  {isDropTarget && dragPreview.steps > 0 ? (
+                    <View style={{ height: 3, borderRadius: 2, backgroundColor: "#3b82f6", marginBottom: 8 }} />
+                  ) : null}
                   <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
                       <Text style={{ fontSize: 15, color: "#777", fontWeight: "800" }}>≡</Text>
-                      <Text style={{ fontSize: 14, fontWeight: "900" }}>{item.name}</Text>
-                      {permanent ? (
+                      <Text style={{ fontSize: 14, fontWeight: "900", flexShrink: 1 }}>{item.name}</Text>
+                      <Pressable
+                        onPress={() => setColorPickerForId((prev) => (prev === item.id ? null : item.id))}
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          borderWidth: 1,
+                          borderColor: "#ddd",
+                          borderRadius: 999,
+                          paddingVertical: 4,
+                          paddingHorizontal: 8,
+                          backgroundColor: "#fff",
+                          gap: 6,
+                        }}
+                      >
                         <View
                           style={{
+                            width: 12,
+                            height: 12,
+                            borderRadius: 6,
+                            backgroundColor: item.color ?? "#6B7280",
                             borderWidth: 1,
-                            borderColor: "#d7deea",
-                            borderRadius: 999,
-                            paddingHorizontal: 7,
-                            paddingVertical: 2,
-                            backgroundColor: "#f8faff",
+                            borderColor: "rgba(0,0,0,0.15)",
                           }}
-                        >
-                          <Text style={{ fontSize: 10, fontWeight: "900", color: "#4c5569" }}>Built-in</Text>
-                        </View>
-                      ) : null}
+                        />
+                        <Text style={{ fontSize: 11, fontWeight: "800", color: "#444" }}>Color</Text>
+                      </Pressable>
                     </View>
-                    <Pressable
-                      onPress={() => setColorPickerForId((prev) => (prev === item.id ? null : item.id))}
-                      style={{
-                        flexDirection: "row",
-                        alignItems: "center",
-                        borderWidth: 1,
-                        borderColor: "#ddd",
-                        borderRadius: 999,
-                        paddingVertical: 6,
-                        paddingHorizontal: 10,
-                        backgroundColor: "#fff",
-                        gap: 8,
-                      }}
-                    >
-                      <View
-                        style={{
-                          width: 14,
-                          height: 14,
-                          borderRadius: 7,
-                          backgroundColor: item.color ?? "#6B7280",
-                          borderWidth: 1,
-                          borderColor: "rgba(0,0,0,0.15)",
+                    <View style={{ flexDirection: "row", gap: 8, marginLeft: 10 }}>
+                      <Pressable
+                        onPress={() => {
+                          if (permanent) return;
+                          void renameCategory(item.id, item.name);
                         }}
-                      />
-                      <Text style={{ fontSize: 12, fontWeight: "800", color: "#444" }}>Color</Text>
-                    </Pressable>
-                  </View>
+                        style={{
+                          borderWidth: 1,
+                          borderColor: permanent ? "#e8ebf1" : "#ddd",
+                          borderRadius: 9,
+                          paddingVertical: 7,
+                          paddingHorizontal: 12,
+                          alignItems: "center",
+                          backgroundColor: permanent ? "#f7f7f8" : "#fff",
+                          opacity: permanent ? 0.7 : 1,
+                        }}
+                      >
+                        <Text style={{ fontWeight: "900", fontSize: 12 }}>Rename</Text>
+                      </Pressable>
 
-                  <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-                    <Pressable
-                      onPress={() => {
-                        if (permanent) return;
-                        void renameCategory(item.id, item.name);
-                      }}
-                      style={{
-                        flex: 1,
-                        borderWidth: 1,
-                        borderColor: permanent ? "#e8ebf1" : "#ddd",
-                        borderRadius: 10,
-                        paddingVertical: 10,
-                        alignItems: "center",
-                        backgroundColor: permanent ? "#f7f7f8" : "#fff",
-                        opacity: permanent ? 0.7 : 1,
-                      }}
-                    >
-                      <Text style={{ fontWeight: "900" }}>Rename</Text>
-                    </Pressable>
-
-                    <Pressable
-                      onPress={() => {
-                        if (permanent) return;
-                        void deleteCategory(item.id, item.name);
-                      }}
-                      style={{
-                        flex: 1,
-                        borderWidth: 1,
-                        borderColor: permanent ? "#eedede" : "#f3c1c1",
-                        borderRadius: 10,
-                        paddingVertical: 10,
-                        alignItems: "center",
-                        backgroundColor: permanent ? "#faf5f5" : "#fff",
-                        opacity: permanent ? 0.7 : 1,
-                      }}
-                    >
-                        <Text style={{ fontWeight: "900", color: "#b00020" }}>
-                          {permanent ? "Protected" : "Delete"}
+                      <Pressable
+                        onPress={() => {
+                          if (permanent) return;
+                          void deleteCategory(item.id, item.name);
+                        }}
+                        style={{
+                          borderWidth: 1,
+                          borderColor: permanent ? "#eedede" : "#f3c1c1",
+                          borderRadius: 9,
+                          paddingVertical: 7,
+                          paddingHorizontal: 12,
+                          alignItems: "center",
+                          backgroundColor: permanent ? "#faf5f5" : "#fff",
+                          opacity: permanent ? 0.7 : 1,
+                        }}
+                      >
+                        <Text style={{ fontWeight: "900", fontSize: 12, color: "#b00020" }}>
+                          {permanent ? "Built-In" : "Delete"}
                         </Text>
                       </Pressable>
                     </View>
+                  </View>
+                  {isDragging ? (
+                    <Text style={{ marginTop: 8, fontSize: 11, fontWeight: "800", color: "#475569" }}>
+                      {dragPreview.steps < 0
+                        ? "Release to move up"
+                        : dragPreview.steps > 0
+                        ? "Release to move down"
+                        : "Drag up or down to reorder"}
+                    </Text>
+                  ) : null}
 
                     {colorPickerForId === item.id ? (
                       <View
@@ -847,6 +1005,9 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
                           })}
                         </View>
                       </View>
+                    ) : null}
+                    {isDropTarget && dragPreview.steps < 0 ? (
+                      <View style={{ height: 3, borderRadius: 2, backgroundColor: "#3b82f6", marginTop: 8 }} />
                     ) : null}
                 </View>
                   );

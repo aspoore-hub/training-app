@@ -409,7 +409,7 @@ export default function AthleteWorkoutDetail() {
     <>
       <Stack.Screen
         options={{
-          title: "Workout Feedback",
+          title: "Workout",
           headerRight: () => (
             <Pressable
               onPress={() => {
@@ -427,47 +427,86 @@ export default function AthleteWorkoutDetail() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <ScrollView
           automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
-          contentContainerStyle={{ padding: 20, paddingBottom: 40 }}
+          contentContainerStyle={{ padding: 14, paddingBottom: 28, backgroundColor: "#f6f8fb" }}
           keyboardDismissMode="interactive"
           keyboardShouldPersistTaps="handled"
         >
-          <Text style={{ fontSize: 22, fontWeight: "700" }}>{athleteName}</Text>
-          <Text style={{ marginTop: 6, opacity: 0.75 }}>
-            {formatDisplayDate(displayDate)} • {displaySession}
-            {!isSynthetic && workout?.time ? ` • ${workout.time}` : ""}
-            {!isSynthetic ? ` • ${workout?.category ?? ""}` : ""}
-          </Text>
-
-          {isSynthetic ? (
-            <>
-              <Text style={{ marginTop: 12, fontWeight: "700" }}>{displaySession} Session</Text>
-              <Text style={{ marginTop: 8 }}>{String(prescribed ?? "") ? `Prescribed: ${String(prescribed)}` : "Prescribed from mileage plan"}</Text>
-            </>
-          ) : (
-            <>
-              <Text style={{ marginTop: 12, fontWeight: "700" }}>{workout?.title || "Workout"}</Text>
-              <Text style={{ marginTop: 8 }}>{workout?.details}</Text>
-              <Text style={{ marginTop: 8 }}>
-                {prescribedFromMileage ? `Prescribed: ${prescribedFromMileage}` : "Prescribed from mileage plan"}
+          <View
+            style={{
+              borderWidth: 1,
+              borderColor: "#e2e8f0",
+              borderRadius: 16,
+              backgroundColor: "#ffffff",
+              padding: 12,
+            }}
+          >
+            <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.6, color: "#64748b" }}>WORKOUT</Text>
+            <Text style={{ marginTop: 4, fontSize: 21, fontWeight: "900", color: "#0f172a" }}>
+              {isSynthetic ? `${displaySession} Session` : workout?.title || "Workout"}
+            </Text>
+            <Text style={{ marginTop: 5, color: "#475569", fontWeight: "700" }}>
+              {formatDisplayDate(displayDate)} • {displaySession}
+              {!isSynthetic && workout?.time ? ` • ${workout.time}` : ""}
+              {!isSynthetic ? ` • ${workout?.category ?? ""}` : ""}
+            </Text>
+            <Text style={{ marginTop: 8, color: "#334155", fontWeight: "700" }}>
+              {String(isSynthetic ? prescribed : prescribedFromMileage).trim()
+                ? `Prescribed: ${String(isSynthetic ? prescribed : prescribedFromMileage).trim()}`
+                : "Prescribed from mileage plan"}
+            </Text>
+            {!isSynthetic && workout?.details ? (
+              <Text style={{ marginTop: 8, color: "#111827", lineHeight: 20 }}>{workout.details}</Text>
+            ) : null}
+            {preRoutines.length > 0 ? (
+              <Text style={{ marginTop: 8, color: "#1f2937", fontWeight: "700" }}>Pre-run: {preRoutines.join(", ")}</Text>
+            ) : null}
+            {postRoutines.length > 0 ? (
+              <Text style={{ marginTop: 4, color: "#1f2937", fontWeight: "700" }}>Post-run: {postRoutines.join(", ")}</Text>
+            ) : null}
+            {groupMateNames.length > 0 ? (
+              <Text style={{ marginTop: 7, color: "#444", fontWeight: "600" }}>
+                Working out with: {groupMatePreview}
+                {hiddenGroupMateCount > 0 ? ` +${hiddenGroupMateCount} more` : ""}
               </Text>
-              {preRoutines.length > 0 ? (
-                <Text style={{ marginTop: 8, color: "#333", fontWeight: "700" }}>Pre-run: {preRoutines.join(", ")}</Text>
-              ) : null}
-              {postRoutines.length > 0 ? (
-                <Text style={{ marginTop: 4, color: "#333", fontWeight: "700" }}>Post-run: {postRoutines.join(", ")}</Text>
-              ) : null}
-              {groupMateNames.length > 0 ? (
-                <Text style={{ marginTop: 8, color: "#444", fontWeight: "600" }}>
-                  Working out with: {groupMatePreview}
-                  {hiddenGroupMateCount > 0 ? ` +${hiddenGroupMateCount} more` : ""}
-                </Text>
-              ) : null}
-            </>
-          )}
+            ) : null}
+          </View>
 
-          <View style={{ height: 18 }} />
+          <View
+            style={{
+              marginTop: 10,
+              borderWidth: 1,
+              borderColor: "#dbeafe",
+              borderRadius: 14,
+              padding: 10,
+              backgroundColor: "#f8fafc",
+            }}
+          >
+            <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.4, color: "#475569" }}>
+              FEEDBACK SUMMARY
+            </Text>
+            <Text style={{ marginTop: 6, fontSize: 13, fontWeight: "700", color: "#0f172a" }}>
+              Prescribed: {prescribedLabel || "Not set"}
+            </Text>
+            <Text style={{ marginTop: 2, fontSize: 13, color: "#334155" }}>
+              Completed: {completedSummary}
+            </Text>
+            <View style={{ marginTop: 6 }}>
+              <InlineSaveStatus status={submitStatus} message={submitError} size="md" />
+            </View>
+          </View>
 
-          <Text style={{ fontWeight: "600" }}>Distance Completed ({distanceUnitLabel(distanceUnit).toUpperCase()})</Text>
+          <View
+            style={{
+              marginTop: 10,
+              borderWidth: 1,
+              borderColor: "#e2e8f0",
+              borderRadius: 16,
+              backgroundColor: "#ffffff",
+              padding: 12,
+            }}
+          >
+          <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.6, color: "#64748b" }}>YOUR FEEDBACK</Text>
+          <Text style={{ marginTop: 6, fontWeight: "700", color: "#0f172a" }}>Distance Completed ({distanceUnitLabel(distanceUnit).toUpperCase()})</Text>
           <TextInput
             ref={distanceRef}
             inputAccessoryViewID={Platform.OS === "ios" ? IOS_ACCESSORY_ID : undefined}
@@ -477,16 +516,16 @@ export default function AthleteWorkoutDetail() {
             placeholder="e.g. 6.25"
             style={{
               borderWidth: 1,
-              borderColor: "#ccc",
+              borderColor: "#cbd5e1",
               padding: 10,
-              borderRadius: 8,
-              marginTop: 6,
-              marginBottom: 14,
+              borderRadius: 10,
+              marginTop: 5,
+              marginBottom: 10,
               backgroundColor: "white",
             }}
           />
 
-          <Text style={{ fontWeight: "600" }}>Time Completed</Text>
+          <Text style={{ fontWeight: "700", color: "#0f172a" }}>Time Completed</Text>
           <TextInput
             ref={timeRef}
             inputAccessoryViewID={Platform.OS === "ios" ? IOS_ACCESSORY_ID : undefined}
@@ -495,16 +534,16 @@ export default function AthleteWorkoutDetail() {
             placeholder="e.g. 42:30"
             style={{
               borderWidth: 1,
-              borderColor: "#ccc",
+              borderColor: "#cbd5e1",
               padding: 10,
-              borderRadius: 8,
-              marginTop: 6,
-              marginBottom: 14,
+              borderRadius: 10,
+              marginTop: 5,
+              marginBottom: 10,
               backgroundColor: "white",
             }}
           />
 
-          <Text style={{ fontWeight: "600" }}>Workout Splits / Pace</Text>
+          <Text style={{ fontWeight: "700", color: "#0f172a" }}>Workout Splits / Pace</Text>
           <TextInput
             ref={splitsRef}
             inputAccessoryViewID={Platform.OS === "ios" ? IOS_ACCESSORY_ID : undefined}
@@ -514,18 +553,18 @@ export default function AthleteWorkoutDetail() {
             placeholder="Example: 5x1k @ 3:04, 3:03, 3:02, 3:03, 3:01"
             style={{
               borderWidth: 1,
-              borderColor: "#ccc",
+              borderColor: "#cbd5e1",
               padding: 10,
-              borderRadius: 8,
-              minHeight: 100,
-              marginTop: 6,
-              marginBottom: 14,
+              borderRadius: 10,
+              minHeight: 88,
+              marginTop: 5,
+              marginBottom: 10,
               textAlignVertical: "top",
               backgroundColor: "white",
             }}
           />
 
-          <Text style={{ fontWeight: "600" }}>Additional Feedback</Text>
+          <Text style={{ fontWeight: "700", color: "#0f172a" }}>Additional Feedback</Text>
           <TextInput
             ref={feedbackRef}
             inputAccessoryViewID={Platform.OS === "ios" ? IOS_ACCESSORY_ID : undefined}
@@ -535,12 +574,12 @@ export default function AthleteWorkoutDetail() {
             placeholder="How did it feel? Anything your coach should know?"
             style={{
               borderWidth: 1,
-              borderColor: "#ccc",
+              borderColor: "#cbd5e1",
               padding: 10,
-              borderRadius: 8,
-              minHeight: 120,
-              marginTop: 6,
-              marginBottom: 18,
+              borderRadius: 10,
+              minHeight: 104,
+              marginTop: 5,
+              marginBottom: 10,
               textAlignVertical: "top",
               backgroundColor: "white",
             }}
@@ -553,34 +592,15 @@ export default function AthleteWorkoutDetail() {
             }}
             disabled={submitStatus === "saving"}
             style={{
-              backgroundColor: "black",
-              padding: 14,
+              backgroundColor: "#0f172a",
+              paddingVertical: 13,
               borderRadius: 12,
               alignItems: "center",
               opacity: submitStatus === "saving" ? 0.7 : 1,
             }}
           >
-            <Text style={{ color: "white", fontWeight: "700" }}>Submit Feedback</Text>
+            <Text style={{ color: "white", fontWeight: "800", fontSize: 16 }}>Submit Feedback</Text>
           </Pressable>
-          <View
-            style={{
-              marginTop: 12,
-              borderWidth: 1,
-              borderColor: "#e2e8f0",
-              borderRadius: 10,
-              padding: 10,
-              backgroundColor: "#f8fafc",
-            }}
-          >
-            <Text style={{ fontSize: 12, fontWeight: "700", color: "#0f172a" }}>
-              Prescribed: {prescribedLabel || "Not set"}
-            </Text>
-            <Text style={{ marginTop: 2, fontSize: 12, color: "#334155" }}>
-              Completed: {completedSummary}
-            </Text>
-            <View style={{ marginTop: 8 }}>
-              <InlineSaveStatus status={submitStatus} message={submitError} size="md" />
-            </View>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>

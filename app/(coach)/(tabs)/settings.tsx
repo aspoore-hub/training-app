@@ -1092,7 +1092,7 @@ export default function CoachSettingsTab() {
 
         <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}> 
           <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setWorkoutTypesOpen((prev) => !prev)}>
-            <Text style={styles.cardTitle}>Workout Types</Text>
+            <Text style={styles.cardTitle}>Workout Categories</Text>
             <View style={styles.chevronTapTarget}>
               <Text style={styles.chev}>{workoutTypesOpen ? "▾" : "▸"}</Text>
             </View>
@@ -1112,7 +1112,7 @@ export default function CoachSettingsTab() {
                 }}
               >
                 <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled">
-                  <CategoriesContent useVirtualizedList={false} />
+                  <CategoriesContent useVirtualizedList />
                 </ScrollView>
               </View>
             </View>

@@ -6,6 +6,8 @@ import {
   Text,
   View,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { MaterialIcons } from "@expo/vector-icons";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
@@ -15,24 +17,22 @@ import Animated, {
   withTiming,
   runOnJS,
 } from "react-native-reanimated";
-import { loadJSON } from "../../lib/storage";
+import { loadJSON, saveJSON } from "../../lib/storage";
 import { getCurrentTeamId, getMyClaimedAthleteProfileId, getTeamAthlete } from "../../lib/team";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../lib/pace";
-import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../lib/units";
 import { loadAthletePaceOverrides, resolveAthletePaceSeconds, type AthletePaceOverrides } from "../../lib/athletePace";
 import type { AthleteWorkout, MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
 import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../lib/categories";
-import { getWeekStartISO, getWeekIndex, sumMileage, formatSum, parseMileageInput, parseISODate, toISODate, formatMileage } from "../../lib/mileagePlan";
+import { getWeekStartISO, getWeekIndex, parseMileageInput, parseISODate, toISODate, formatMileage, sumMileage } from "../../lib/mileagePlan";
 import { loadMileageFeedback, type MileageSessionFeedback } from "../../lib/mileageFeedback";
 import { loadFeedbackFlagSettings, type FeedbackWarningMode } from "../../lib/feedbackFlags";
 import { listAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
 import { teamDataStore } from "../../lib/teamDataStore";
 import { loadWeekStartSetting } from "../../lib/settings";
-import { PrevNextNavButtons } from "../../components/shared/PrevNextNavButtons";
 import { SegmentedViewToggle } from "../../components/shared/SegmentedViewToggle";
-import { SectionEmptyText, SectionLabel } from "../../components/shared/PlannedRecordedPrimitives";
 
 const SELECTED_KEY = "training_app_selected_athlete_v1";
+const ATHLETE_MONTH_UI_STATE_KEY = "training_app_athlete_month_ui_state_v1";
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const SCREEN_W = SCREEN_WIDTH;
@@ -43,12 +43,21 @@ type MonthCell = {
   inMonth: boolean;
 };
 
+type AthleteMonthUiState = {
+  anchorMonthISO?: string;
+  selectedDateISO?: string;
+};
+
 function monthStart(date: Date) {
   return new Date(date.getFullYear(), date.getMonth(), 1);
 }
 
 function addMonths(date: Date, amount: number) {
   return new Date(date.getFullYear(), date.getMonth() + amount, 1);
+}
+
+function isISODateOnly(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value ?? "").trim());
 }
 
 function addDaysISO(dateISO: string, days: number) {
@@ -91,13 +100,20 @@ function isDateWithinWarningWindow(
   return dateISO >= start && dateISO < todayISO;
 }
 
+
+function toMileageValue(raw: unknown): MileageValue | undefined {
+  if (!raw) return undefined;
+  if (typeof raw === "string") return parseMileageInput(raw);
+  if (typeof raw === "number") return { kind: "exact", value: raw };
+  if (typeof raw === "object") return raw as MileageValue;
+  return undefined;
+}
+
 function workoutCategoryNames(w: AthleteWorkout): string[] {
   const arr = Array.isArray((w as any)?.categories)
     ? (w as any).categories
     : [(w as any)?.category ?? (w as any)?.categoryName ?? "Other"];
-  const cleaned = arr
-    .map((x: any) => String(x ?? "").trim())
-    .filter(Boolean);
+  const cleaned = arr.map((x: any) => String(x ?? "").trim()).filter(Boolean);
   return cleaned.length > 0 ? cleaned : ["Other"];
 }
 
@@ -120,8 +136,7 @@ function xtRangeForValue(v: MileageValue | undefined): SecRange {
 
   if (kind === "time") {
     const sec = Number((v as any).seconds ?? 0);
-    if (!Number.isFinite(sec)) return { min: 0, max: 0 };
-    return { min: sec, max: sec };
+    return Number.isFinite(sec) ? { min: sec, max: sec } : { min: 0, max: 0 };
   }
   if (kind === "timeRange") {
     const a = Number((v as any).minSeconds ?? 0);
@@ -132,65 +147,42 @@ function xtRangeForValue(v: MileageValue | undefined): SecRange {
   return { min: 0, max: 0 };
 }
 
-function toMileageValue(raw: unknown): MileageValue | undefined {
-  if (!raw) return undefined;
-  if (typeof raw === "string") return parseMileageInput(raw);
-  if (typeof raw === "number") return { kind: "exact", value: raw };
-  if (typeof raw === "object") return raw as MileageValue;
-  return undefined;
+function formatRoundedRange(min: number, max: number): string {
+  const a = Math.round(min);
+  const b = Math.round(max);
+  if (a === 0 && b === 0) return "";
+  if (a === b) return String(a);
+  return `${a}-${b}`;
 }
 
-function formatXTRangeLabel(sec: SecRange): string {
-  const fmt = (s: number) => {
-    const totalMin = Math.round(s / 60);
-    const h = Math.floor(totalMin / 60);
-    const m = totalMin % 60;
-    if (h <= 0) return `${m}min`;
-    return `${h}hr ${m}min`;
-  };
-
-  if (!sec || (sec.min === 0 && sec.max === 0)) return "";
-  if (sec.min === sec.max) return `${fmt(sec.min)} Cross training`;
-  return `${fmt(sec.min)} to ${fmt(sec.max)} Cross training`;
-}
-
-function isXTValue(v: MileageValue | undefined): boolean {
+function hasSessionAssignment(v: MileageValue | undefined): boolean {
   if (!v || typeof v !== "object") return false;
   const kind = (v as any).kind;
-  if (kind === "choice") {
-    const options = Array.isArray((v as any).options) ? (v as any).options : [];
-    if (options.length !== 2) return false;
-    return isXTValue(options[0]) || isXTValue(options[1]);
-  }
-  return (kind === "time" || kind === "timeRange") && !!(v as any).xt;
-}
 
-function containsTimeValue(v: MileageValue | undefined): boolean {
-  if (!v || typeof v !== "object") return false;
-  const kind = (v as any).kind;
-  if (kind === "time" || kind === "timeRange") return true;
   if (kind === "choice") {
     const options = Array.isArray((v as any).options) ? (v as any).options : [];
-    return options.some((option: MileageValue) => containsTimeValue(option));
+    return options.some((option: MileageValue) => hasSessionAssignment(option));
   }
+
+  if (kind === "exact") return Number((v as any).value) > 0;
+  if (kind === "range") {
+    const min = Number((v as any).min) || 0;
+    const max = Number((v as any).max) || 0;
+    return min > 0 || max > 0;
+  }
+
+  if (kind === "time") {
+    const sec = Number((v as any).seconds) || 0;
+    return sec > 0;
+  }
+  if (kind === "timeRange") {
+    const min = Number((v as any).minSeconds) || 0;
+    const max = Number((v as any).maxSeconds) || 0;
+    return min > 0 || max > 0;
+  }
+
+  // Unknown/empty payloads are treated as no assignment.
   return false;
-}
-
-function formatMilesOnly(v: MileageValue | undefined, paceSecPerMile: number) {
-  if (!v || isXTValue(v)) return "";
-  const miles = sumMileage([v], paceSecPerMile);
-  if (miles.min === 0 && miles.max === 0) return "";
-
-  // Monthly cells are compact summaries. If time was converted to decimal miles,
-  // round to whole miles for a cleaner display.
-  if (containsTimeValue(v)) {
-    const a = Math.round(miles.min);
-    const b = Math.round(miles.max);
-    if (a === b) return String(a);
-    return `${a}-${b}`;
-  }
-
-  return formatSum(miles);
 }
 
 function buildMonthGrid(anchor: Date, weekStartsOn: WeekStartDay): MonthCell[] {
@@ -257,13 +249,14 @@ export default function AthleteMonthCalendar() {
   const [allWorkouts, setAllWorkouts] = useState<AthleteWorkout[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [anchorMonth, setAnchorMonth] = useState(() => monthStart(new Date()));
+  const [selectedDateISO, setSelectedDateISO] = useState<string>(toISODate(new Date()));
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
-  const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [athletePaceOverrides, setAthletePaceOverrides] = useState<AthletePaceOverrides>({});
   const [mileageFeedbackEntries, setMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
   const [feedbackFlagsEnabled, setFeedbackFlagsEnabled] = useState(false);
   const [feedbackWarningMode, setFeedbackWarningMode] = useState<FeedbackWarningMode>("all");
   const [feedbackStartDateISO, setFeedbackStartDateISO] = useState<string | undefined>(undefined);
+  const [monthUiHydrated, setMonthUiHydrated] = useState(false);
 
   const loadMonthWeekStartFromShared = useCallback(async () => {
     const weekStartResult = await loadWeekStartSetting();
@@ -282,7 +275,6 @@ export default function AthleteMonthCalendar() {
       selected,
       storedCategories,
       pace,
-      unit,
       paceOverrides,
       feedbackEntries,
       flagSettings,
@@ -290,7 +282,6 @@ export default function AthleteMonthCalendar() {
       loadJSON<string | null>(SELECTED_KEY, null),
       loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       loadPaceSecondsPerMile(),
-      loadDistanceUnit(),
       loadAthletePaceOverrides(),
       loadMileageFeedback(),
       loadFeedbackFlagSettings(),
@@ -317,7 +308,6 @@ export default function AthleteMonthCalendar() {
 
     setCategories(normalizeCategories(storedCategories));
     setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
-    setDistanceUnit(unit);
     setAthletePaceOverrides(paceOverrides ?? {});
     setMileageFeedbackEntries(feedbackEntries ?? []);
     setFeedbackFlagsEnabled(!!flagSettings.enabled);
@@ -349,6 +339,38 @@ export default function AthleteMonthCalendar() {
       loadMonthData();
     }, [loadMonthData])
   );
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const saved = await loadJSON<AthleteMonthUiState>(ATHLETE_MONTH_UI_STATE_KEY, {});
+      if (!mounted) return;
+      const savedAnchor = String(saved?.anchorMonthISO ?? "").trim();
+      const savedSelected = String(saved?.selectedDateISO ?? "").trim();
+
+      if (isISODateOnly(savedAnchor)) {
+        const parsed = parseISODate(savedAnchor);
+        if (!Number.isNaN(parsed.getTime())) setAnchorMonth(monthStart(parsed));
+      }
+      if (isISODateOnly(savedSelected)) setSelectedDateISO(savedSelected);
+      setMonthUiHydrated(true);
+    })().catch(() => {
+      if (mounted) setMonthUiHydrated(true);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!monthUiHydrated) return;
+    const anchorMonthISO = toISODate(monthStart(anchorMonth));
+    const selectedISO = String(selectedDateISO ?? "").trim();
+    void saveJSON<AthleteMonthUiState>(ATHLETE_MONTH_UI_STATE_KEY, {
+      anchorMonthISO,
+      selectedDateISO: isISODateOnly(selectedISO) ? selectedISO : undefined,
+    });
+  }, [anchorMonth, monthUiHydrated, selectedDateISO]);
 
   const monthCells = useMemo(() => buildMonthGrid(anchorMonth, weekStartsOn), [anchorMonth, weekStartsOn]);
   const monthRows = useMemo(() => {
@@ -463,64 +485,76 @@ export default function AthleteMonthCalendar() {
     [selectedAthleteId, athletePaceOverrides, paceSecPerMile]
   );
 
-  const thisWeekGoal = useMemo(() => {
-    if (!selectedAthleteId) {
-      return { miles: "", xt: "" };
-    }
-
-    const currentWeekStart = getWeekStartISO(todayISO, weekStartsOn);
-    const values: Array<MileageValue | undefined> = [];
-    for (let i = 0; i < 7; i++) {
-      const day = visibleDayPlanByDate.get(addDaysISO(currentWeekStart, i));
-      values.push(day?.am);
-      values.push(day?.pm);
-    }
-
-    const milesSum = sumMileage(values, effectivePaceSecPerMile);
-    const roundedMin = Math.round(milesSum.min);
-    const roundedMax = Math.round(milesSum.max);
-    const milesLabel =
-      roundedMin === 0 && roundedMax === 0
-        ? ""
-        : roundedMin === roundedMax
-        ? `${roundedMin} ${distanceUnitLabel(distanceUnit)}`
-        : `${roundedMin}-${roundedMax} ${distanceUnitLabel(distanceUnit)}`;
-
-    let xt: SecRange = { min: 0, max: 0 };
-    for (const v of values) {
-      const next = xtRangeForValue(v);
-      xt = { min: xt.min + next.min, max: xt.max + next.max };
-    }
-    const xtLabel = formatXTRangeLabel(xt);
-
-    return { miles: milesLabel, xt: xtLabel };
-  }, [distanceUnit, effectivePaceSecPerMile, selectedAthleteId, todayISO, visibleDayPlanByDate, weekStartsOn]);
-  const compactGoalLine = useMemo(() => {
-    const miles = thisWeekGoal.miles || "No distance goal";
-    const xt = thisWeekGoal.xt ? thisWeekGoal.xt.replace(" Cross training", " XT") : "";
-    return xt ? `${miles} • ${xt}` : miles;
-  }, [thisWeekGoal]);
-
   const workoutDotColorsByDate = useMemo(() => {
     const map = new Map<string, string[]>();
-
     for (const w of allWorkouts) {
       const dateISO = String((w as any)?.dateISO ?? (w as any)?.date ?? "");
       if (!dateISO) continue;
-
       const wAthleteId = String((w as any)?.athleteId ?? "").trim();
       if (!selectedAthleteId || wAthleteId !== selectedAthleteId) continue;
 
       const existing = map.get(dateISO) ?? [];
       for (const categoryName of workoutCategoryNames(w)) {
+        const normalized = String(categoryName ?? "").trim().toLowerCase();
+        // Off-category days use cell highlight instead of an Off dot.
+        if (normalized === "off" || normalized === "off / rest" || normalized === "rest") continue;
         const color = categoryColorByName(categories, categoryName);
         if (!existing.includes(color)) existing.push(color);
       }
       map.set(dateISO, existing);
     }
-
     return map;
   }, [allWorkouts, categories, selectedAthleteId]);
+
+  const dayTotalsByDate = useMemo(() => {
+    const map = new Map<string, { distanceLabel: string; xtLabel: string }>();
+    for (const cell of monthCells) {
+      const day = visibleDayPlanByDate.get(cell.dateISO);
+      const am = day?.am;
+      const pm = day?.pm;
+
+      const milesSum = sumMileage([am, pm], effectivePaceSecPerMile);
+      const distanceLabel = formatRoundedRange(milesSum.min, milesSum.max);
+
+      const amXt = xtRangeForValue(am);
+      const pmXt = xtRangeForValue(pm);
+      const xtMin = (amXt.min + pmXt.min) / 60;
+      const xtMax = (amXt.max + pmXt.max) / 60;
+      const xtCore = formatRoundedRange(xtMin, xtMax);
+      const xtLabel = xtCore;
+
+      map.set(cell.dateISO, { distanceLabel, xtLabel });
+    }
+    return map;
+  }, [monthCells, visibleDayPlanByDate, effectivePaceSecPerMile]);
+
+  const workoutCountByDate = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const w of allWorkouts) {
+      const dateISO = String((w as any)?.dateISO ?? (w as any)?.date ?? "");
+      if (!dateISO) continue;
+      const wAthleteId = String((w as any)?.athleteId ?? "").trim();
+      if (!selectedAthleteId || wAthleteId !== selectedAthleteId) continue;
+      map.set(dateISO, (map.get(dateISO) ?? 0) + 1);
+    }
+    return map;
+  }, [allWorkouts, selectedAthleteId]);
+
+  const offWorkoutDates = useMemo(() => {
+    const dates = new Set<string>();
+    for (const workout of allWorkouts) {
+      const dateISO = String((workout as any)?.dateISO ?? "");
+      if (!dateISO) continue;
+      const workoutAthleteId = String((workout as any)?.athleteId ?? "").trim();
+      if (!selectedAthleteId || workoutAthleteId !== selectedAthleteId) continue;
+
+      const names = workoutCategoryNames(workout).map((name) => String(name ?? "").trim().toLowerCase());
+      if (names.some((name) => name === "off" || name === "off / rest" || name === "rest")) {
+        dates.add(dateISO);
+      }
+    }
+    return dates;
+  }, [allWorkouts, selectedAthleteId]);
 
   const missingFeedbackByDate = useMemo(() => {
     if (!feedbackFlagsEnabled || !selectedAthleteId) return new Set<string>();
@@ -637,18 +671,14 @@ export default function AthleteMonthCalendar() {
         ]}
       />
 
-      <View style={[styles.headerRow, { position: "relative", minHeight: 40 }]}>
-        <View style={{ position: "absolute", left: 0, right: 0, top: 0 }}>
-          <PrevNextNavButtons onPrev={() => commitSwipe("prev")} onNext={() => commitSwipe("next")} spread />
-        </View>
-
-        <View style={styles.monthCenter}>
-          <Text style={styles.monthLabel}>{monthLabel}</Text>
-          <View style={styles.compactGoalBadge}>
-            <Text style={styles.compactGoalLabel}>This week</Text>
-            <Text numberOfLines={1} style={styles.compactGoalValue}>{compactGoalLine}</Text>
-          </View>
-        </View>
+      <View style={styles.headerRow}>
+        <Pressable onPress={() => commitSwipe("prev")} style={styles.monthNavButton}>
+          <Text style={styles.monthNavButtonText}>◀</Text>
+        </Pressable>
+        <Text style={styles.monthLabel}>{monthLabel}</Text>
+        <Pressable onPress={() => commitSwipe("next")} style={styles.monthNavButton}>
+          <Text style={styles.monthNavButtonText}>▶</Text>
+        </Pressable>
       </View>
 
       {!selectedAthleteId ? (
@@ -673,14 +703,10 @@ export default function AthleteMonthCalendar() {
           </View>
         ))}
       </View>
-      <View style={styles.signalLegend}>
-        <Text style={styles.signalLegendLabel}>Planned:</Text>
-        <Text style={styles.signalLegendValue}>AM/PM targets</Text>
-        <Text style={styles.signalLegendDivider}>•</Text>
-        <Text style={styles.signalLegendLabel}>Recorded:</Text>
-        <Text style={styles.signalLegendValue}>workout dots</Text>
-        <Text style={styles.signalLegendDivider}>•</Text>
-        <Text style={styles.signalLegendValue}>! feedback needed</Text>
+      <Text style={styles.browseHint}>Tap any day to open the daily view</Text>
+      <View style={styles.xtLegendRow}>
+        <Ionicons name="bicycle-outline" size={12} color="#6b7280" />
+        <Text style={styles.xtLegendText}>Cross-training minutes</Text>
       </View>
 
       <GestureDetector gesture={pan}>
@@ -695,41 +721,37 @@ export default function AthleteMonthCalendar() {
                         // Monthly-only compact display:
                         // - XT session => "XT"
                         // - Otherwise show miles only (time converted via coach pace)
-                        let amText = "";
-                        let pmText = "";
-                        let isNCAAOffDay = false;
-                        if (selectedAthleteId) {
-                          const day = visibleDayPlanByDate.get(iso);
-                          const amValue = day?.am;
-                          const pmValue = day?.pm;
-                          isNCAAOffDay = !!day?.ncaaOff;
-                          amText = isXTValue(amValue) ? "XT" : formatMilesOnly(amValue, effectivePaceSecPerMile);
-                          pmText = isXTValue(pmValue) ? "XT" : formatMilesOnly(pmValue, effectivePaceSecPerMile);
-                        }
-
-                        const hasAm = !!amText;
-                        const hasPm = !!pmText;
-                        const hasPlanForDay = hasAm || hasPm;
-                        const singleAmount = amText || pmText;
-                        const recordedDots = workoutDotColorsByDate.get(iso) ?? [];
-                        const hasRecordedWork = recordedDots.length > 0;
                         const needsFeedback = missingFeedbackByDate.has(iso);
+                        const isToday = iso === todayISO;
+                        const isOffWorkoutDay = offWorkoutDates.has(iso);
+                        const hasMeaningfulSignal = needsFeedback;
+                        const recordedDots = workoutDotColorsByDate.get(iso) ?? [];
+                        const day = visibleDayPlanByDate.get(iso);
+                        const hasAMAssigned = hasSessionAssignment(day?.am);
+                        const hasPMAssigned = hasSessionAssignment(day?.pm);
+                        const assignedSessionCount = (hasAMAssigned ? 1 : 0) + (hasPMAssigned ? 1 : 0);
+                        const totals = dayTotalsByDate.get(iso);
+                        const distanceLabel = String(totals?.distanceLabel ?? "");
+                        const xtLabel = String(totals?.xtLabel ?? "");
+                        const signalStyle = styles.signalFeedback;
 
                         return (
                           <Pressable
                             key={cell.dateISO}
-                            onPress={() =>
+                            onPress={() => {
+                              setSelectedDateISO(iso);
                               router.push({
                                 pathname: "/(athlete)/day",
                                 params: { date: iso },
-                              })
-                            }
+                              });
+                            }}
                             style={({ pressed }) => [
                               styles.cell,
                               cellIndex < 6 && styles.cellGapRight,
-                              isNCAAOffDay ? styles.ncaaOffCell : (hasPlanForDay ? styles.plannedCell : styles.emptyCell),
+                              styles.emptyCell,
+                              isOffWorkoutDay && styles.offDayCell,
                               !cell.inMonth && styles.dayCellOutsideMonth,
-                              iso === todayISO && styles.todayCell,
+                              isToday && styles.todayCell,
                               pressed && styles.cellPressed,
                             ]}
                           >
@@ -737,44 +759,35 @@ export default function AthleteMonthCalendar() {
                               <Text style={[styles.dayNumber, !cell.inMonth && styles.dayNumberOutsideMonth]}>
                                 {cell.dayNumber}
                               </Text>
-                              {missingFeedbackByDate.has(iso) ? (
-                                <View style={styles.missingFeedbackBadge}>
-                                  <Text style={styles.missingFeedbackBadgeText}>!</Text>
+                              {assignedSessionCount > 0 ? (
+                                <View style={styles.sessionCountBadge}>
+                                  <Text style={styles.sessionCountText}>{assignedSessionCount}</Text>
                                 </View>
                               ) : null}
                             </View>
 
-                            <SectionLabel compact>Planned</SectionLabel>
-                            {hasAm && hasPm ? (
-                              <View style={styles.planRows}>
-                                <Text style={styles.planText}>AM {amText}</Text>
-                                <Text style={styles.planText}>PM {pmText}</Text>
+                            <View style={styles.cellSignalRow}>
+                              {hasMeaningfulSignal ? <View style={[styles.activityDot, signalStyle]} /> : null}
+                              {recordedDots.length > 0 ? (
+                                <View style={styles.dotRow}>
+                                  {recordedDots.map((color, i) => (
+                                    <View key={`${iso}-dot-${i}-${color}`} style={[styles.workoutDot, { backgroundColor: color }]} />
+                                  ))}
+                                </View>
+                              ) : null}
+                            </View>
+                            {distanceLabel ? (
+                              <View style={styles.distanceInlineRow}>
+                                <MaterialIcons name="directions-run" size={10} color="#6b7280" />
+                                <Text style={styles.totalLabel}>{distanceLabel}</Text>
                               </View>
-                            ) : singleAmount ? (
-                              <Text style={styles.singlePlanText}>{singleAmount}</Text>
-                            ) : (
-                              <SectionEmptyText compact>None</SectionEmptyText>
-                            )}
-
-                            {isNCAAOffDay ? (
-                              <Text style={styles.offDayTag}>NCAA Off</Text>
                             ) : null}
-
-                            <SectionLabel compact>Recorded</SectionLabel>
-                            {hasRecordedWork ? (
-                              <View style={styles.dotRow}>
-                                {recordedDots.slice(0, 3).map((color, i) => (
-                                  <View key={`${iso}-dot-${i}-${color}`} style={[styles.workoutDot, { backgroundColor: color }]} />
-                                ))}
-                                {recordedDots.length > 3 ? (
-                                  <Text style={styles.moreDotsText}>+{recordedDots.length - 3}</Text>
-                                ) : null}
+                            {xtLabel ? (
+                              <View style={styles.xtInlineRow}>
+                                <Ionicons name="bicycle-outline" size={11} color="#6b7280" />
+                                <Text style={styles.xtInlineText}>{xtLabel}</Text>
                               </View>
-                            ) : needsFeedback ? (
-                              <Text style={styles.recordedAlertText}>Feedback needed</Text>
-                            ) : (
-                              <SectionEmptyText compact>None</SectionEmptyText>
-                            )}
+                            ) : null}
                           </Pressable>
                         );
                       })}
@@ -802,7 +815,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 8,
+    marginBottom: 10,
   },
   monthNavButton: {
     width: 40,
@@ -821,34 +834,9 @@ const styles = StyleSheet.create({
   },
   monthLabel: {
     fontSize: 20,
-    fontWeight: "700",
-    color: "#111",
-  },
-  monthCenter: {
-    alignItems: "center",
-    maxWidth: "72%",
-  },
-  compactGoalBadge: {
-    marginTop: 4,
-    borderWidth: 1,
-    borderColor: "#cfe3ff",
-    backgroundColor: "#eef6ff",
-    borderRadius: 999,
-    paddingVertical: 3,
-    paddingHorizontal: 10,
-    alignItems: "center",
-    maxWidth: "100%",
-  },
-  compactGoalLabel: {
-    fontSize: 10,
     fontWeight: "800",
-    color: "#3b5b8a",
-  },
-  compactGoalValue: {
-    marginTop: 1,
-    fontSize: 11,
-    fontWeight: "900",
-    color: "#17365d",
+    color: "#111",
+    textAlign: "center",
   },
   subtitle: {
     color: "#5a5a5a",
@@ -938,38 +926,34 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#ececec",
     borderRadius: 14,
-    padding: 8,
+    padding: 1,
     backgroundColor: "#fafafa",
   },
   grid: {
   },
   weekRow: {
     flexDirection: "row",
-    marginBottom: 6,
+    marginBottom: 1,
     alignItems: "stretch",
   },
   cell: {
     flex: 1,
-    minHeight: 72,
-    borderRadius: 10,
-    paddingHorizontal: 5,
+    minHeight: 62,
+    borderRadius: 12,
+    paddingHorizontal: 6,
     paddingVertical: 6,
     borderWidth: 1,
   },
   cellGapRight: {
-    marginRight: 6,
+    marginRight: 1,
   },
   emptyCell: {
     borderColor: "#efefef",
     backgroundColor: "#fff",
   },
-  plannedCell: {
-    borderColor: "#f5d9a6",
-    backgroundColor: "#fff8ec",
-  },
-  ncaaOffCell: {
-    borderColor: "#b8d8ff",
-    backgroundColor: "#eaf4ff",
+  offDayCell: {
+    borderColor: "#e5e7eb",
+    backgroundColor: "#f3f4f6",
   },
   dayCellOutsideMonth: {
     opacity: 0.45,
@@ -991,69 +975,104 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    width: "100%",
   },
-  missingFeedbackBadge: {
+  sessionCountBadge: {
     width: 14,
     height: 14,
     borderRadius: 7,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#f8fafc",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#d62828",
   },
-  missingFeedbackBadgeText: {
-    color: "white",
-    fontSize: 10,
+  sessionCountText: {
+    fontSize: 9,
+    lineHeight: 10,
     fontWeight: "900",
-    lineHeight: 12,
+    color: "#475569",
   },
   dayNumberOutsideMonth: {
     color: "#7a7a7a",
   },
-  planRows: {
-    marginTop: 6,
-    gap: 2,
-  },
-  planText: {
-    fontSize: 10,
-    fontWeight: "800",
-    color: "#222",
-  },
-  singlePlanText: {
-    marginTop: 8,
+  browseHint: {
+    textAlign: "center",
     fontSize: 11,
-    fontWeight: "800",
-    color: "#222",
+    fontWeight: "700",
+    color: "#64748b",
+    marginBottom: 4,
   },
-  offDayTag: {
-    marginTop: 4,
+  xtLegendRow: {
+    marginBottom: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+  },
+  xtLegendText: {
     fontSize: 10,
-    fontWeight: "900",
-    color: "#0a5eb7",
+    color: "#6b7280",
+    fontWeight: "700",
+  },
+  cellSignalRow: {
+    marginTop: 7,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
   },
   dotRow: {
     flexDirection: "row",
     alignItems: "center",
-    marginTop: 6,
-    gap: 4,
+    gap: 3,
+    flexWrap: "wrap",
   },
-  workoutDot: {
+  activityDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
+  },
+  signalFeedback: {
+    backgroundColor: "#d62828",
+  },
+  workoutDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
     borderWidth: 0.5,
-    borderColor: "rgba(0,0,0,0.2)",
+    borderColor: "rgba(0,0,0,0.18)",
+  },
+  totalLabel: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: "800",
+    color: "#334155",
+  },
+  distanceInlineRow: {
+    marginTop: 5,
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 1,
+  },
+  xtInlineRow: {
+    marginTop: 2,
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 0,
+  },
+  xtInlineText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: "700",
+    color: "#4b5563",
   },
   moreDotsText: {
     fontSize: 9,
     fontWeight: "800",
     color: "#666",
     marginLeft: 2,
-  },
-  recordedAlertText: {
-    marginTop: 4,
-    fontSize: 9,
-    fontWeight: "800",
-    color: "#b91c1c",
   },
   listButton: {
     marginTop: 14,
