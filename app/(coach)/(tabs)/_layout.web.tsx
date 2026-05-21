@@ -41,6 +41,15 @@ export default function CoachTabs() {
         }}
       />
       <Tabs.Screen
+        name="training-logs"
+        options={{
+          title: "Training Logs",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="document-text-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="mileage"
         options={{
           title: "Mileage",

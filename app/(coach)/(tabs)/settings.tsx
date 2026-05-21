@@ -15,11 +15,11 @@ import {
 } from "../../../lib/units";
 import { getSortableRoster, type TeamRosterAthlete } from "../../../lib/teamRoster";
 import {
-  createGroupId,
-  loadCustomAthleteGroups,
-  saveCustomAthleteGroups,
-  type CustomAthleteGroup,
-} from "../../../lib/customGroups";
+  isActiveTrainingGroupMembership,
+  teamDataStore,
+  type TeamSeason,
+  type TeamTrainingGroup,
+} from "../../../lib/teamDataStore";
 import {
   loadAthletePaceOverrides,
   saveAthletePaceOverrides,
@@ -84,6 +84,24 @@ function round2(n: number) {
   return Math.round(n * 100) / 100;
 }
 
+function getErrorMessage(error: unknown): string {
+  if (!error) return "Unknown error";
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object") {
+    const anyError = error as any;
+    return (
+      anyError.message ||
+      anyError.error_description ||
+      anyError.details ||
+      anyError.hint ||
+      anyError.code ||
+      JSON.stringify(error)
+    );
+  }
+  return String(error);
+}
+
 function convertWorkoutDistances(rawWorkouts: any[], from: DistanceUnit, to: DistanceUnit): any[] {
   return (rawWorkouts ?? []).map((w: any) => {
     const next: any = { ...w };
@@ -110,6 +128,7 @@ export default function CoachSettingsTab() {
   const [workoutTypesOpen, setWorkoutTypesOpen] = useState(false);
   const [categoryAutoRoutinesOpen, setCategoryAutoRoutinesOpen] = useState(false);
   const [customGroupsOpen, setCustomGroupsOpen] = useState(false);
+  const [seasonsOpen, setSeasonsOpen] = useState(false);
   const [individualPaceOpen, setIndividualPaceOpen] = useState(false);
   const [practiceDefaultsOpen, setPracticeDefaultsOpen] = useState(false);
   const [weekStartMenuOpen, setWeekStartMenuOpen] = useState(false);
@@ -118,13 +137,23 @@ export default function CoachSettingsTab() {
   const [roster, setRoster] = useState<TeamRosterAthlete[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [auxiliaryRoutines, setAuxiliaryRoutines] = useState<AuxiliaryRoutine[]>([]);
-  const [groups, setGroups] = useState<CustomAthleteGroup[]>([]);
+  const teamStore = teamDataStore.use();
+  const [trainingGroups, setTrainingGroups] = useState<TeamTrainingGroup[]>([]);
+  const [teamSeasons, setTeamSeasons] = useState<TeamSeason[]>([]);
   const [practiceDefaults, setPracticeDefaults] = useState<PracticeTimeDefaults>(emptyPracticeTimeDefaults());
   const [athletePaceOverrides, setAthletePaceOverrides] = useState<AthletePaceOverrides>({});
   const [athletePaceTextById, setAthletePaceTextById] = useState<Record<string, string>>({});
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [groupNameText, setGroupNameText] = useState("");
   const [draftAthleteIds, setDraftAthleteIds] = useState<string[]>([]);
+  const [groupSaveBusy, setGroupSaveBusy] = useState(false);
+  const [groupSaveError, setGroupSaveError] = useState<string | null>(null);
+  const [groupSaveSuccess, setGroupSaveSuccess] = useState<string | null>(null);
+  const [editingSeasonId, setEditingSeasonId] = useState<string | null>(null);
+  const [seasonNameText, setSeasonNameText] = useState("");
+  const [seasonStartDateText, setSeasonStartDateText] = useState("");
+  const [seasonEndDateText, setSeasonEndDateText] = useState("");
+  const [seasonColorText, setSeasonColorText] = useState("");
   const [selectedAuxiliaryRoutineId, setSelectedAuxiliaryRoutineId] = useState<string | null>(null);
   const [auxiliaryTitleDraft, setAuxiliaryTitleDraft] = useState("");
   const [auxiliaryDetailsDraft, setAuxiliaryDetailsDraft] = useState("");
@@ -138,15 +167,19 @@ export default function CoachSettingsTab() {
   const loadSettingsScreenData = useCallback(
     async (isActive?: () => boolean) => {
       try {
-        const [paceSec, coreSettings, loadedRoster, loadedGroups, loadedOverrides, weekStartResult, loadedRoutines, feedbackFlagSettings] = await Promise.all([
+        const [paceSec, coreSettings, loadedRoster, loadedOverrides, weekStartResult, loadedRoutines, feedbackFlagSettings] = await Promise.all([
           loadPaceSecondsPerMile(),
           loadCoreCoachSettings(),
           getSortableRoster(),
-          loadCustomAthleteGroups(),
           loadAthletePaceOverrides(),
           loadWeekStartSetting(),
           loadAuxiliaryRoutines(),
           loadFeedbackFlagSettings(),
+        ]);
+        await Promise.all([
+          teamDataStore.actions.loadTrainingGroups(true),
+          teamDataStore.actions.loadTeamSeasons(true),
+          teamDataStore.actions.loadAthleteSeasonOverrides(true),
         ]);
         const defaults = await loadPracticeTimeDefaults();
         if (isActive && !isActive()) return;
@@ -173,7 +206,8 @@ export default function CoachSettingsTab() {
         setFeedbackFlagsEnabled(!!feedbackFlagSettings.enabled);
         setFeedbackWarningMode(feedbackFlagSettings.mode ?? "all");
         setFeedbackStartDateText(String(feedbackFlagSettings.startDateISO ?? ""));
-        setGroups(loadedGroups);
+        setTrainingGroups(Array.isArray(teamDataStore.getState().trainingGroups) ? teamDataStore.getState().trainingGroups : []);
+        setTeamSeasons(Array.isArray(teamDataStore.getState().teamSeasons) ? teamDataStore.getState().teamSeasons : []);
         setAthletePaceOverrides(loadedOverrides);
         setPracticeDefaults(defaults);
 
@@ -227,9 +261,43 @@ export default function CoachSettingsTab() {
     });
   }, [roster]);
 
+  useEffect(() => {
+    setTrainingGroups(Array.isArray(teamStore.trainingGroups) ? teamStore.trainingGroups : []);
+  }, [teamStore.trainingGroups]);
+
+  useEffect(() => {
+    setTeamSeasons(Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []);
+  }, [teamStore.teamSeasons]);
+
   const sortedGroups = useMemo(() => {
-    return [...groups].sort((a, b) => a.name.localeCompare(b.name));
-  }, [groups]);
+    return [...trainingGroups].sort((a, b) => a.name.localeCompare(b.name));
+  }, [trainingGroups]);
+
+  const sortedSeasons = useMemo(() => {
+    return [...teamSeasons].sort((a, b) => {
+      const aSort = Number.isFinite(a.sort_order as number) ? Number(a.sort_order) : Number.MAX_SAFE_INTEGER;
+      const bSort = Number.isFinite(b.sort_order as number) ? Number(b.sort_order) : Number.MAX_SAFE_INTEGER;
+      if (aSort !== bSort) return aSort - bSort;
+      const byStart = String(a.start_date ?? "").localeCompare(String(b.start_date ?? ""));
+      if (byStart !== 0) return byStart;
+      return String(a.name ?? "").localeCompare(String(b.name ?? ""));
+    });
+  }, [teamSeasons]);
+
+  const overrideCountBySeasonId = useMemo(() => {
+    const bySeason = new Map<string, Set<string>>();
+    (Array.isArray(teamStore.athleteSeasonOverrides) ? teamStore.athleteSeasonOverrides : []).forEach((override) => {
+      const seasonId = String(override?.season_id ?? "").trim();
+      const athleteId = String(override?.athlete_profile_id ?? "").trim();
+      if (!seasonId || !athleteId) return;
+      const set = bySeason.get(seasonId) ?? new Set<string>();
+      set.add(athleteId);
+      bySeason.set(seasonId, set);
+    });
+    const counts = new Map<string, number>();
+    bySeason.forEach((set, seasonId) => counts.set(seasonId, set.size));
+    return counts;
+  }, [teamStore.athleteSeasonOverrides]);
 
   const sortedCategories = useMemo(
     () => [...categories].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
@@ -695,10 +763,20 @@ export default function CoachSettingsTab() {
     );
   }
 
-  function startEditGroup(group: CustomAthleteGroup) {
+  function startEditGroup(group: TeamTrainingGroup) {
     setEditingGroupId(group.id);
     setGroupNameText(group.name);
-    setDraftAthleteIds(group.athleteIds);
+    setGroupSaveError(null);
+    setGroupSaveSuccess(null);
+    const activeMembershipIds = teamStore.trainingGroupMemberships
+      .filter(
+        (row) =>
+          String(row.group_id ?? "").trim() === group.id &&
+          isActiveTrainingGroupMembership(row)
+      )
+      .map((row) => String(row.athlete_profile_id ?? "").trim())
+      .filter(Boolean);
+    setDraftAthleteIds(activeMembershipIds);
     setCustomGroupsOpen(true);
   }
 
@@ -708,49 +786,209 @@ export default function CoachSettingsTab() {
       Alert.alert("Group name required", "Enter a name for this training group.");
       return;
     }
+    if (groupSaveBusy) return;
 
-    if (draftAthleteIds.length === 0) {
-      Alert.alert("No athletes selected", "Select at least one athlete for this group.");
-      return;
+    setGroupSaveBusy(true);
+    setGroupSaveError(null);
+    setGroupSaveSuccess(null);
+    try {
+      const cleanAthleteIds = Array.from(
+        new Set((draftAthleteIds ?? []).map((id) => String(id ?? "").trim()).filter(Boolean))
+      );
+      console.log("[settings][training-groups] save start", {
+        mode: editingGroupId ? "update" : "create",
+        groupId: editingGroupId,
+        groupName: name,
+        selectedAthleteCount: cleanAthleteIds.length,
+        selectedAthleteSample: cleanAthleteIds.slice(0, 10),
+      });
+
+      let targetGroupId = editingGroupId;
+      if (editingGroupId) {
+        console.log("[TrainingGroups] rename start", { groupId: editingGroupId, name });
+        try {
+          const renamed = await teamDataStore.actions.renameTrainingGroup(editingGroupId, name);
+          console.log("[TrainingGroups] rename success", {
+            groupId: renamed?.id,
+            groupName: renamed?.name,
+          });
+        } catch (error) {
+          console.error("[TrainingGroups] rename failed", error);
+          throw new Error(`Update group name failed: ${getErrorMessage(error)}`);
+        }
+      } else {
+        console.log("[TrainingGroups] create start", { name });
+        try {
+          const created = await teamDataStore.actions.createTrainingGroup(name);
+          targetGroupId = String(created?.id ?? "").trim();
+          console.log("[TrainingGroups] create success", {
+            groupId: created?.id,
+            groupName: created?.name,
+          });
+        } catch (error) {
+          console.error("[TrainingGroups] create failed", error);
+          throw new Error(`Create group failed: ${getErrorMessage(error)}`);
+        }
+      }
+
+      if (!targetGroupId) {
+        throw new Error("Could not resolve training group id for membership save.");
+      }
+
+      console.log("[TrainingGroups] replace members start", {
+        groupId: targetGroupId,
+        selectedAthleteCount: cleanAthleteIds.length,
+        selectedAthleteSample: cleanAthleteIds.slice(0, 10),
+      });
+      try {
+        await teamDataStore.actions.replaceTrainingGroupMembers(targetGroupId, cleanAthleteIds);
+        console.log("[TrainingGroups] replace members success", {
+          groupId: targetGroupId,
+          selectedAthleteCount: cleanAthleteIds.length,
+        });
+      } catch (error) {
+        console.error("[TrainingGroups] replace members failed", error);
+        throw new Error(`Update group members failed: ${getErrorMessage(error)}`);
+      }
+
+      console.log("[TrainingGroups] reload groups start");
+      try {
+        await teamDataStore.actions.loadTrainingGroups(true);
+      } catch (error) {
+        console.error("[TrainingGroups] reload groups failed", error);
+        throw new Error(`Reload groups failed: ${getErrorMessage(error)}`);
+      }
+      const latestMembershipCount = teamDataStore
+        .getState()
+        .trainingGroupMemberships.filter(
+          (row) =>
+            String(row.group_id ?? "").trim() === targetGroupId &&
+            isActiveTrainingGroupMembership(row)
+        ).length;
+      console.log("[settings][training-groups] post-save reload complete", {
+        groupId: targetGroupId,
+        activeMembershipCount: latestMembershipCount,
+      });
+
+      setGroupSaveSuccess(
+        editingGroupId
+          ? `Group updated (${latestMembershipCount} athlete${latestMembershipCount === 1 ? "" : "s"}).`
+          : `Group created (${latestMembershipCount} athlete${latestMembershipCount === 1 ? "" : "s"}).`
+      );
+      resetGroupEditor();
+    } catch (error: any) {
+      const message = getErrorMessage(error);
+      console.error("[TrainingGroups] save failed", error);
+      console.error("[settings][training-groups] save failed", {
+        groupId: editingGroupId,
+        groupName: name,
+        selectedAthleteCount: draftAthleteIds.length,
+        error,
+      });
+      setGroupSaveError(message);
+      Alert.alert("Training group save failed", message);
+    } finally {
+      setGroupSaveBusy(false);
     }
-
-    const now = Date.now();
-    const next = editingGroupId
-      ? groups.map((g) =>
-          g.id === editingGroupId
-            ? { ...g, name, athleteIds: draftAthleteIds, updatedAt: now }
-            : g
-        )
-      : [
-          ...groups,
-          {
-            id: createGroupId(),
-            name,
-            athleteIds: draftAthleteIds,
-            createdAt: now,
-            updatedAt: now,
-          },
-        ];
-
-    await saveCustomAthleteGroups(next);
-    setGroups(next);
-    resetGroupEditor();
   }
 
-  async function deleteGroup(groupId: string) {
-    Alert.alert("Delete group?", "This removes the custom training group.", [
+  async function archiveGroup(groupId: string, archived: boolean) {
+    Alert.alert(archived ? "Archive group?" : "Restore group?", archived ? "This hides the training group from default selection." : "This restores the training group.", [
       { text: "Cancel", style: "cancel" },
       {
-        text: "Delete",
-        style: "destructive",
+        text: archived ? "Archive" : "Restore",
+        style: archived ? "destructive" : "default",
         onPress: async () => {
-          const next = groups.filter((g) => g.id !== groupId);
-          await saveCustomAthleteGroups(next);
-          setGroups(next);
+          await teamDataStore.actions.setTrainingGroupArchived(groupId, archived);
           if (editingGroupId === groupId) resetGroupEditor();
         },
       },
     ]);
+  }
+
+  function isValidDateOnlyISO(value: string): boolean {
+    const text = String(value ?? "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+    const atMidnight = new Date(`${text}T00:00:00Z`);
+    if (Number.isNaN(atMidnight.getTime())) return false;
+    return atMidnight.toISOString().slice(0, 10) === text;
+  }
+
+  function resetSeasonEditor() {
+    setEditingSeasonId(null);
+    setSeasonNameText("");
+    setSeasonStartDateText("");
+    setSeasonEndDateText("");
+    setSeasonColorText("");
+  }
+
+  function startEditSeason(season: TeamSeason) {
+    setEditingSeasonId(season.id);
+    setSeasonNameText(String(season.name ?? ""));
+    setSeasonStartDateText(String(season.start_date ?? ""));
+    setSeasonEndDateText(String(season.end_date ?? ""));
+    setSeasonColorText(String(season.color ?? ""));
+    setSeasonsOpen(true);
+  }
+
+  async function saveSeason() {
+    const name = String(seasonNameText ?? "").trim();
+    const startDate = String(seasonStartDateText ?? "").trim();
+    const endDate = String(seasonEndDateText ?? "").trim();
+    const color = String(seasonColorText ?? "").trim();
+    if (!name) {
+      Alert.alert("Season name required", "Enter a name for this season.");
+      return;
+    }
+    if (!isValidDateOnlyISO(startDate) || !isValidDateOnlyISO(endDate)) {
+      Alert.alert("Invalid dates", "Use YYYY-MM-DD for start and end date.");
+      return;
+    }
+    if (endDate < startDate) {
+      Alert.alert("Invalid date range", "End date must be on or after start date.");
+      return;
+    }
+
+    if (editingSeasonId) {
+      await teamDataStore.actions.updateTeamSeason(editingSeasonId, {
+        name,
+        start_date: startDate,
+        end_date: endDate,
+        color: color || null,
+      });
+    } else {
+      const maxSortOrder = sortedSeasons.reduce((max, row) => {
+        const value = Number(row.sort_order);
+        if (!Number.isFinite(value)) return max;
+        return Math.max(max, value);
+      }, 0);
+      await teamDataStore.actions.createTeamSeason({
+        name,
+        start_date: startDate,
+        end_date: endDate,
+        color: color || null,
+        sort_order: maxSortOrder + 1,
+      });
+    }
+    resetSeasonEditor();
+  }
+
+  async function archiveSeason(seasonId: string, archived: boolean) {
+    Alert.alert(
+      archived ? "Archive season?" : "Restore season?",
+      archived ? "This hides the season from default selection." : "This restores the season.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: archived ? "Archive" : "Restore",
+          style: archived ? "destructive" : "default",
+          onPress: async () => {
+            await teamDataStore.actions.setTeamSeasonArchived(seasonId, archived);
+            if (editingSeasonId === seasonId) resetSeasonEditor();
+          },
+        },
+      ]
+    );
   }
 
   async function signOut() {
@@ -1273,12 +1511,12 @@ export default function CoachSettingsTab() {
 
         <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}> 
           <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setCustomGroupsOpen((prev) => !prev)}>
-            <Text style={styles.cardTitle}>Custom Groups</Text>
+          <Text style={styles.cardTitle}>Training Groups</Text>
             <View style={styles.chevronTapTarget}>
               <Text style={styles.chev}>{customGroupsOpen ? "▾" : "▸"}</Text>
             </View>
           </Pressable>
-          <Text style={styles.cardHint}>Create named athlete groups for quick selection in Plan.</Text>
+          <Text style={styles.cardHint}>Create team-scoped groups for quick selection in Plan.</Text>
 
           {customGroupsOpen ? (
             <View style={styles.collapsibleBody}>
@@ -1293,21 +1531,28 @@ export default function CoachSettingsTab() {
 
                 <View style={{ flexDirection: "row", gap: 8, marginBottom: 8 }}>
                   <Pressable
-                    onPress={() => setDraftAthleteIds(sortedRoster.map((a) => a.id))}
-                    style={styles.groupActionBtn}
+                    disabled={groupSaveBusy}
+                    onPress={() => setDraftAthleteIds(sortedRoster.filter((a) => a.isActive !== false).map((a) => a.id))}
+                    style={[styles.groupActionBtn, groupSaveBusy && styles.disabledBtn]}
                   >
-                    <Text style={styles.groupActionBtnText}>Select all</Text>
+                  <Text style={styles.groupActionBtnText}>Select active</Text>
                   </Pressable>
                   <Pressable
+                    disabled={groupSaveBusy}
                     onPress={() => setDraftAthleteIds([])}
-                    style={styles.groupActionBtn}
+                    style={[styles.groupActionBtn, groupSaveBusy && styles.disabledBtn]}
                   >
                     <Text style={styles.groupActionBtnText}>Clear</Text>
                   </Pressable>
                   {(editingGroupId || groupNameText || draftAthleteIds.length > 0) ? (
                     <Pressable
-                      onPress={resetGroupEditor}
-                      style={styles.groupActionBtn}
+                      disabled={groupSaveBusy}
+                      onPress={() => {
+                        setGroupSaveError(null);
+                        setGroupSaveSuccess(null);
+                        resetGroupEditor();
+                      }}
+                      style={[styles.groupActionBtn, groupSaveBusy && styles.disabledBtn]}
                     >
                       <Text style={styles.groupActionBtnText}>Cancel</Text>
                     </Pressable>
@@ -1316,11 +1561,12 @@ export default function CoachSettingsTab() {
 
                 <View style={{ borderWidth: 1, borderColor: "#eee", borderRadius: 12, maxHeight: 220 }}>
                   <ScrollView nestedScrollEnabled>
-                    {sortedRoster.map((athlete) => {
+                    {sortedRoster.filter((athlete) => athlete.isActive !== false).map((athlete) => {
                       const active = draftAthleteIds.includes(athlete.id);
                       return (
                         <Pressable
                           key={athlete.id}
+                          disabled={groupSaveBusy}
                           onPress={() => toggleDraftAthlete(athlete.id)}
                           style={{
                             flexDirection: "row",
@@ -1345,29 +1591,50 @@ export default function CoachSettingsTab() {
                   </ScrollView>
                 </View>
 
-                <Pressable onPress={saveGroup} style={[styles.saveBtn, { marginTop: 10 }]}> 
-                  <Text style={styles.saveBtnText}>{editingGroupId ? "Update Group" : "Save Group"}</Text>
+                <Pressable
+                  disabled={groupSaveBusy}
+                  onPress={saveGroup}
+                  style={[styles.saveBtn, { marginTop: 10 }, groupSaveBusy && styles.disabledBtn]}
+                >
+                  <Text style={styles.saveBtnText}>
+                    {groupSaveBusy ? "Saving..." : editingGroupId ? "Update Group" : "Create Group"}
+                  </Text>
                 </Pressable>
+                {groupSaveError ? (
+                  <Text style={styles.errorText}>{groupSaveError}</Text>
+                ) : null}
+                {groupSaveSuccess ? (
+                  <Text style={styles.successText}>{groupSaveSuccess}</Text>
+                ) : null}
               </View>
 
               <View style={{ marginTop: 12 }}>
                 {sortedGroups.length === 0 ? (
-                  <Text style={{ color: "#666", fontWeight: "700" }}>No custom groups yet.</Text>
+                  <Text style={{ color: "#666", fontWeight: "700" }}>No training groups yet.</Text>
                 ) : (
                   sortedGroups.map((group) => {
-                    const names = group.athleteIds
+                    const memberIds = teamStore.trainingGroupMemberships
+                      .filter(
+                        (row) =>
+                          String(row.group_id ?? "").trim() === group.id &&
+                          isActiveTrainingGroupMembership(row)
+                      )
+                      .map((row) => String(row.athlete_profile_id ?? "").trim())
+                      .filter(Boolean);
+                    const names = memberIds
                       .map((id) => rosterById.get(id))
                       .filter((a): a is TeamRosterAthlete => !!a)
                       .map((a) => a.displayName)
                       .slice(0, 3);
-                    const extra = Math.max(0, group.athleteIds.length - names.length);
+                    const extra = Math.max(0, memberIds.length - names.length);
+                    const archived = !!group.archived_at;
 
                     return (
                       <View key={group.id} style={styles.groupCard}>
                         <View style={{ flex: 1, paddingRight: 8 }}>
-                          <Text style={styles.groupName}>{group.name}</Text>
+                          <Text style={styles.groupName}>{group.name}{archived ? " (Archived)" : ""}</Text>
                           <Text style={styles.groupMeta}>
-                            {group.athleteIds.length} athlete{group.athleteIds.length === 1 ? "" : "s"}
+                            {memberIds.length} athlete{memberIds.length === 1 ? "" : "s"}
                             {names.length > 0 ? ` • ${names.join(", ")}${extra > 0 ? ` +${extra} more` : ""}` : ""}
                           </Text>
                         </View>
@@ -1375,8 +1642,117 @@ export default function CoachSettingsTab() {
                           <Pressable onPress={() => startEditGroup(group)} style={styles.groupActionBtn}>
                             <Text style={styles.groupActionBtnText}>Edit</Text>
                           </Pressable>
-                          <Pressable onPress={() => deleteGroup(group.id)} style={styles.groupDeleteBtn}>
-                            <Text style={styles.groupDeleteBtnText}>Delete</Text>
+                          <Pressable
+                            onPress={() => archiveGroup(group.id, !archived)}
+                            style={archived ? styles.groupActionBtn : styles.groupDeleteBtn}
+                          >
+                            <Text style={archived ? styles.groupActionBtnText : styles.groupDeleteBtnText}>
+                              {archived ? "Restore" : "Archive"}
+                            </Text>
+                          </Pressable>
+                        </View>
+                      </View>
+                    );
+                  })
+                )}
+              </View>
+            </View>
+          ) : null}
+        </View>
+
+        <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
+          <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setSeasonsOpen((prev) => !prev)}>
+            <Text style={styles.cardTitle}>Seasons</Text>
+            <View style={styles.chevronTapTarget}>
+              <Text style={styles.chev}>{seasonsOpen ? "▾" : "▸"}</Text>
+            </View>
+          </Pressable>
+          <Text style={styles.cardHint}>Create team-level season date ranges for future filtering and reporting.</Text>
+
+          {seasonsOpen ? (
+            <View style={styles.collapsibleBody}>
+              <View style={styles.placeholder}>
+                <Text style={styles.label}>Season name</Text>
+                <TextInput
+                  value={seasonNameText}
+                  onChangeText={setSeasonNameText}
+                  placeholder="e.g., Summer Conditioning"
+                  style={styles.input}
+                />
+
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.label, { marginTop: 8 }]}>Start date (YYYY-MM-DD)</Text>
+                    <TextInput
+                      value={seasonStartDateText}
+                      onChangeText={setSeasonStartDateText}
+                      placeholder="2026-06-01"
+                      style={styles.input}
+                      autoCapitalize="none"
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.label, { marginTop: 8 }]}>End date (YYYY-MM-DD)</Text>
+                    <TextInput
+                      value={seasonEndDateText}
+                      onChangeText={setSeasonEndDateText}
+                      placeholder="2026-08-31"
+                      style={styles.input}
+                      autoCapitalize="none"
+                    />
+                  </View>
+                </View>
+
+                <Text style={[styles.label, { marginTop: 8 }]}>Color (optional)</Text>
+                <TextInput
+                  value={seasonColorText}
+                  onChangeText={setSeasonColorText}
+                  placeholder="#2A7FFF"
+                  style={styles.input}
+                  autoCapitalize="none"
+                />
+
+                <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+                  <Pressable onPress={saveSeason} style={styles.saveBtn}>
+                    <Text style={styles.saveBtnText}>{editingSeasonId ? "Update Season" : "Create Season"}</Text>
+                  </Pressable>
+                  {(editingSeasonId || seasonNameText || seasonStartDateText || seasonEndDateText || seasonColorText) ? (
+                    <Pressable onPress={resetSeasonEditor} style={styles.groupActionBtn}>
+                      <Text style={styles.groupActionBtnText}>Cancel</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              </View>
+
+              <View style={{ marginTop: 12 }}>
+                {sortedSeasons.length === 0 ? (
+                  <Text style={{ color: "#666", fontWeight: "700" }}>No seasons yet.</Text>
+                ) : (
+                  sortedSeasons.map((season) => {
+                    const archived = !!season.archived_at;
+                    const colorDot = String(season.color ?? "").trim();
+                    const overrideCount = overrideCountBySeasonId.get(String(season.id ?? "").trim()) ?? 0;
+                    return (
+                      <View key={season.id} style={styles.groupCard}>
+                        <View style={{ flex: 1, paddingRight: 8 }}>
+                          <Text style={styles.groupName}>{season.name}{archived ? " (Archived)" : ""}</Text>
+                          <Text style={styles.groupMeta}>
+                            {season.start_date} to {season.end_date}
+                            {` • ${overrideCount > 0 ? `${overrideCount} override${overrideCount === 1 ? "" : "s"}` : "No overrides"}`}
+                            {colorDot ? ` • ${colorDot}` : ""}
+                          </Text>
+                        </View>
+                        <View style={{ flexDirection: "row", gap: 8 }}>
+                          <Pressable onPress={() => startEditSeason(season)} style={styles.groupActionBtn}>
+                            <Text style={styles.groupActionBtnText}>Edit</Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => archiveSeason(season.id, !archived)}
+                            style={archived ? styles.groupActionBtn : styles.groupDeleteBtn}
+                          >
+                            <Text style={archived ? styles.groupActionBtnText : styles.groupDeleteBtnText}>
+                              {archived ? "Restore" : "Archive"}
+                            </Text>
                           </Pressable>
                         </View>
                       </View>
@@ -1662,6 +2038,21 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   saveBtnText: { fontWeight: "900", color: "white" },
+  disabledBtn: {
+    opacity: 0.6,
+  },
+  errorText: {
+    marginTop: 8,
+    color: "#b00020",
+    fontWeight: "700",
+    fontSize: 12,
+  },
+  successText: {
+    marginTop: 8,
+    color: "#0a7a32",
+    fontWeight: "700",
+    fontSize: 12,
+  },
 
   groupCard: {
     marginTop: 8,

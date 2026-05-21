@@ -1,13 +1,14 @@
 // app/(athlete)/week.tsx
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { MaterialIcons } from "@expo/vector-icons";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from "react-native-reanimated";
-import { loadJSON } from "../../lib/storage";
-import { getCurrentTeamId, getMyClaimedAthleteProfileId, getTeamAthlete } from "../../lib/team";
+import { loadJSON, saveJSON } from "../../lib/storage";
+import { resolveAthleteSessionContext } from "../../lib/athleteSession";
+import { ATHLETE_CALENDAR_VIEW_STATE_KEY, type AthleteCalendarViewState } from "../../lib/athleteCalendarView";
 import { loadRosterNameMapForTeam } from "../../lib/rosterNameMap";
 import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../lib/units";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../lib/pace";
@@ -328,6 +329,7 @@ function isChoiceMileageValue(v: MileageValue | undefined): v is Extract<Mileage
 
 export default function AthleteWeekView() {
   const router = useRouter();
+  const { date } = useLocalSearchParams<{ date?: string }>();
   const store = teamDataStore.use();
 
   const [selectedAthleteId, setSelectedAthleteId] = useState<string | null>(null);
@@ -342,6 +344,9 @@ export default function AthleteWeekView() {
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
   const [athletePaceOverrides, setAthletePaceOverrides] = useState<AthletePaceOverrides>({});
+  const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
+  const inFlightRef = useRef(false);
+  const activeLoadKeyRef = useRef("");
 
   // anchor is any date within the current week we’re viewing
   const [weekAnchorISO, setWeekAnchorISO] = useState(() => toISODate(new Date()));
@@ -358,75 +363,94 @@ export default function AthleteWeekView() {
   }, []);
 
   const loadData = useCallback(async () => {
-    const ws = await loadWeekStartFromShared();
-    const [selected, unit, pace, paceOverrides, storedCategories, weekLabels] = await Promise.all([
-      loadJSON<string | null>(SELECTED_KEY, null),
-      loadDistanceUnit(),
-      loadPaceSecondsPerMile(),
-      loadAthletePaceOverrides(),
-      loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
-      loadCoachWeekLabels(),
-    ]);
-
-    const teamId = await getCurrentTeamId();
-    const rosterMap = await loadRosterNameMapForTeam(teamId);
-    setRosterNameById(rosterMap);
-    const claimedAthleteId = await getMyClaimedAthleteProfileId(teamId);
-    const selectedId = String(claimedAthleteId ?? selected ?? "").trim();
-    setSelectedAthleteId(selectedId || null);
-
-    let selectedName: string | null = null;
-    if (selectedId) {
-      try {
-        const a = await getTeamAthlete(selectedId);
-        selectedName = a?.display_name ?? null;
-        setSelectedAthleteLabel(selectedName);
-      } catch {
-        setSelectedAthleteLabel(null);
-      }
-    } else {
-      setSelectedAthleteLabel(null);
-    }
-
-    setDistanceUnit(unit);
-    setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
-    setAthletePaceOverrides(paceOverrides ?? {});
-    setCategories(normalizeCategories(storedCategories));
-    setWeekLabelsByStart(weekLabels ?? {});
-
-    const weekStartForFetch = getWeekStartISO(weekAnchorISO, ws);
-    await teamDataStore.actions.loadMileageWeek(weekStartForFetch);
-
-    if (!selectedId) {
-      setAllWorkouts([]);
-      setTeamWeekRows([]);
+    if (inFlightRef.current) return;
+    const loadKey = String(weekAnchorISO);
+    const now = Date.now();
+    if (lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
       return;
     }
+    inFlightRef.current = true;
+    activeLoadKeyRef.current = loadKey;
+    const ws = await loadWeekStartFromShared();
+    try {
+      const [selected, unit, pace, paceOverrides, storedCategories, weekLabels] = await Promise.all([
+        loadJSON<string | null>(SELECTED_KEY, null),
+        loadDistanceUnit(),
+        loadPaceSecondsPerMile(),
+        loadAthletePaceOverrides(),
+        loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
+        loadCoachWeekLabels(),
+      ]);
 
-    const weekEndForFetch = addDaysISO(weekStartForFetch, 6);
-    const [rows, allRowsForWeek] = await Promise.all([
-      listAthleteWorkoutsInRange(selectedId, weekStartForFetch, weekEndForFetch),
-      listTeamWorkoutsInRange(weekStartForFetch, weekEndForFetch),
-    ]);
-    const athleteName = selectedName ?? "Athlete";
-    setAllWorkouts(rows.map((row) => toAthleteWorkout(row, athleteName)));
-    setTeamWeekRows(allRowsForWeek);
+      const athleteSession = await resolveAthleteSessionContext();
+      const teamId = athleteSession.teamId;
+      const rosterMap = await loadRosterNameMapForTeam(teamId);
+      setRosterNameById(rosterMap);
+      const selectedId = String(athleteSession.athleteId ?? selected ?? "").trim();
+      setSelectedAthleteId(selectedId || null);
+
+      const selectedName = selectedId ? String(athleteSession.athleteName ?? "").trim() || null : null;
+      setSelectedAthleteLabel(selectedName);
+
+      setDistanceUnit(unit);
+      setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
+      setAthletePaceOverrides(paceOverrides ?? {});
+      setCategories(normalizeCategories(storedCategories));
+      setWeekLabelsByStart(weekLabels ?? {});
+
+      const weekStartForFetch = getWeekStartISO(weekAnchorISO, ws);
+      void teamDataStore.actions.loadMileageWeek(weekStartForFetch);
+
+      if (!selectedId) {
+        setAllWorkouts([]);
+        setTeamWeekRows([]);
+        return;
+      }
+
+      const weekEndForFetch = addDaysISO(weekStartForFetch, 6);
+      const rows = await listAthleteWorkoutsInRange(selectedId, weekStartForFetch, weekEndForFetch);
+      if (activeLoadKeyRef.current !== loadKey) return;
+      const athleteName = selectedName ?? "Athlete";
+      setAllWorkouts(rows.map((row) => toAthleteWorkout(row, athleteName)));
+      setTeamWeekRows([]);
+      lastLoadRef.current = { key: loadKey, ts: Date.now() };
+
+      // Load full-team rows in background for group-mate context and extra metadata.
+      void (async () => {
+        const allRowsForWeek = await listTeamWorkoutsInRange(weekStartForFetch, weekEndForFetch);
+        if (activeLoadKeyRef.current !== loadKey) return;
+        setTeamWeekRows(allRowsForWeek);
+      })();
+    } finally {
+      inFlightRef.current = false;
+    }
   }, [loadWeekStartFromShared, weekAnchorISO]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
 
   useFocusEffect(
     useCallback(() => {
-      loadData();
+      void loadData();
     }, [loadData])
   );
+
+  useEffect(() => {
+    const routeDate = String(date ?? "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(routeDate)) return;
+    const parsed = parseISODate(routeDate);
+    if (Number.isNaN(parsed.getTime())) return;
+    setWeekAnchorISO(routeDate);
+  }, [date]);
 
   const weekStartISO = useMemo(
     () => getWeekStartISO(weekAnchorISO, weekStartsOn),
     [weekAnchorISO, weekStartsOn]
   );
+
+  useEffect(() => {
+    void saveJSON<AthleteCalendarViewState>(ATHLETE_CALENDAR_VIEW_STATE_KEY, {
+      view: "week",
+      dateISO: weekStartISO,
+    });
+  }, [weekStartISO]);
 
   const weekEndISO = useMemo(() => addDaysISO(weekStartISO, 6), [weekStartISO]);
 
@@ -692,7 +716,7 @@ export default function AthleteWeekView() {
                   onPress={() =>
                     router.push({
                       pathname: "/(athlete)/day",
-                      params: { date: dRow.dateISO },
+                      params: { date: dRow.dateISO, returnView: "week", returnDate: dRow.dateISO },
                     })
                   }
                   style={({ pressed }) => [
@@ -906,29 +930,29 @@ const styles = StyleSheet.create({
   athleteLabel: { marginTop: 4, color: "#666", fontWeight: "800" },
 
   goalsCard: {
-    borderWidth: 1.5,
+    borderWidth: 1.25,
     borderColor: "#d8d8d8",
     backgroundColor: "#f5f8ff",
     borderRadius: 14,
     paddingHorizontal: 10,
-    paddingVertical: 8,
-    marginBottom: 10,
+    paddingVertical: 7,
+    marginBottom: 9,
   },
   goalsCardPressed: { opacity: 0.9 },
   goalSingleRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    minHeight: 18,
+    gap: 5,
+    minHeight: 16,
   },
-  goalPrefix: { fontWeight: "900", color: "#111", fontSize: 13 },
+  goalPrefix: { fontWeight: "900", color: "#111", fontSize: 12 },
   goalSingleItem: {
     flexDirection: "row",
     alignItems: "center",
     gap: 2,
     flexShrink: 1,
   },
-  goalSingleItemText: { fontWeight: "900", color: "#111", fontSize: 12 },
+  goalSingleItemText: { fontWeight: "900", color: "#111", fontSize: 11.5 },
   goalDot: { color: "#64748b", fontWeight: "800", fontSize: 12 },
   goalLine: { fontWeight: "900", color: "#111", marginTop: 2 },
   goalMuted: { color: "#777", fontWeight: "800", fontSize: 12 },
@@ -937,8 +961,8 @@ const styles = StyleSheet.create({
 
   listWrap: { flex: 1 },
 
-  dayCard: { borderWidth: 1, borderColor: "#eee", borderRadius: 14, backgroundColor: "#fff", padding: 12, marginBottom: 10 },
-  dayCardOff: { borderColor: "#b8d8ff", backgroundColor: "#eaf4ff" },
+  dayCard: { borderWidth: 1, borderColor: "#eee", borderRadius: 13, backgroundColor: "#fff", padding: 10, marginBottom: 8 },
+  dayCardOff: { borderColor: "#e5e7eb", backgroundColor: "#f3f4f6" },
   dayHeaderRow: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between" },
   dayHeaderLeft: { flexDirection: "row", alignItems: "center", gap: 8 },
   dayName: { fontSize: 16, fontWeight: "900", color: "#111" },
@@ -950,42 +974,42 @@ const styles = StyleSheet.create({
     borderColor: "#cbd5e1",
     backgroundColor: "#f8fafc",
     borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
+    paddingHorizontal: 7,
+    paddingVertical: 1,
   },
   dayOffBadgeDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: "#6B7280" },
   dayOffBadgeText: { fontSize: 11, fontWeight: "800", color: "#334155" },
   dayNumber: { fontSize: 16, fontWeight: "900" },
   dateISO: { fontSize: 12, color: "#777", fontWeight: "800" },
   sessionBlock: {
-    marginTop: 10,
+    marginTop: 8,
     borderWidth: 1,
     borderColor: "#e5e7eb",
-    borderRadius: 10,
+    borderRadius: 9,
     backgroundColor: "#f8fafc",
-    padding: 10,
+    padding: 8,
   },
   sessionBlockCompact: {
-    paddingVertical: 8,
+    paddingVertical: 6,
   },
   sessionHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
   },
-  sessionLeft: { flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 },
-  sessionTitle: { fontSize: 12, fontWeight: "900", color: "#334155", letterSpacing: 0.4 },
-  sessionMeta: { fontSize: 12, fontWeight: "700", color: "#475569", flexShrink: 1 },
-  sessionPlanned: { fontSize: 12, fontWeight: "900", color: "#0f172a" },
+  sessionLeft: { flexDirection: "row", alignItems: "center", gap: 5, flexShrink: 1 },
+  sessionTitle: { fontSize: 11, fontWeight: "900", color: "#334155", letterSpacing: 0.35 },
+  sessionMeta: { fontSize: 11, fontWeight: "700", color: "#64748b", flexShrink: 1 },
+  sessionPlanned: { fontSize: 11.5, fontWeight: "900", color: "#0f172a" },
   sessionChoiceValueRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end", columnGap: 4 },
   sessionChoicePart: { flexDirection: "row", alignItems: "center", columnGap: 4 },
   sessionChoiceSeparator: { fontSize: 12, fontWeight: "800", color: "#334155" },
-  sessionRows: { marginTop: 8, gap: 8 },
+  sessionRows: { marginTop: 6, gap: 6 },
   workoutItem: {
     position: "relative",
     borderWidth: 1,
     borderColor: "#e2e8f0",
-    borderRadius: 10,
+    borderRadius: 9,
     backgroundColor: "#ffffff",
     overflow: "hidden",
   },
@@ -1000,10 +1024,10 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   workoutItemContent: {
-    padding: 8,
-    paddingLeft: 10,
+    padding: 7,
+    paddingLeft: 9,
   },
-  categoryChipRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 6 },
+  categoryChipRow: { flexDirection: "row", flexWrap: "wrap", gap: 5, marginBottom: 4 },
   categoryChip: {
     flexDirection: "row",
     alignItems: "center",
@@ -1011,14 +1035,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 999,
     backgroundColor: "#f8fafc",
-    paddingHorizontal: 8,
-    paddingVertical: 2,
+    paddingHorizontal: 7,
+    paddingVertical: 1.5,
   },
   categoryChipDot: { width: 7, height: 7, borderRadius: 3.5 },
   categoryChipText: { fontSize: 11, fontWeight: "800", color: "#334155" },
-  workoutItemTitle: { fontSize: 14, fontWeight: "900", color: "#0f172a" },
-  workoutItemDetails: { marginTop: 3, color: "#475569", fontWeight: "700" },
-  workoutGroupText: { marginTop: 4, color: "#475569", fontSize: 12, fontWeight: "700" },
+  workoutItemTitle: { fontSize: 13, lineHeight: 17, fontWeight: "900", color: "#0f172a" },
+  workoutItemDetails: { marginTop: 2, color: "#526173", fontWeight: "600" },
+  workoutGroupText: { marginTop: 3, color: "#64748b", fontSize: 11, fontWeight: "600" },
   dayActionRow: {
     marginTop: 10,
     paddingTop: 8,

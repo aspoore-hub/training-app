@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, Pressable, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -8,9 +8,10 @@ import { loadJSON, saveJSON } from "../../lib/storage";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../lib/pace";
 import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../lib/units";
 import type { AthleteWorkout, MileageValue, WeekStartDay } from "../../lib/types";
-import { getCurrentTeamId, getMyClaimedAthleteProfileId } from "../../lib/team";
+import { resolveAthleteSessionContext } from "../../lib/athleteSession";
+import { ATHLETE_CALENDAR_VIEW_STATE_KEY, type AthleteCalendarViewState } from "../../lib/athleteCalendarView";
 import { loadRosterNameMapForTeam } from "../../lib/rosterNameMap";
-import { listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
+import { listAthleteWorkoutsInRange, listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
 import { teamDataStore } from "../../lib/teamDataStore";
 import {
   getWeekStartISO,
@@ -24,18 +25,12 @@ import {
 } from "../../lib/mileagePlan";
 import { loadWeekStartSetting } from "../../lib/settings";
 import { PrevNextNavButtons } from "../../components/shared/PrevNextNavButtons";
-import { SectionEmptyText, SectionLabel } from "../../components/shared/PlannedRecordedPrimitives";
 
-const KEY_SELECTED = "training_app_selected_athlete_v1";
 const ATHLETE_DAY_UI_STATE_KEY = "training_app_athlete_day_ui_state_v1";
 
 type AthleteDayUiState = {
   dateISO?: string;
 };
-
-type ListRow =
-  | { type: "header"; key: string; title: "AM" | "PM" }
-  | { type: "item"; key: string; workout: AthleteWorkout };
 
 function normalizeGroupId(groupId?: string): string {
   const normalized = String(groupId ?? "").trim().toUpperCase();
@@ -106,7 +101,7 @@ function isISODateOnly(value: string): boolean {
 export default function AthleteDayScreen() {
   const router = useRouter();
   const store = teamDataStore.use();
-  const { date } = useLocalSearchParams<{ date: string }>();
+  const { date, returnView, returnDate } = useLocalSearchParams<{ date: string; returnView?: string; returnDate?: string }>();
   const [currentDateISO, setCurrentDateISO] = useState<string>(() => {
     const routeDate = String(date ?? "").trim();
     if (isISODateOnly(routeDate)) return routeDate;
@@ -121,6 +116,10 @@ export default function AthleteDayScreen() {
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
+  const [loadingContext, setLoadingContext] = useState(true);
+  const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
+  const inFlightRef = useRef(false);
+  const activeLoadKeyRef = useRef("");
 
   const dayPlan = useMemo(() => {
     if (!currentDateISO || !selectedAthleteId) return null;
@@ -198,45 +197,9 @@ export default function AthleteDayScreen() {
 
   const amWorkouts = useMemo(() => workouts.filter((w) => (w.session ?? "PM") === "AM"), [workouts]);
   const pmWorkouts = useMemo(() => workouts.filter((w) => (w.session ?? "PM") === "PM"), [workouts]);
-  const hasAmWorkout = amWorkouts.length > 0;
-  const hasPmWorkout = pmWorkouts.length > 0;
 
   const plannedAm = useMemo(() => (dayPlan ? formatMileage(dayPlan.am) : ""), [dayPlan]);
   const plannedPm = useMemo(() => (dayPlan ? formatMileage(dayPlan.pm) : ""), [dayPlan]);
-
-  const plannedSessions = useMemo(
-    () =>
-      [
-        plannedAm ? { session: "AM" as const, prescribed: plannedAm, showFeedbackEntry: !hasAmWorkout } : null,
-        plannedPm ? { session: "PM" as const, prescribed: plannedPm, showFeedbackEntry: !hasPmWorkout } : null,
-      ].filter((entry): entry is { session: "AM" | "PM"; prescribed: string; showFeedbackEntry: boolean } => Boolean(entry)),
-    [hasAmWorkout, hasPmWorkout, plannedAm, plannedPm]
-  );
-
-  const rows = useMemo(() => {
-    const out: ListRow[] = [];
-
-    if (amWorkouts.length > 0) {
-      out.push({ type: "header", key: "h-am", title: "AM" });
-      amWorkouts.forEach((workout, index) => out.push({ type: "item", key: `am-workout-${index}`, workout }));
-    }
-
-    if (pmWorkouts.length > 0) {
-      out.push({ type: "header", key: "h-pm", title: "PM" });
-      pmWorkouts.forEach((workout, index) => out.push({ type: "item", key: `pm-workout-${index}`, workout }));
-    }
-
-    return out;
-  }, [amWorkouts, pmWorkouts]);
-
-  const plannedLine = useMemo(() => {
-    if (!dayPlan) return "Off";
-    const parts: string[] = [];
-    if (plannedAm) parts.push(`AM ${plannedAm}`);
-    if (plannedPm) parts.push(`PM ${plannedPm}`);
-    if (parts.length === 0) return "Off";
-    return parts.join(" • ");
-  }, [dayPlan, plannedAm, plannedPm]);
 
   const plannedTotal = useMemo(() => {
     if (!dayPlan) return "";
@@ -245,63 +208,100 @@ export default function AthleteDayScreen() {
     return `${label} ${distanceUnitLabel(distanceUnit)}`;
   }, [dayPlan, distanceUnit]);
 
+  const sessionCards = useMemo(
+    () =>
+      ([
+        {
+          session: "AM" as const,
+          prescribed: plannedAm,
+          workouts: amWorkouts,
+        },
+        {
+          session: "PM" as const,
+          prescribed: plannedPm,
+          workouts: pmWorkouts,
+        },
+      ] as const).filter((entry) => entry.workouts.length > 0 || Boolean(entry.prescribed)),
+    [amWorkouts, plannedAm, plannedPm, pmWorkouts]
+  );
+
   useEffect(() => {
     async function load() {
-      const [selected, ws, pace, unit] = await Promise.all([
-        loadJSON<string | null>(KEY_SELECTED, null),
-        loadWeekStartSetting(),
-        loadPaceSecondsPerMile(),
-        loadDistanceUnit(),
-      ]);
-
-      const resolvedWeekStart: WeekStartDay = ws.normalized === "sunday" ? 0 : 1;
-      console.log("[athlete-day] week start loaded via shared helper", {
-        raw: ws.raw,
-        normalized: resolvedWeekStart,
-      });
-      setWeekStartsOn(resolvedWeekStart);
-      setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
-      setDistanceUnit(unit);
-
-      const teamId = await getCurrentTeamId();
-      const [claimedAthleteId, rosterMap] = await Promise.all([
-        getMyClaimedAthleteProfileId(teamId),
-        loadRosterNameMapForTeam(teamId),
-      ]);
-
-      const selectedRaw = String(selected ?? "").trim();
-      const resolvedId = String(claimedAthleteId ?? selectedRaw).trim() || null;
-      const resolvedName = resolvedId ? String(rosterMap.get(resolvedId) ?? "").trim() || null : null;
-
-      setRosterNameById(rosterMap);
-
-      setSelectedAthleteName(resolvedName);
-      setSelectedAthleteId(resolvedId);
-
-      const weekStartISO = getWeekStartISO(String(currentDateISO), resolvedWeekStart);
-      await teamDataStore.actions.loadMileageWeek(weekStartISO);
-
-      if (!currentDateISO || (!resolvedName && !resolvedId)) {
-        setAllWorkouts([]);
-        setWorkouts([]);
+      if (inFlightRef.current) return;
+      const loadKey = String(currentDateISO);
+      const now = Date.now();
+      if (lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
         return;
       }
+      activeLoadKeyRef.current = loadKey;
+      inFlightRef.current = true;
+      setLoadingContext(true);
+      try {
+        const [ws, pace, unit, athleteSession] = await Promise.all([
+          loadWeekStartSetting(),
+          loadPaceSecondsPerMile(),
+          loadDistanceUnit(),
+          resolveAthleteSessionContext(),
+        ]);
 
-      const allRows = await listTeamWorkoutsInRange(String(currentDateISO), String(currentDateISO));
-      const mapped = allRows.map((row) => toAthleteWorkout(row, rosterMap));
-      const filtered = mapped
-        .filter((w) => String(w.dateISO) === String(currentDateISO) && String((w as any).athleteId ?? "") === String(resolvedId ?? ""))
-        .sort((a, b) => {
-          const sessionCompare = String(a.session ?? "").localeCompare(String(b.session ?? ""));
-          if (sessionCompare !== 0) return sessionCompare;
-          return String(a.title ?? "").localeCompare(String(b.title ?? ""));
+        const resolvedWeekStart: WeekStartDay = ws.normalized === "sunday" ? 0 : 1;
+        console.log("[athlete-day] week start loaded via shared helper", {
+          raw: ws.raw,
+          normalized: resolvedWeekStart,
         });
+        setWeekStartsOn(resolvedWeekStart);
+        setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
+        setDistanceUnit(unit);
 
-      setAllWorkouts(mapped);
-      setWorkouts(filtered);
+        const resolvedId = String(athleteSession.athleteId ?? "").trim() || null;
+        const resolvedName = resolvedId ? String(athleteSession.athleteName ?? "").trim() || null : null;
+
+        setRosterNameById(new Map());
+        setSelectedAthleteName(resolvedName);
+        setSelectedAthleteId(resolvedId);
+
+        const weekStartISO = getWeekStartISO(String(currentDateISO), resolvedWeekStart);
+        void teamDataStore.actions.loadMileageWeek(weekStartISO);
+
+        if (!currentDateISO || !resolvedId) {
+          setAllWorkouts([]);
+          setWorkouts([]);
+          return;
+        }
+
+        const athleteRows = await listAthleteWorkoutsInRange(String(resolvedId), String(currentDateISO), String(currentDateISO));
+        if (activeLoadKeyRef.current !== loadKey) return;
+
+        const athleteMapped = athleteRows.map((row) => toAthleteWorkout(row, new Map()));
+        const athleteFiltered = athleteMapped
+          .filter((w) => String(w.dateISO) === String(currentDateISO))
+          .sort((a, b) => {
+            const sessionCompare = String(a.session ?? "").localeCompare(String(b.session ?? ""));
+            if (sessionCompare !== 0) return sessionCompare;
+            return String(a.title ?? "").localeCompare(String(b.title ?? ""));
+          });
+
+        setAllWorkouts(athleteMapped);
+        setWorkouts(athleteFiltered);
+        lastLoadRef.current = { key: loadKey, ts: Date.now() };
+
+        // Hydrate roster + team rows in background for group-mate context and names.
+        void (async () => {
+          const rosterMap = await loadRosterNameMapForTeam(athleteSession.teamId);
+          if (activeLoadKeyRef.current !== loadKey) return;
+          setRosterNameById(rosterMap);
+          const allRows = await listTeamWorkoutsInRange(String(currentDateISO), String(currentDateISO));
+          if (activeLoadKeyRef.current !== loadKey) return;
+          const mapped = allRows.map((row) => toAthleteWorkout(row, rosterMap));
+          setAllWorkouts(mapped);
+        })();
+      } finally {
+        setLoadingContext(false);
+        inFlightRef.current = false;
+      }
     }
 
-    load();
+    void load();
   }, [currentDateISO]);
 
   useEffect(() => {
@@ -348,7 +348,32 @@ export default function AthleteDayScreen() {
     setCurrentDateISO(next);
     router.replace({
       pathname: "/(athlete)/day",
-      params: { date: next },
+      params: {
+        date: next,
+        ...(returnView ? { returnView: String(returnView) } : {}),
+        ...(returnDate ? { returnDate: String(returnDate) } : {}),
+      },
+    });
+  }
+
+  async function goBackToCalendar() {
+    const routeView = String(returnView ?? "").trim().toLowerCase();
+    const routeDateISO = String(returnDate ?? "").trim();
+    if (routeView === "week" || routeView === "month") {
+      const dateISO = routeDateISO || String(currentDateISO ?? "").trim();
+      router.push({
+        pathname: routeView === "week" ? "/(athlete)/week" : "/(athlete)/month",
+        params: dateISO ? { date: dateISO } : undefined,
+      });
+      return;
+    }
+
+    const saved = await loadJSON<AthleteCalendarViewState>(ATHLETE_CALENDAR_VIEW_STATE_KEY, {});
+    const view = saved?.view === "week" ? "week" : "month";
+    const dateISO = String(saved?.dateISO ?? "").trim() || String(currentDateISO ?? "").trim();
+    router.push({
+      pathname: view === "week" ? "/(athlete)/week" : "/(athlete)/month",
+      params: dateISO ? { date: dateISO } : undefined,
     });
   }
 
@@ -376,7 +401,15 @@ export default function AthleteDayScreen() {
     );
   }
 
-  if (!selectedAthleteName) {
+  if (loadingContext) {
+    return (
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", padding: 20 }}>
+        <Text style={{ color: "#64748b", fontWeight: "700" }}>Loading daily view...</Text>
+      </View>
+    );
+  }
+
+  if (!selectedAthleteId) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", padding: 20 }}>
         <Text style={{ fontSize: 16, fontWeight: "700", marginBottom: 10 }}>No athlete selected</Text>
@@ -428,209 +461,186 @@ export default function AthleteDayScreen() {
         </View>
       </View>
 
+      <Pressable
+        onPress={() => {
+          void goBackToCalendar();
+        }}
+        style={{
+          alignSelf: "flex-start",
+          marginTop: 2,
+          marginBottom: 8,
+          borderWidth: 1,
+          borderColor: "#dbe3ef",
+          backgroundColor: "#f8fafc",
+          borderRadius: 999,
+          paddingHorizontal: 10,
+          paddingVertical: 6,
+        }}
+      >
+        <Text style={{ color: "#334155", fontSize: 12, fontWeight: "800" }}>Back to Calendar</Text>
+      </Pressable>
+
       <GestureDetector gesture={pan}>
       <Animated.View style={[{ flex: 1 }, animatedStyle]}>
       <View
         style={{
-          marginTop: 12,
-          padding: 14,
-          borderRadius: 14,
-          backgroundColor: dayPlan?.ncaaOff ? "#eaf4ff" : "#fafafa",
+          marginTop: 10,
+          borderRadius: 12,
           borderWidth: 1,
-          borderColor: dayPlan?.ncaaOff ? "#b8d8ff" : "#eee",
+          borderColor: dayPlan?.ncaaOff ? "#b8d8ff" : "#dbeafe",
+          backgroundColor: dayPlan?.ncaaOff ? "#eaf4ff" : "#ffffff",
+          paddingVertical: 10,
+          paddingHorizontal: 12,
         }}
       >
-        <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.6, color: "#64748b" }}>PLAN SUMMARY</Text>
-        <Text style={{ fontWeight: "900", marginTop: 4, marginBottom: 4, fontSize: 16, color: "#0f172a" }}>
-          {plannedLine}
-        </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+          <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>DAILY SUMMARY</Text>
+          {dayPlan?.ncaaOff ? <Text style={{ fontSize: 11, fontWeight: "900", color: "#0a5eb7" }}>NCAA Off Day</Text> : null}
+        </View>
+        <View style={{ marginTop: 8, flexDirection: "row", gap: 8 }}>
+          <View style={{ flex: 1, borderRadius: 9, borderWidth: 1, borderColor: "#e2e8f0", backgroundColor: "#f8fafc", paddingVertical: 7, paddingHorizontal: 9 }}>
+            <Text style={{ fontSize: 11, fontWeight: "900", color: "#475569" }}>AM</Text>
+            <Text style={{ marginTop: 2, color: "#0f172a", fontWeight: "900" }}>{plannedAm || "—"}</Text>
+          </View>
+          <View style={{ flex: 1, borderRadius: 9, borderWidth: 1, borderColor: "#e2e8f0", backgroundColor: "#f8fafc", paddingVertical: 7, paddingHorizontal: 9 }}>
+            <Text style={{ fontSize: 11, fontWeight: "900", color: "#475569" }}>PM</Text>
+            <Text style={{ marginTop: 2, color: "#0f172a", fontWeight: "900" }}>{plannedPm || "—"}</Text>
+          </View>
+        </View>
         {plannedTotal ? (
-          <Text style={{ fontWeight: "800", color: "#334155" }}>Distance goal: {plannedTotal}</Text>
-        ) : null}
-        {dayPlan?.ncaaOff ? (
-          <Text style={{ marginTop: 6, fontSize: 12, color: "#0a5eb7", fontWeight: "900" }}>
-            Suggested Training - NCAA Off Day. Feedback not required.
-          </Text>
-        ) : null}
-        {dayPlan ? (
-          <Text style={{ marginTop: 6, fontSize: 12, color: "#64748b", fontWeight: "700" }}>
-            Week starts: {formatDisplayDate(dayPlan.weekStartISO)}
-          </Text>
+          <Text style={{ marginTop: 8, color: "#334155", fontWeight: "700" }}>Distance goal: {plannedTotal}</Text>
         ) : null}
       </View>
-
-      <Text style={{ marginTop: 10, marginBottom: 8, color: "#475569", fontWeight: "700" }}>
-        Athlete: {selectedAthleteName}
-      </Text>
-
-      <View
-        style={{
-          padding: 12,
-          borderRadius: 14,
-          backgroundColor: "#f8fafc",
-          borderWidth: 1,
-          borderColor: "#dbeafe",
-          marginBottom: 12,
-        }}
-      >
-        <SectionLabel style={{ color: "#0f172a", marginTop: 0, marginBottom: 10 }}>Planned Sessions</SectionLabel>
-        {plannedSessions.length === 0 ? (
-          <SectionEmptyText style={{ color: "#475569", fontWeight: "600", marginTop: 0 }}>
-            No planned sessions for this day.
-          </SectionEmptyText>
-        ) : (
-          plannedSessions.map((planned) => (
-            <View
-              key={`planned-${planned.session}`}
-              style={{
-                borderWidth: 1,
-                borderColor: "#e2e8f0",
-                borderRadius: 10,
-                backgroundColor: "#fff",
-                padding: 10,
-                marginBottom: 8,
-              }}
-            >
-              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                <Text style={{ fontWeight: "900", color: "#111827" }}>{planned.session} Plan</Text>
-                {planned.showFeedbackEntry ? (
-                  <Pressable
-                    onPress={() =>
-                      router.push({
-                        pathname: "/(athlete)/workout/[id]",
-                        params: {
-                          id: `planned-${String(currentDateISO)}-${planned.session}`,
-                          synthetic: "1",
-                          date: String(currentDateISO),
-                          session: planned.session,
-                          prescribed: planned.prescribed,
-                          athleteId: selectedAthleteId ?? "",
-                          name: selectedAthleteName,
-                        },
-                      })
-                    }
-                    style={{
-                      borderRadius: 999,
-                      borderWidth: 1,
-                      borderColor: "#cbd5e1",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      backgroundColor: "#fff",
-                      paddingHorizontal: 12,
-                      paddingVertical: 7,
-                      flexDirection: "row",
-                      gap: 6,
-                    }}
-                  >
-                    <Ionicons name="chatbubble-ellipses-outline" size={16} color="#111" />
-                    <Text style={{ fontWeight: "800", color: "#0f172a", fontSize: 12 }}>Feedback</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-              <Text style={{ marginTop: 6, color: "#1f2937", fontWeight: "800" }}>
-                Prescribed: {planned.prescribed}
-              </Text>
-            </View>
-          ))
-        )}
-      </View>
-
-      <SectionLabel style={{ color: "#0f172a", marginTop: 0, marginBottom: 8 }}>Today's Workouts</SectionLabel>
-      {rows.length === 0 && (
-        <SectionEmptyText style={{ marginTop: 0, marginBottom: 12, color: "#475569", fontWeight: "600" }}>
-          No workouts assigned for this day.
-        </SectionEmptyText>
-      )}
 
       <FlatList
-        data={rows}
-        keyExtractor={(item) => item.key}
-        contentContainerStyle={{ paddingBottom: 24 }}
-        renderItem={({ item }) => {
-          if (item.type === "header") {
-            return (
-              <Text style={{ marginTop: 8, marginBottom: 8, fontWeight: "900", color: "#334155" }}>
-                {item.title}
-              </Text>
-            );
-          }
+        data={sessionCards}
+        keyExtractor={(item) => item.session}
+        contentContainerStyle={{ paddingTop: 10, paddingBottom: 24, gap: 10 }}
+        renderItem={({ item }) => (
+          <View
+            style={{
+              borderWidth: 1,
+              borderColor: "#e2e8f0",
+              borderRadius: 12,
+              backgroundColor: "#fff",
+              padding: 10,
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <Text style={{ fontWeight: "900", color: "#0f172a" }}>{item.session}</Text>
+              {item.prescribed ? (
+                <Text style={{ color: "#334155", fontWeight: "800" }}>Plan: {item.prescribed}</Text>
+              ) : null}
+            </View>
 
-          const workout = item.workout;
-          const preRoutineIds = Array.isArray(workout.preRoutineIds) ? workout.preRoutineIds : [];
-          const postRoutineIds = Array.isArray(workout.postRoutineIds) ? workout.postRoutineIds : [];
-          const peers = groupMatesByWorkoutId.get(workout.id) ?? [];
-          const prescribed = (workout.session ?? "PM") === "AM" ? dayPlan?.am : dayPlan?.pm;
-          const prescribedLabel = formatMileage(prescribed) || "Off";
-          const routineCount = preRoutineIds.length + postRoutineIds.length;
-
-          return (
-            <Pressable
-              onPress={() =>
-                router.push({
-                  pathname: "/(athlete)/workout/[id]",
-                  params: { id: workout.id, name: selectedAthleteName },
-                })
-              }
-              style={{
-                padding: 14,
-                borderRadius: 14,
-                backgroundColor: "#fff",
-                marginBottom: 12,
-                borderWidth: 1,
-                borderColor: "#e2e8f0",
-              }}
-            >
-              <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontWeight: "900", fontSize: 17, color: "#0f172a" }}>{workout.title || "Workout"}</Text>
-                  <Text style={{ marginTop: 4, color: "#475569", fontWeight: "700" }}>
-                    {(workout.session ?? "PM")}
-                    {workout.time ? ` • ${workout.time}` : ""}
-                    {workout.category ? ` • ${workout.category}` : ""}
-                  </Text>
-                </View>
-                <View
+            {item.workouts.length === 0 && item.prescribed ? (
+              <View style={{ marginTop: 8 }}>
+                <Pressable
+                  onPress={() =>
+                    router.push({
+                      pathname: "/(athlete)/workout/[id]",
+                      params: {
+                        id: `planned-${String(currentDateISO)}-${item.session}`,
+                        synthetic: "1",
+                        date: String(currentDateISO),
+                        session: item.session,
+                        prescribed: item.prescribed,
+                        athleteId: selectedAthleteId ?? "",
+                        name: selectedAthleteName,
+                      },
+                    })
+                  }
                   style={{
-                    alignSelf: "center",
-                    paddingHorizontal: 10,
-                    paddingVertical: 5,
-                    borderRadius: 999,
+                    borderRadius: 10,
                     borderWidth: 1,
                     borderColor: "#cbd5e1",
                     backgroundColor: "#f8fafc",
+                    paddingVertical: 9,
+                    alignItems: "center",
                   }}
                 >
-                  <Text style={{ fontSize: 12, fontWeight: "800", color: "#0f172a" }}>Open</Text>
-                </View>
+                  <Text style={{ fontWeight: "800", color: "#0f172a" }}>Open feedback</Text>
+                </Pressable>
               </View>
+            ) : (
+              <View style={{ marginTop: 8, gap: 8 }}>
+                {item.workouts.map((workout) => {
+                  const preRoutineIds = Array.isArray(workout.preRoutineIds) ? workout.preRoutineIds : [];
+                  const postRoutineIds = Array.isArray(workout.postRoutineIds) ? workout.postRoutineIds : [];
+                  const peers = groupMatesByWorkoutId.get(workout.id) ?? [];
+                  const prescribed = item.session === "AM" ? dayPlan?.am : dayPlan?.pm;
+                  const prescribedLabel = formatMileage(prescribed) || "Off";
+                  const routineCount = preRoutineIds.length + postRoutineIds.length;
 
-              {workout.details ? (
-                <Text numberOfLines={3} style={{ marginTop: 8, color: "#1f2937" }}>
-                  {workout.details}
-                </Text>
-              ) : null}
+                  return (
+                    <Pressable
+                      key={workout.id}
+                      onPress={() =>
+                        router.push({
+                          pathname: "/(athlete)/workout/[id]",
+                          params: { id: workout.id, name: selectedAthleteName },
+                        })
+                      }
+                      style={{
+                        padding: 10,
+                        borderRadius: 10,
+                        backgroundColor: "#f8fafc",
+                        borderWidth: 1,
+                        borderColor: "#dbe7f3",
+                      }}
+                    >
+                      <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontWeight: "900", fontSize: 16, color: "#0f172a" }}>{workout.title || "Workout"}</Text>
+                          <Text style={{ marginTop: 3, color: "#475569", fontWeight: "700" }}>
+                            {workout.time ? `${workout.time}` : "Time TBA"}
+                            {workout.category ? ` • ${workout.category}` : ""}
+                          </Text>
+                        </View>
+                        <Text style={{ fontSize: 12, fontWeight: "800", color: "#1e40af" }}>Open</Text>
+                      </View>
 
-              {routineCount > 0 ? (
-                <Text style={{ marginTop: 8, color: "#334155", fontWeight: "700" }}>
-                  Routines: {preRoutineIds.length} pre • {postRoutineIds.length} post
-                </Text>
-              ) : null}
+                      {workout.details ? (
+                        <Text numberOfLines={3} style={{ marginTop: 7, color: "#1f2937" }}>
+                          {workout.details}
+                        </Text>
+                      ) : null}
 
-              {peers.length > 0 ? (
-                <Text style={{ marginTop: 8, color: "#444", fontWeight: "700" }}>
-                  Working out with {peers.length} teammate{peers.length === 1 ? "" : "s"}
-                </Text>
-              ) : null}
+                      {routineCount > 0 ? (
+                        <Text style={{ marginTop: 7, color: "#334155", fontWeight: "700" }}>
+                          Routines: {preRoutineIds.length} pre • {postRoutineIds.length} post
+                        </Text>
+                      ) : null}
 
-              <Text style={{ marginTop: 8, color: "#0f172a", fontWeight: "800" }}>
-                Prescribed mileage: {prescribedLabel}
-              </Text>
-              <Text style={{ marginTop: 8, color: "#2563eb", fontWeight: "800" }}>
-                Tap to open workout details and feedback
-              </Text>
-            </Pressable>
-          );
-        }}
+                      {peers.length > 0 ? (
+                        <Text style={{ marginTop: 6, color: "#475569", fontWeight: "700" }}>
+                          With {peers.length} teammate{peers.length === 1 ? "" : "s"}
+                        </Text>
+                      ) : null}
+
+                      <Text style={{ marginTop: 6, color: "#0f172a", fontWeight: "800" }}>
+                        Prescribed: {prescribedLabel}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+        )}
+        ListEmptyComponent={
+          <View
+            style={{
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: "#e2e8f0",
+              backgroundColor: "#fff",
+              padding: 12,
+            }}
+          >
+            <Text style={{ color: "#475569", fontWeight: "700" }}>No planned sessions or workouts for this day.</Text>
+          </View>
+        }
       />
       </Animated.View>
       </GestureDetector>

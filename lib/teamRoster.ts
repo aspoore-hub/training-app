@@ -16,7 +16,17 @@ export type TeamRosterAthlete = {
   claimedUserId: string | null;
   gradYear: number | null;
   isActive: boolean | null;
+  teamStartDate: string | null;
+  teamEndDate: string | null;
 };
+
+export type AthleteSeasonTenureStatus = "applies" | "before_team_start" | "after_team_end";
+
+function isRosterStatusActive(status: string | null | undefined): boolean {
+  const normalized = String(status ?? "").trim().toLowerCase();
+  if (!normalized) return true;
+  return normalized === "active";
+}
 
 function splitDisplayName(displayName: string): { firstName: string; lastName: string } {
   const clean = String(displayName ?? "").trim().replace(/\s+/g, " ");
@@ -85,8 +95,154 @@ export function normalizeTeamRosterAthlete(raw: Partial<TeamAthlete> & { active?
     email,
     claimedUserId: String(raw.claimed_user_id ?? "").trim() || null,
     gradYear: typeof raw.grad_year === "number" && Number.isFinite(raw.grad_year) ? raw.grad_year : null,
-    isActive: typeof raw.active === "boolean" ? raw.active : null,
+    isActive: typeof raw.active === "boolean" ? raw.active : isRosterStatusActive(raw.roster_status),
+    teamStartDate: String(raw.team_start_date ?? "").trim() || null,
+    teamEndDate: String(raw.team_end_date ?? "").trim() || null,
   };
+}
+
+function isValidDateOnlyISO(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function normalizeDateOnly(value: unknown): string | null {
+  const text = String(value ?? "").trim();
+  return isValidDateOnlyISO(text) ? text : null;
+}
+
+export function isAthleteWithinTeamTenureOnDate(
+  athlete:
+    | {
+        teamStartDate?: string | null;
+        teamEndDate?: string | null;
+        team_start_date?: string | null;
+        team_end_date?: string | null;
+      }
+    | null
+    | undefined,
+  dateISO: string
+): boolean {
+  const date = String(dateISO ?? "").trim();
+  if (!isValidDateOnlyISO(date)) return false;
+  const start = String(
+    athlete && "teamStartDate" in athlete
+      ? athlete.teamStartDate
+      : athlete && "team_start_date" in athlete
+        ? athlete.team_start_date
+        : ""
+  ).trim();
+  const end = String(
+    athlete && "teamEndDate" in athlete
+      ? athlete.teamEndDate
+      : athlete && "team_end_date" in athlete
+        ? athlete.team_end_date
+        : ""
+  ).trim();
+
+  if (start && isValidDateOnlyISO(start) && date < start) return false;
+  if (end && isValidDateOnlyISO(end) && date > end) return false;
+  return true;
+}
+
+export function getAthleteSeasonTenureStatus(
+  athlete:
+    | {
+        teamStartDate?: string | null;
+        teamEndDate?: string | null;
+        team_start_date?: string | null;
+        team_end_date?: string | null;
+      }
+    | null
+    | undefined,
+  season: { start_date?: string | null; end_date?: string | null } | null | undefined
+): AthleteSeasonTenureStatus {
+  const seasonStart = normalizeDateOnly(season?.start_date);
+  const seasonEnd = normalizeDateOnly(season?.end_date);
+  const athleteStart = normalizeDateOnly(
+    athlete && "teamStartDate" in athlete
+      ? athlete.teamStartDate
+      : athlete && "team_start_date" in athlete
+        ? athlete.team_start_date
+        : null
+  );
+  const athleteEnd = normalizeDateOnly(
+    athlete && "teamEndDate" in athlete
+      ? athlete.teamEndDate
+      : athlete && "team_end_date" in athlete
+        ? athlete.team_end_date
+        : null
+  );
+
+  if (athleteStart && seasonEnd && athleteStart > seasonEnd) return "before_team_start";
+  if (athleteEnd && seasonStart && athleteEnd < seasonStart) return "after_team_end";
+  return "applies";
+}
+
+export function resolveAthleteSeasonWindowWithTenure(
+  athlete:
+    | {
+        teamStartDate?: string | null;
+        teamEndDate?: string | null;
+        team_start_date?: string | null;
+        team_end_date?: string | null;
+      }
+    | null
+    | undefined,
+  season: { start_date?: string | null; end_date?: string | null },
+  override: { start_date?: string | null; end_date?: string | null } | null | undefined
+): { start_date: string; end_date: string } {
+  const baseStart = String(override?.start_date ?? season.start_date ?? "").trim();
+  const baseEnd = String(override?.end_date ?? season.end_date ?? "").trim();
+  const athleteStart = normalizeDateOnly(
+    athlete && "teamStartDate" in athlete
+      ? athlete.teamStartDate
+      : athlete && "team_start_date" in athlete
+        ? athlete.team_start_date
+        : null
+  );
+  const athleteEnd = normalizeDateOnly(
+    athlete && "teamEndDate" in athlete
+      ? athlete.teamEndDate
+      : athlete && "team_end_date" in athlete
+        ? athlete.team_end_date
+        : null
+  );
+
+  let resolvedStart = baseStart;
+  let resolvedEnd = baseEnd;
+  if (athleteStart && isValidDateOnlyISO(baseStart) && athleteStart > baseStart) {
+    resolvedStart = athleteStart;
+  }
+  if (athleteEnd && isValidDateOnlyISO(baseEnd) && athleteEnd < baseEnd) {
+    resolvedEnd = athleteEnd;
+  }
+  return {
+    start_date: resolvedStart,
+    end_date: resolvedEnd,
+  };
+}
+
+export function isAthleteEligibleOnDate(
+  athlete:
+    | {
+        isActive?: boolean | null;
+        roster_status?: string | null;
+        teamStartDate?: string | null;
+        teamEndDate?: string | null;
+        team_start_date?: string | null;
+        team_end_date?: string | null;
+      }
+    | null
+    | undefined,
+  dateISO: string
+): boolean {
+  if (!athlete) return false;
+  const activeByStatus =
+    typeof athlete.isActive === "boolean"
+      ? athlete.isActive
+      : isRosterStatusActive(athlete.roster_status);
+  if (!activeByStatus) return false;
+  return isAthleteWithinTeamTenureOnDate(athlete, dateISO);
 }
 
 export function compareRosterAthletesByName(a: TeamRosterAthlete, b: TeamRosterAthlete): number {
@@ -130,7 +286,7 @@ export function resolveAthleteDisplayName(
 async function listTeamAthletesForTeam(teamId: string): Promise<TeamAthlete[]> {
   const { data, error } = await supabase
     .from("team_athletes")
-    .select("id,team_id,first_name,last_name,display_name,grad_year,email,claimed_user_id,created_at,updated_at")
+    .select("id,team_id,first_name,last_name,display_name,grad_year,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,created_at,updated_at")
     .eq("team_id", teamId)
     .order("last_name", { ascending: true, nullsFirst: false })
     .order("first_name", { ascending: true, nullsFirst: false })

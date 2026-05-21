@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Dimensions,
   Pressable,
@@ -18,7 +18,8 @@ import Animated, {
   runOnJS,
 } from "react-native-reanimated";
 import { loadJSON, saveJSON } from "../../lib/storage";
-import { getCurrentTeamId, getMyClaimedAthleteProfileId, getTeamAthlete } from "../../lib/team";
+import { resolveAthleteSessionContext } from "../../lib/athleteSession";
+import { ATHLETE_CALENDAR_VIEW_STATE_KEY, type AthleteCalendarViewState } from "../../lib/athleteCalendarView";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../lib/pace";
 import { loadAthletePaceOverrides, resolveAthletePaceSeconds, type AthletePaceOverrides } from "../../lib/athletePace";
 import type { AthleteWorkout, MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
@@ -234,7 +235,7 @@ function toAthleteWorkout(row: TeamWorkoutRow, athleteName: string): AthleteWork
 export default function AthleteMonthCalendar() {
   const router = useRouter();
   const store = teamDataStore.use();
-  const { name } = useLocalSearchParams<{ name?: string }>();
+  const { name, date } = useLocalSearchParams<{ name?: string; date?: string }>();
   const athleteName = name ?? "";
   const todayISO = useMemo(() => {
     const now = new Date();
@@ -257,6 +258,9 @@ export default function AthleteMonthCalendar() {
   const [feedbackWarningMode, setFeedbackWarningMode] = useState<FeedbackWarningMode>("all");
   const [feedbackStartDateISO, setFeedbackStartDateISO] = useState<string | undefined>(undefined);
   const [monthUiHydrated, setMonthUiHydrated] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
+  const inFlightRef = useRef(false);
 
   const loadMonthWeekStartFromShared = useCallback(async () => {
     const weekStartResult = await loadWeekStartSetting();
@@ -270,73 +274,74 @@ export default function AthleteMonthCalendar() {
   }, []);
 
   const loadMonthData = useCallback(async () => {
-    const ws = await loadMonthWeekStartFromShared();
-    const [
-      selected,
-      storedCategories,
-      pace,
-      paceOverrides,
-      feedbackEntries,
-      flagSettings,
-    ] = await Promise.all([
-      loadJSON<string | null>(SELECTED_KEY, null),
-      loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
-      loadPaceSecondsPerMile(),
-      loadAthletePaceOverrides(),
-      loadMileageFeedback(),
-      loadFeedbackFlagSettings(),
-    ]);
-
-    const teamId = await getCurrentTeamId();
-    const claimedAthleteId = await getMyClaimedAthleteProfileId(teamId);
-    const selectedId = String(claimedAthleteId ?? selected ?? "").trim();
-    setSelectedAthleteId(selectedId || null);
-
-    // Optional: fetch the athlete label from Supabase so UI shows the right name
-    let selectedName: string | null = null;
-    if (selectedId) {
-      try {
-        const a = await getTeamAthlete(selectedId);
-        selectedName = a?.display_name ?? null;
-        setSelectedAthleteLabel(selectedName);
-      } catch {
-        setSelectedAthleteLabel(null);
-      }
-    } else {
-      setSelectedAthleteLabel(null);
-    }
-
-    setCategories(normalizeCategories(storedCategories));
-    setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
-    setAthletePaceOverrides(paceOverrides ?? {});
-    setMileageFeedbackEntries(feedbackEntries ?? []);
-    setFeedbackFlagsEnabled(!!flagSettings.enabled);
-    setFeedbackWarningMode(flagSettings.mode ?? "all");
-    setFeedbackStartDateISO(flagSettings.startDateISO);
-
-    if (!selectedId) {
-      setAllWorkouts([]);
+    if (inFlightRef.current) return;
+    const loadKey = toISODate(monthStart(anchorMonth));
+    const now = Date.now();
+    if (lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
       return;
     }
+    inFlightRef.current = true;
+    setLoading(true);
+    try {
+      const ws = await loadMonthWeekStartFromShared();
+      const [
+        selected,
+        storedCategories,
+        pace,
+        paceOverrides,
+        feedbackEntries,
+        flagSettings,
+        athleteSession,
+      ] = await Promise.all([
+        loadJSON<string | null>(SELECTED_KEY, null),
+        loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
+        loadPaceSecondsPerMile(),
+        loadAthletePaceOverrides(),
+        loadMileageFeedback(),
+        loadFeedbackFlagSettings(),
+        resolveAthleteSessionContext(),
+      ]);
 
-    const grid = buildMonthGrid(anchorMonth, ws);
-    const weekStarts = Array.from(new Set(grid.map((cell) => getWeekStartISO(cell.dateISO, ws))));
-    await Promise.all(weekStarts.map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO)));
+      const selectedId = String(athleteSession.athleteId ?? selected ?? "").trim();
+      setSelectedAthleteId(selectedId || null);
+      const selectedName = selectedId ? String(athleteSession.athleteName ?? "").trim() || null : null;
+      setSelectedAthleteLabel(selectedName);
 
-    const startISO = grid[0]?.dateISO ?? toISODate(monthStart(anchorMonth));
-    const endISO = grid[grid.length - 1]?.dateISO ?? startISO;
-    const rows = await listAthleteWorkoutsInRange(selectedId, startISO, endISO);
-    const resolvedAthleteName = selectedName ?? athleteName ?? "Athlete";
-    setAllWorkouts(rows.map((row) => toAthleteWorkout(row, resolvedAthleteName)));
+      setCategories(normalizeCategories(storedCategories));
+      setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
+      setAthletePaceOverrides(paceOverrides ?? {});
+      setMileageFeedbackEntries(feedbackEntries ?? []);
+      setFeedbackFlagsEnabled(!!flagSettings.enabled);
+      setFeedbackWarningMode(flagSettings.mode ?? "all");
+      setFeedbackStartDateISO(flagSettings.startDateISO);
+
+      if (!selectedId) {
+        setAllWorkouts([]);
+        return;
+      }
+
+      const grid = buildMonthGrid(anchorMonth, ws);
+      const weekStarts = Array.from(new Set(grid.map((cell) => getWeekStartISO(cell.dateISO, ws))));
+      const mileageLoadPromise = Promise.all(
+        weekStarts.map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO))
+      );
+
+      const startISO = grid[0]?.dateISO ?? toISODate(monthStart(anchorMonth));
+      const endISO = grid[grid.length - 1]?.dateISO ?? startISO;
+      const rowsPromise = listAthleteWorkoutsInRange(selectedId, startISO, endISO);
+      const [rows] = await Promise.all([rowsPromise, mileageLoadPromise]);
+      const resolvedAthleteName = selectedName ?? athleteName ?? "Athlete";
+      setAllWorkouts(rows.map((row) => toAthleteWorkout(row, resolvedAthleteName)));
+      lastLoadRef.current = { key: loadKey, ts: Date.now() };
+    } finally {
+      setLoading(false);
+      inFlightRef.current = false;
+    }
   }, [anchorMonth, athleteName, loadMonthWeekStartFromShared]);
-
-  useEffect(() => {
-    loadMonthData();
-  }, [loadMonthData]);
 
   useFocusEffect(
     useCallback(() => {
-      loadMonthData();
+      void loadMonthData();
     }, [loadMonthData])
   );
 
@@ -371,6 +376,24 @@ export default function AthleteMonthCalendar() {
       selectedDateISO: isISODateOnly(selectedISO) ? selectedISO : undefined,
     });
   }, [anchorMonth, monthUiHydrated, selectedDateISO]);
+
+  useEffect(() => {
+    const routeDate = String(date ?? "").trim();
+    if (!isISODateOnly(routeDate)) return;
+    const parsed = parseISODate(routeDate);
+    if (Number.isNaN(parsed.getTime())) return;
+    setSelectedDateISO(routeDate);
+    setAnchorMonth(monthStart(parsed));
+  }, [date]);
+
+  useEffect(() => {
+    const selectedISO = String(selectedDateISO ?? "").trim();
+    const dateISO = isISODateOnly(selectedISO) ? selectedISO : toISODate(anchorMonth);
+    void saveJSON<AthleteCalendarViewState>(ATHLETE_CALENDAR_VIEW_STATE_KEY, {
+      view: "month",
+      dateISO,
+    });
+  }, [anchorMonth, selectedDateISO]);
 
   const monthCells = useMemo(() => buildMonthGrid(anchorMonth, weekStartsOn), [anchorMonth, weekStartsOn]);
   const monthRows = useMemo(() => {
@@ -681,7 +704,7 @@ export default function AthleteMonthCalendar() {
         </Pressable>
       </View>
 
-      {!selectedAthleteId ? (
+      {!loading && !selectedAthleteId ? (
         <View style={{ padding: 16, borderRadius: 14, backgroundColor: "#fff6e6", marginBottom: 12 }}>
           <Text style={{ fontWeight: "800", marginBottom: 6 }}>No athlete selected</Text>
           <Text style={{ opacity: 0.75, marginBottom: 10 }}>
@@ -693,6 +716,11 @@ export default function AthleteMonthCalendar() {
           >
             <Text style={{ fontWeight: "800" }}>Select Athlete</Text>
           </Pressable>
+        </View>
+      ) : null}
+      {loading ? (
+        <View style={{ marginBottom: 8, alignItems: "center" }}>
+          <Text style={{ fontSize: 12, color: "#64748b", fontWeight: "700" }}>Loading calendar...</Text>
         </View>
       ) : null}
 
@@ -742,7 +770,7 @@ export default function AthleteMonthCalendar() {
                               setSelectedDateISO(iso);
                               router.push({
                                 pathname: "/(athlete)/day",
-                                params: { date: iso },
+                                params: { date: iso, returnView: "month", returnDate: iso },
                               });
                             }}
                             style={({ pressed }) => [

@@ -34,12 +34,30 @@ export type TeamWorkoutRow = {
 
   planned_distance: number | null;
   planned_distance_unit: "mi" | "km" | null;
+  completed_miles: number | null;
+  completed_time_text: string | null;
+  splits_or_pace: string | null;
+  additional_feedback: string | null;
 
   created_at: string;
   updated_at: string;
 };
 
-export type TeamWorkoutInsertRow = Omit<TeamWorkoutRow, "id" | "created_at" | "updated_at">;
+export type TeamWorkoutInsertRow = Omit<
+  TeamWorkoutRow,
+  | "id"
+  | "created_at"
+  | "updated_at"
+  | "completed_miles"
+  | "completed_time_text"
+  | "splits_or_pace"
+  | "additional_feedback"
+> & {
+  completed_miles?: number | null;
+  completed_time_text?: string | null;
+  splits_or_pace?: string | null;
+  additional_feedback?: string | null;
+};
 export type TeamWorkoutInsertInput = Omit<TeamWorkoutInsertRow, "team_id"> & {
   team_id?: string;
 };
@@ -126,6 +144,10 @@ export function buildTeamWorkoutInsertRows(params: TeamWorkoutInsertParams): Tea
     post_routine_ids: post_routine_ids ?? null,
     planned_distance: readDistance(String(athleteId)),
     planned_distance_unit: readDistance(String(athleteId)) != null ? plannedDistanceUnit : null,
+    completed_miles: null,
+    completed_time_text: null,
+    splits_or_pace: null,
+    additional_feedback: null,
   }));
 }
 
@@ -183,18 +205,30 @@ export async function listTeamWorkoutsInRange(
   dateEndISO: string
 ): Promise<TeamWorkoutRow[]> {
   const teamId = await requireTeamId();
+  const pageSize = 1000;
+  const rows: TeamWorkoutRow[] = [];
+  let from = 0;
 
-  const { data, error } = await supabase
-    .from("team_workouts")
-    .select("*")
-    .eq("team_id", teamId)
-    .gte("date_iso", dateStartISO)
-    .lte("date_iso", dateEndISO)
-    .order("date_iso", { ascending: true })
-    .order("session", { ascending: true });
+  while (true) {
+    const to = from + pageSize - 1;
+    const { data, error } = await supabase
+      .from("team_workouts")
+      .select("*")
+      .eq("team_id", teamId)
+      .gte("date_iso", dateStartISO)
+      .lte("date_iso", dateEndISO)
+      .order("date_iso", { ascending: true })
+      .order("session", { ascending: true })
+      .range(from, to);
 
-  if (error) throw error;
-  return (data ?? []) as TeamWorkoutRow[];
+    if (error) throw error;
+    const page = (data ?? []) as TeamWorkoutRow[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return rows;
 }
 
 export async function listAthleteWorkoutsInRange(

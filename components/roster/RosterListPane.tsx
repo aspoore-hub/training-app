@@ -51,6 +51,7 @@ export function RosterListPane() {
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [lastInviteToken, setLastInviteToken] = useState("");
+  const [rosterFilter, setRosterFilter] = useState<"active" | "all" | "inactive">("active");
 
   async function debugRLS() {
     if (!DEBUG_RLS) return;
@@ -92,7 +93,13 @@ export function RosterListPane() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const sorted = [...s.roster].sort((a, b) => {
+    const sourceRoster =
+      rosterFilter === "all"
+        ? s.roster
+        : rosterFilter === "inactive"
+          ? teamDataStore.getInactiveRoster()
+          : teamDataStore.getActiveRoster();
+    const sorted = [...sourceRoster].sort((a, b) => {
       const ak = sortKeyForAthlete(a);
       const bk = sortKeyForAthlete(b);
       const lastCmp = ak.last.localeCompare(bk.last);
@@ -108,7 +115,7 @@ export function RosterListPane() {
         const athleteEmail = String(a.email ?? "").toLowerCase();
         return athleteName.includes(q) || athleteEmail.includes(q) || athleteId.includes(q);
     });
-  }, [s.roster, query]);
+  }, [s.roster, query, rosterFilter]);
 
   const listCountLabel = useMemo(() => {
     const total = filtered.length;
@@ -360,6 +367,53 @@ export function RosterListPane() {
               <View style={{ flexDirection: "row", alignItems: "baseline", justifyContent: "space-between" }}>
                 <AppText variant="headline">Roster list</AppText>
                 <AppText variant="sub" color="mutedText">{listCountLabel}</AppText>
+              </View>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <Pressable
+                  onPress={() => setRosterFilter("active")}
+                  style={{
+                    borderWidth: 1,
+                    borderColor: rosterFilter === "active" ? "#111" : "#d7dfeb",
+                    backgroundColor: rosterFilter === "active" ? "#111" : "#fff",
+                    borderRadius: 999,
+                    paddingVertical: 4,
+                    paddingHorizontal: 9,
+                  }}
+                >
+                  <AppText variant="caption" style={{ color: rosterFilter === "active" ? "#fff" : "#111", fontWeight: "800" }}>
+                    Active
+                  </AppText>
+                </Pressable>
+                <Pressable
+                  onPress={() => setRosterFilter("all")}
+                  style={{
+                    borderWidth: 1,
+                    borderColor: rosterFilter === "all" ? "#111" : "#d7dfeb",
+                    backgroundColor: rosterFilter === "all" ? "#111" : "#fff",
+                    borderRadius: 999,
+                    paddingVertical: 4,
+                    paddingHorizontal: 9,
+                  }}
+                >
+                  <AppText variant="caption" style={{ color: rosterFilter === "all" ? "#fff" : "#111", fontWeight: "800" }}>
+                    All
+                  </AppText>
+                </Pressable>
+                <Pressable
+                  onPress={() => setRosterFilter("inactive")}
+                  style={{
+                    borderWidth: 1,
+                    borderColor: rosterFilter === "inactive" ? "#111" : "#d7dfeb",
+                    backgroundColor: rosterFilter === "inactive" ? "#111" : "#fff",
+                    borderRadius: 999,
+                    paddingVertical: 4,
+                    paddingHorizontal: 9,
+                  }}
+                >
+                  <AppText variant="caption" style={{ color: rosterFilter === "inactive" ? "#fff" : "#111", fontWeight: "800" }}>
+                    Inactive
+                  </AppText>
+                </Pressable>
               </View>
               <AppText variant="caption" color="mutedText">
                 Search by athlete name, email, or UUID.

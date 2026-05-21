@@ -2,10 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
 import { loadFeedbackFlagSettings, type FeedbackWarningMode } from "../../lib/feedbackFlags";
+import {
+  hasMileageFeedback as hasMileageFeedbackEntry,
+  hasWorkoutFeedback as hasWorkoutFeedbackRow,
+} from "../../lib/feedbackParsing";
 import { loadMileageFeedback, type MileageSessionFeedback } from "../../lib/mileageFeedback";
 import { loadWeekStartSetting } from "../../lib/settings";
 import { loadJSON, saveJSON } from "../../lib/storage";
-import { getCurrentTeamId, getMyClaimedAthleteProfileId, getTeamAthlete } from "../../lib/team";
+import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import { listAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
 import { teamDataStore } from "../../lib/teamDataStore";
 import { formatMileage, getWeekIndex, getWeekStartISO, parseISODate, parseMileageInput, toISODate } from "../../lib/mileagePlan";
@@ -20,6 +24,12 @@ type PendingItem = {
   subtitle: string;
   description?: string;
   routeParams: Record<string, string>;
+};
+
+type PendingDayGroup = {
+  dateISO: string;
+  label: string;
+  items: PendingItem[];
 };
 
 type SubmittedItem = {
@@ -62,21 +72,11 @@ function formatDisplayDate(iso: string) {
 }
 
 function hasFeedbackInWorkout(row: TeamWorkoutRow): boolean {
-  return (
-    typeof (row as any).completed_miles === "number" ||
-    String((row as any).completed_time_text ?? "").trim().length > 0 ||
-    String((row as any).splits_or_pace ?? "").trim().length > 0 ||
-    String((row as any).additional_feedback ?? "").trim().length > 0
-  );
+  return hasWorkoutFeedbackRow(row);
 }
 
 function hasFeedbackInMileageEntry(entry: MileageSessionFeedback): boolean {
-  return (
-    typeof entry.completedMiles === "number" ||
-    String(entry.completedTime ?? "").trim().length > 0 ||
-    String(entry.splitsOrPace ?? "").trim().length > 0 ||
-    String(entry.additionalFeedback ?? "").trim().length > 0
-  );
+  return hasMileageFeedbackEntry(entry);
 }
 
 function isDateWithinWindow(
@@ -139,16 +139,27 @@ export default function FeedbackHub() {
   const [mileageFeedbackEntries, setMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
   const [scrollY, setScrollY] = useState(0);
   const [uiHydrated, setUiHydrated] = useState(false);
+  const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
+  const inFlightRef = useRef(false);
+  const activeLoadKeyRef = useRef("");
 
   const todayISO = useMemo(() => toISODate(new Date()), []);
 
   const loadData = useCallback(async () => {
+    if (inFlightRef.current) return;
+    const loadKey = todayISO;
+    const now = Date.now();
+    if (lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
+      return;
+    }
+    inFlightRef.current = true;
+    activeLoadKeyRef.current = loadKey;
     setLoading(true);
     try {
-      const [weekStartResult, flagSettings, allMileageFeedback] = await Promise.all([
+      const [weekStartResult, flagSettings, athleteSession] = await Promise.all([
         loadWeekStartSetting(),
         loadFeedbackFlagSettings(),
-        loadMileageFeedback(),
+        resolveAthleteSessionContext(),
       ]);
 
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
@@ -156,25 +167,18 @@ export default function FeedbackHub() {
       setWindowMode(flagSettings.mode ?? "all");
       setWindowStartDateISO(flagSettings.startDateISO);
 
-      const teamId = await getCurrentTeamId();
-      const claimedAthleteId = await getMyClaimedAthleteProfileId(teamId);
-      const resolvedAthleteId = String(claimedAthleteId ?? "").trim();
+      const resolvedAthleteId = String(athleteSession.athleteId ?? "").trim();
       setSelectedAthleteId(resolvedAthleteId || null);
 
       if (!resolvedAthleteId) {
         setSelectedAthleteName(null);
         setWorkoutRows([]);
         setMileageFeedbackEntries([]);
+        setLoading(false);
         return;
       }
 
-      let athleteName: string | null = null;
-      try {
-        const athlete = await getTeamAthlete(resolvedAthleteId);
-        athleteName = String(athlete?.display_name ?? "").trim() || null;
-      } catch {
-        athleteName = null;
-      }
+      const athleteName = String(athleteSession.athleteName ?? "").trim() || null;
       setSelectedAthleteName(athleteName);
 
       const windowDates = daysBetween(addDaysISO(todayISO, -90), todayISO).filter((dateISO) =>
@@ -184,6 +188,7 @@ export default function FeedbackHub() {
       if (windowDates.length === 0) {
         setWorkoutRows([]);
         setMileageFeedbackEntries([]);
+        setLoading(false);
         return;
       }
 
@@ -193,30 +198,45 @@ export default function FeedbackHub() {
       const uniqueWeekStarts = Array.from(
         new Set(windowDates.map((dateISO) => getWeekStartISO(dateISO, resolvedWeekStart)))
       );
-      await Promise.all(uniqueWeekStarts.map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO)));
+      await teamDataStore.actions.loadMileageWeek(getWeekStartISO(todayISO, resolvedWeekStart));
 
-      const rows = await listAthleteWorkoutsInRange(resolvedAthleteId, startISO, endISO);
-      setWorkoutRows(rows);
+      const recentRows = await listAthleteWorkoutsInRange(resolvedAthleteId, addDaysISO(todayISO, -14), todayISO);
+      if (activeLoadKeyRef.current !== loadKey) return;
+      setWorkoutRows(recentRows);
+      setLoading(false);
 
-      const filteredMileageFeedback = allMileageFeedback.filter((entry) => {
-        const entryAthleteId = String((entry as any)?.athleteId ?? "").trim();
-        const athleteMatchById = entryAthleteId === resolvedAthleteId;
-        const athleteMatchByName =
-          !entryAthleteId &&
-          athleteName &&
-          String(entry.athleteName ?? "").trim().toLowerCase() === athleteName.toLowerCase();
-        if (!athleteMatchById && !athleteMatchByName) return false;
-        return windowDates.includes(String(entry.dateISO ?? ""));
-      });
-      setMileageFeedbackEntries(filteredMileageFeedback);
+      // Hydrate full feedback window in background.
+      void (async () => {
+        const [allMileageFeedback, rows] = await Promise.all([
+          loadMileageFeedback(),
+          listAthleteWorkoutsInRange(resolvedAthleteId, startISO, endISO),
+          Promise.all(uniqueWeekStarts.map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO))),
+        ]);
+        if (activeLoadKeyRef.current !== loadKey) return;
+        setWorkoutRows(rows);
+        const filteredMileageFeedback = allMileageFeedback.filter((entry) => {
+          const entryAthleteId = String((entry as any)?.athleteId ?? "").trim();
+          const athleteMatchById = entryAthleteId === resolvedAthleteId;
+          const athleteMatchByName =
+            !entryAthleteId &&
+            athleteName &&
+            String(entry.athleteName ?? "").trim().toLowerCase() === athleteName.toLowerCase();
+          if (!athleteMatchById && !athleteMatchByName) return false;
+          return windowDates.includes(String(entry.dateISO ?? ""));
+        });
+        setMileageFeedbackEntries(filteredMileageFeedback);
+        lastLoadRef.current = { key: loadKey, ts: Date.now() };
+      })();
+      return;
     } finally {
       setLoading(false);
+      inFlightRef.current = false;
     }
   }, [todayISO]);
 
   useFocusEffect(
     useCallback(() => {
-      loadData();
+      void loadData();
     }, [loadData])
   );
 
@@ -325,7 +345,7 @@ export default function FeedbackHub() {
         submitted.push({
           key: `workout:${row.id}`,
           dateISO,
-          updatedAt: Date.parse(String((row as any).updated_at ?? "")) || 0,
+          updatedAt: Date.parse(String(row.updated_at ?? "")) || 0,
           title: String(row.title ?? "Workout"),
           subtitle: `${formatDisplayDate(dateISO)} • ${session}`,
           routeParams: {
@@ -426,10 +446,26 @@ export default function FeedbackHub() {
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 12);
 
-    return { pending, recent };
+    const pendingByDayMap = new Map<string, PendingItem[]>();
+    for (const item of pending) {
+      const list = pendingByDayMap.get(item.dateISO) ?? [];
+      list.push(item);
+      pendingByDayMap.set(item.dateISO, list);
+    }
+
+    const pendingByDay: PendingDayGroup[] = Array.from(pendingByDayMap.entries())
+      .sort(([a], [b]) => String(b).localeCompare(String(a)))
+      .map(([dateISO, items]) => ({
+        dateISO,
+        label: formatDisplayDate(dateISO),
+        items: items.sort((a, b) => (a.session === b.session ? 0 : a.session === "AM" ? -1 : 1)),
+      }));
+
+    return { pending, pendingByDay, recent };
   }, [mileageFeedbackEntries, plannedBySession, selectedAthleteId, selectedAthleteName, windowDates, workoutRows]);
 
   const pending = sections.pending;
+  const pendingByDay = sections.pendingByDay;
   const recent = sections.recent;
 
   return (
@@ -522,25 +558,82 @@ export default function FeedbackHub() {
           </View>
         ) : (
           <View style={{ marginTop: 10, gap: 10 }}>
-            {pending.map((item) => (
-              <Pressable
-                key={item.key}
-                onPress={() => router.push({ pathname: "/(athlete)/workout/[id]", params: item.routeParams })}
+            {pendingByDay.map((dayGroup) => (
+              <View
+                key={dayGroup.dateISO}
                 style={{
                   borderRadius: 14,
                   borderWidth: 1,
-                  borderColor: "#fecaca",
+                  borderColor: "#e2e8f0",
                   backgroundColor: "#ffffff",
                   padding: 14,
                 }}
               >
-                <Text style={{ fontSize: 16, fontWeight: "900", color: "#111827" }}>{item.title}</Text>
-                <Text style={{ marginTop: 3, color: "#475569", fontWeight: "700" }}>{item.subtitle}</Text>
-                {item.description ? (
-                  <Text style={{ marginTop: 5, color: "#334155" }}>{item.description}</Text>
-                ) : null}
-                <Text style={{ marginTop: 8, color: "#dc2626", fontWeight: "900" }}>Open feedback</Text>
-              </Pressable>
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                  <Text style={{ fontSize: 17, fontWeight: "900", color: "#0f172a" }}>{dayGroup.label}</Text>
+                  <View
+                    style={{
+                      borderRadius: 999,
+                      borderWidth: 1,
+                      borderColor: "#fecaca",
+                      backgroundColor: "#fff1f2",
+                      paddingHorizontal: 8,
+                      paddingVertical: 3,
+                    }}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: "900", color: "#be123c" }}>
+                      {dayGroup.items.length} {dayGroup.items.length === 1 ? "session" : "sessions"}
+                    </Text>
+                  </View>
+                </View>
+
+                <Pressable
+                  onPress={() =>
+                    router.push({
+                      pathname: "/(athlete)/day",
+                      params: { date: dayGroup.dateISO },
+                    })
+                  }
+                  style={{
+                    marginTop: 8,
+                    alignSelf: "flex-start",
+                    borderRadius: 999,
+                    borderWidth: 1,
+                    borderColor: "#cbd5e1",
+                    backgroundColor: "#f8fafc",
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                  }}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: "800", color: "#334155" }}>Open day</Text>
+                </Pressable>
+
+                <View style={{ marginTop: 10, gap: 8 }}>
+                  {dayGroup.items.map((item) => (
+                    <Pressable
+                      key={item.key}
+                      onPress={() => router.push({ pathname: "/(athlete)/workout/[id]", params: item.routeParams })}
+                      style={{
+                        borderRadius: 12,
+                        borderWidth: 1,
+                        borderColor: "#fecaca",
+                        backgroundColor: "#fffafa",
+                        padding: 11,
+                      }}
+                    >
+                      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                        <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>{item.session}</Text>
+                        <Text style={{ fontSize: 12, fontWeight: "900", color: "#dc2626" }}>Needs feedback</Text>
+                      </View>
+                      <Text style={{ marginTop: 4, fontSize: 16, fontWeight: "900", color: "#111827" }}>{item.title}</Text>
+                      {item.description ? (
+                        <Text style={{ marginTop: 4, color: "#334155" }}>{item.description}</Text>
+                      ) : null}
+                      <Text style={{ marginTop: 7, color: "#dc2626", fontWeight: "900" }}>Open feedback</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
             ))}
           </View>
         )}

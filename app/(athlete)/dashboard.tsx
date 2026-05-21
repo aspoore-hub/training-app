@@ -1,17 +1,20 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
 import { loadFeedbackFlagSettings, type FeedbackWarningMode } from "../../lib/feedbackFlags";
+import {
+  hasMileageFeedback as hasMileageFeedbackEntry,
+  hasWorkoutFeedback as hasWorkoutFeedbackRow,
+} from "../../lib/feedbackParsing";
 import { loadMileageFeedback, type MileageSessionFeedback } from "../../lib/mileageFeedback";
 import { loadWeekStartSetting } from "../../lib/settings";
 import { loadJSON } from "../../lib/storage";
-import { getCurrentTeamId, getMyClaimedAthleteProfileId, getTeamAthlete } from "../../lib/team";
+import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import { listAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
 import { teamDataStore } from "../../lib/teamDataStore";
 import { formatMileage, getWeekIndex, getWeekStartISO, parseISODate, parseMileageInput, toISODate } from "../../lib/mileagePlan";
-import type { MileageValue, WeekStartDay } from "../../lib/types";
-
-const KEY_SELECTED = "training_app_selected_athlete_v1";
+import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../lib/categories";
+import type { MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
 
 type PendingTarget = {
   key: string;
@@ -19,6 +22,16 @@ type PendingTarget = {
   subtitle: string;
   description?: string;
   routeParams: Record<string, string>;
+};
+
+type SessionPreview = {
+  session: "AM" | "PM";
+  workoutId: string;
+  title: string;
+  details: string;
+  timeLocation: string;
+  categories: string[];
+  moreCount: number;
 };
 
 function normalizeSession(value: string | undefined): "AM" | "PM" {
@@ -57,22 +70,20 @@ function daysBetween(startISO: string, endISO: string): string[] {
   return out;
 }
 
+function workoutCategoryNames(row: TeamWorkoutRow): string[] {
+  const arr = Array.isArray((row as any)?.categories)
+    ? (row as any).categories
+    : [String((row as any)?.primary_category ?? "Other")];
+  const cleaned = arr.map((x: any) => String(x ?? "").trim()).filter(Boolean);
+  return cleaned.length > 0 ? cleaned : ["Other"];
+}
+
 function hasFeedbackInWorkout(row: TeamWorkoutRow): boolean {
-  return (
-    typeof (row as any).completed_miles === "number" ||
-    String((row as any).completed_time_text ?? "").trim().length > 0 ||
-    String((row as any).splits_or_pace ?? "").trim().length > 0 ||
-    String((row as any).additional_feedback ?? "").trim().length > 0
-  );
+  return hasWorkoutFeedbackRow(row);
 }
 
 function hasFeedbackInMileageEntry(entry: MileageSessionFeedback): boolean {
-  return (
-    typeof entry.completedMiles === "number" ||
-    String(entry.completedTime ?? "").trim().length > 0 ||
-    String(entry.splitsOrPace ?? "").trim().length > 0 ||
-    String(entry.additionalFeedback ?? "").trim().length > 0
-  );
+  return hasMileageFeedbackEntry(entry);
 }
 
 function isDateWithinWindow(
@@ -118,21 +129,35 @@ export default function AthleteDashboardScreen() {
   const [selectedAthleteName, setSelectedAthleteName] = useState<string | null>(null);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
   const [todayRows, setTodayRows] = useState<TeamWorkoutRow[]>([]);
+  const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [windowRows, setWindowRows] = useState<TeamWorkoutRow[]>([]);
   const [windowMileageFeedbackEntries, setWindowMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
   const [feedbackWindowMode, setFeedbackWindowMode] = useState<FeedbackWarningMode>("all");
   const [feedbackWindowStartDateISO, setFeedbackWindowStartDateISO] = useState<string | undefined>(undefined);
+  const [pendingLoading, setPendingLoading] = useState(true);
+  const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
+  const inFlightRef = useRef(false);
+  const activeLoadKeyRef = useRef("");
 
   const todayISO = useMemo(() => toISODate(new Date()), []);
 
   const loadData = useCallback(async () => {
+    if (inFlightRef.current) return;
+    const loadKey = todayISO;
+    const now = Date.now();
+    if (lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
+      return;
+    }
+    inFlightRef.current = true;
+    activeLoadKeyRef.current = loadKey;
     setLoading(true);
+    setPendingLoading(true);
     try {
-      const [selected, weekStartResult, allMileageFeedback, feedbackSettings] = await Promise.all([
-        loadJSON<string | null>(KEY_SELECTED, null),
+      const [weekStartResult, feedbackSettings, athleteSession, storedCategories] = await Promise.all([
         loadWeekStartSetting(),
-        loadMileageFeedback(),
         loadFeedbackFlagSettings(),
+        resolveAthleteSessionContext(),
+        loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       ]);
 
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
@@ -140,27 +165,21 @@ export default function AthleteDashboardScreen() {
       setFeedbackWindowMode(feedbackSettings.mode ?? "all");
       setFeedbackWindowStartDateISO(feedbackSettings.startDateISO);
 
-      const teamId = await getCurrentTeamId();
-      const claimedAthleteId = await getMyClaimedAthleteProfileId(teamId);
-      const fallbackSelected = String(selected ?? "").trim();
-      const resolvedAthleteId = String(claimedAthleteId ?? fallbackSelected).trim();
+      const resolvedAthleteId = String(athleteSession.athleteId ?? "").trim();
       setSelectedAthleteId(resolvedAthleteId || null);
+      setCategories(normalizeCategories(storedCategories));
 
       if (!resolvedAthleteId) {
         setSelectedAthleteName(null);
         setTodayRows([]);
         setWindowRows([]);
         setWindowMileageFeedbackEntries([]);
+        setPendingLoading(false);
+        setLoading(false);
         return;
       }
 
-      let athleteName: string | null = null;
-      try {
-        const athlete = await getTeamAthlete(resolvedAthleteId);
-        athleteName = String(athlete?.display_name ?? "").trim() || null;
-      } catch {
-        athleteName = null;
-      }
+      const athleteName = String(athleteSession.athleteName ?? "").trim() || null;
       setSelectedAthleteName(athleteName);
 
       const windowDates = daysBetween(addDaysISO(todayISO, -90), todayISO).filter((dateISO) =>
@@ -171,26 +190,42 @@ export default function AthleteDashboardScreen() {
 
       const weekStartsToLoad = new Set<string>();
       weekStartsToLoad.add(getWeekStartISO(todayISO, resolvedWeekStart));
-      windowDates.forEach((dateISO) => weekStartsToLoad.add(getWeekStartISO(dateISO, resolvedWeekStart)));
-      await Promise.all(Array.from(weekStartsToLoad).map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO)));
+      await teamDataStore.actions.loadMileageWeek(getWeekStartISO(todayISO, resolvedWeekStart));
 
-      const rows = await listAthleteWorkoutsInRange(resolvedAthleteId, windowStartISO, windowEndISO);
-      setWindowRows(rows);
-      setTodayRows(rows.filter((row) => String(row.date_iso) === todayISO));
+      const todayOnlyRows = await listAthleteWorkoutsInRange(resolvedAthleteId, todayISO, todayISO);
+      if (activeLoadKeyRef.current !== loadKey) return;
+      setTodayRows(todayOnlyRows);
+      setWindowRows(todayOnlyRows);
+      setLoading(false);
 
-      const filteredMileage = allMileageFeedback.filter((entry) => {
-        const entryAthleteId = String((entry as any)?.athleteId ?? "").trim();
-        const byId = entryAthleteId === resolvedAthleteId;
-        const byName =
-          !entryAthleteId &&
-          athleteName &&
-          String(entry.athleteName ?? "").trim().toLowerCase() === athleteName.toLowerCase();
-        if (!byId && !byName) return false;
-        return windowDates.includes(String(entry.dateISO ?? ""));
-      });
-      setWindowMileageFeedbackEntries(filteredMileage);
+      // Hydrate heavier feedback-window data in background.
+      void (async () => {
+        windowDates.forEach((dateISO) => weekStartsToLoad.add(getWeekStartISO(dateISO, resolvedWeekStart)));
+        const [allMileageFeedback, rows] = await Promise.all([
+          loadMileageFeedback(),
+          listAthleteWorkoutsInRange(resolvedAthleteId, windowStartISO, windowEndISO),
+          Promise.all(Array.from(weekStartsToLoad).map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO))),
+        ]);
+        if (activeLoadKeyRef.current !== loadKey) return;
+        setWindowRows(rows);
+        const filteredMileage = allMileageFeedback.filter((entry) => {
+          const entryAthleteId = String((entry as any)?.athleteId ?? "").trim();
+          const byId = entryAthleteId === resolvedAthleteId;
+          const byName =
+            !entryAthleteId &&
+            athleteName &&
+            String(entry.athleteName ?? "").trim().toLowerCase() === athleteName.toLowerCase();
+          if (!byId && !byName) return false;
+          return windowDates.includes(String(entry.dateISO ?? ""));
+        });
+        setWindowMileageFeedbackEntries(filteredMileage);
+        setPendingLoading(false);
+        lastLoadRef.current = { key: loadKey, ts: Date.now() };
+      })();
+      return;
     } finally {
       setLoading(false);
+      inFlightRef.current = false;
     }
   }, [todayISO]);
 
@@ -240,17 +275,52 @@ export default function AthleteDashboardScreen() {
     };
   }, [selectedAthleteId, store.mileageCellsByWeek, store.mileageFlagsByWeek, todayISO, weekStartsOn]);
 
-  const todayWorkoutSummary = useMemo(() => {
-    const sorted = [...todayRows].sort((a, b) => {
-      const sessionCompare = normalizeSession(a.session).localeCompare(normalizeSession(b.session));
-      if (sessionCompare !== 0) return sessionCompare;
-      return String(a.updated_at ?? "").localeCompare(String(b.updated_at ?? "")) * -1;
-    });
-    const first = sorted[0] ?? null;
-    return {
-      first,
-      count: sorted.length,
-    };
+  const todaySummary = useMemo(() => {
+    if (!todayAssignment?.hasPlan) {
+      return {
+        am: "",
+        pm: "",
+        goal: "",
+      };
+    }
+
+    const am = String(todayAssignment.amLabel ?? "").trim();
+    const pm = String(todayAssignment.pmLabel ?? "").trim();
+    const segments = [am, pm].filter(Boolean);
+    const goal = segments.length > 0 ? segments.join(" • ") : todayAssignment.ncaaOff ? "Off day" : "";
+    return { am, pm, goal };
+  }, [todayAssignment]);
+
+  const todaySessionPreviews = useMemo<SessionPreview[]>(() => {
+    const bySession = new Map<"AM" | "PM", TeamWorkoutRow[]>();
+    for (const row of todayRows) {
+      const session = normalizeSession(row.session);
+      const list = bySession.get(session) ?? [];
+      list.push(row);
+      bySession.set(session, list);
+    }
+
+    return (["AM", "PM"] as const)
+      .map((session) => {
+        const rows = (bySession.get(session) ?? []).sort((a, b) =>
+          String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""))
+        );
+        if (rows.length === 0) return null;
+        const top = rows[0];
+        const time = String(top.time_text ?? "").trim();
+        const location = String((top as any).location ?? "").trim();
+        const timeLocation = time || location ? `${time || "—"} @ ${location || "—"}` : "";
+        return {
+          session,
+          workoutId: String(top.id),
+          title: String(top.title ?? "").trim() || "Workout",
+          details: String(top.details ?? "").trim(),
+          timeLocation,
+          categories: workoutCategoryNames(top),
+          moreCount: Math.max(0, rows.length - 1),
+        };
+      })
+      .filter((item): item is SessionPreview => Boolean(item));
   }, [todayRows]);
 
   const pendingTarget = useMemo<PendingTarget | null>(() => {
@@ -358,59 +428,24 @@ export default function AthleteDashboardScreen() {
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: "#f6f8fb" }}
-      contentContainerStyle={{ padding: 16, paddingBottom: 30 }}
+      contentContainerStyle={{ padding: 16, paddingBottom: 28, gap: 12 }}
       keyboardShouldPersistTaps="handled"
     >
       <View
         style={{
-          borderRadius: 16,
+          borderRadius: 14,
           borderWidth: 1,
           borderColor: "#dbeafe",
           backgroundColor: "#ffffff",
-          padding: 14,
+          padding: 12,
         }}
       >
-        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>ATHLETE HOME</Text>
-        <Text style={{ marginTop: 6, fontSize: 28, fontWeight: "900", color: "#0f172a" }}>Dashboard</Text>
-        <Text style={{ marginTop: 4, color: "#475569", fontWeight: "700" }}>
+        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>HOME</Text>
+        <Text style={{ marginTop: 4, fontSize: 24, fontWeight: "900", color: "#0f172a" }}>Dashboard</Text>
+        <Text style={{ marginTop: 3, color: "#475569", fontWeight: "700" }}>
           {selectedAthleteName ? `${selectedAthleteName} • ` : ""}
           {formatDisplayDate(todayISO)}
         </Text>
-        <View style={{ marginTop: 12, flexDirection: "row", gap: 8 }}>
-          <Pressable
-            onPress={() => router.push("/(athlete)/month")}
-            style={{
-              flex: 1,
-              borderRadius: 10,
-              borderWidth: 1,
-              borderColor: "#cbd5e1",
-              backgroundColor: "#f8fafc",
-              paddingVertical: 11,
-              alignItems: "center",
-            }}
-          >
-            <Text style={{ fontWeight: "800", color: "#0f172a" }}>Open Calendar</Text>
-          </Pressable>
-          <Pressable
-            onPress={() =>
-              router.push({
-                pathname: "/(athlete)/day",
-                params: { date: todayISO },
-              })
-            }
-            style={{
-              flex: 1,
-              borderRadius: 10,
-              borderWidth: 1,
-              borderColor: "#bfdbfe",
-              backgroundColor: "#eff6ff",
-              paddingVertical: 11,
-              alignItems: "center",
-            }}
-          >
-            <Text style={{ fontWeight: "800", color: "#1e40af" }}>Open Daily View</Text>
-          </Pressable>
-        </View>
       </View>
 
       {loading ? (
@@ -454,72 +489,107 @@ export default function AthleteDashboardScreen() {
 
       <View
         style={{
-          marginTop: 16,
           borderRadius: 14,
           borderWidth: 1,
           borderColor: "#dbeafe",
           backgroundColor: "#ffffff",
-          padding: 14,
+          padding: 12,
         }}
       >
-        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>TODAY'S PLAN</Text>
-        <Text style={{ marginTop: 4, fontSize: 18, fontWeight: "900", color: "#0f172a" }}>Today's Assignment</Text>
+        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>TODAY</Text>
         {loading ? (
-          <Text style={{ marginTop: 8, color: "#64748b", fontWeight: "700" }}>Loading assignment...</Text>
+          <Text style={{ marginTop: 8, color: "#64748b", fontWeight: "700" }}>Loading today...</Text>
         ) : !todayAssignment?.hasPlan ? (
-          <View
-            style={{
-              marginTop: 8,
-              borderRadius: 10,
-              borderWidth: 1,
-              borderColor: "#e2e8f0",
-              backgroundColor: "#f8fafc",
-              paddingVertical: 9,
-              paddingHorizontal: 10,
-            }}
-          >
-            <Text style={{ color: "#475569", fontWeight: "700" }}>No assignment set for today.</Text>
-            <Text style={{ marginTop: 2, color: "#64748b", fontSize: 12 }}>Open Daily View to review your full day.</Text>
-          </View>
+          <Text style={{ marginTop: 8, color: "#475569", fontWeight: "700" }}>No assignment set for today.</Text>
         ) : (
           <>
-            <View style={{ marginTop: 10, gap: 8 }}>
-              {todayAssignment.amLabel ? (
-                <View
-                  style={{
-                    borderRadius: 10,
-                    borderWidth: 1,
-                    borderColor: "#e2e8f0",
-                    backgroundColor: "#f8fafc",
-                    padding: 10,
-                  }}
-                >
-                  <Text style={{ fontWeight: "900", color: "#334155", fontSize: 12 }}>AM</Text>
-                  <Text style={{ marginTop: 3, color: "#0f172a", fontWeight: "900", fontSize: 16 }}>{todayAssignment.amLabel}</Text>
-                </View>
-              ) : null}
-              {todayAssignment.pmLabel ? (
-                <View
-                  style={{
-                    borderRadius: 10,
-                    borderWidth: 1,
-                    borderColor: "#e2e8f0",
-                    backgroundColor: "#f8fafc",
-                    padding: 10,
-                  }}
-                >
-                  <Text style={{ fontWeight: "900", color: "#334155", fontSize: 12 }}>PM</Text>
-                  <Text style={{ marginTop: 3, color: "#0f172a", fontWeight: "900", fontSize: 16 }}>{todayAssignment.pmLabel}</Text>
-                </View>
-              ) : null}
+            <View style={{ marginTop: 8, flexDirection: "row", gap: 8 }}>
+              <View style={{ flex: 1, borderRadius: 9, borderWidth: 1, borderColor: "#e2e8f0", backgroundColor: "#f8fafc", paddingVertical: 7, paddingHorizontal: 9 }}>
+                <Text style={{ fontSize: 11, fontWeight: "900", color: "#475569" }}>AM</Text>
+                <Text style={{ marginTop: 2, color: "#0f172a", fontWeight: "900" }}>{todaySummary.am || "—"}</Text>
+              </View>
+              <View style={{ flex: 1, borderRadius: 9, borderWidth: 1, borderColor: "#e2e8f0", backgroundColor: "#f8fafc", paddingVertical: 7, paddingHorizontal: 9 }}>
+                <Text style={{ fontSize: 11, fontWeight: "900", color: "#475569" }}>PM</Text>
+                <Text style={{ marginTop: 2, color: "#0f172a", fontWeight: "900" }}>{todaySummary.pm || "—"}</Text>
+              </View>
             </View>
-            {todayAssignment.ncaaOff ? (
-              <Text style={{ marginTop: 10, color: "#0a5eb7", fontWeight: "900" }}>
-                Suggested Training - NCAA Off Day
-              </Text>
-            ) : null}
           </>
         )}
+        {!loading && todaySessionPreviews.length > 0 ? (
+          <View style={{ marginTop: 9, gap: 8 }}>
+            {todaySessionPreviews.map((preview) => (
+              <Pressable
+                key={preview.workoutId}
+                onPress={() =>
+                  router.push({
+                    pathname: "/(athlete)/workout/[id]",
+                    params: { id: preview.workoutId, name: String(selectedAthleteName ?? "Athlete") },
+                  })
+                }
+                style={{
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: "#dbe7f3",
+                  backgroundColor: "#f8fafc",
+                  paddingVertical: 8,
+                  paddingHorizontal: 9,
+                }}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <Text style={{ fontSize: 12, fontWeight: "900", color: "#334155" }}>{preview.session}</Text>
+                  {preview.timeLocation ? (
+                    <Text style={{ fontSize: 12, color: "#64748b", fontWeight: "700", flexShrink: 1 }} numberOfLines={1}>
+                      {preview.timeLocation}
+                    </Text>
+                  ) : null}
+                </View>
+
+                {preview.categories.length > 0 ? (
+                  <View style={{ marginTop: 6, flexDirection: "row", flexWrap: "wrap", gap: 5 }}>
+                    {preview.categories.slice(0, 3).map((name) => {
+                      const color = categoryColorByName(categories, name);
+                      return (
+                        <View
+                          key={`${preview.workoutId}-${name}`}
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: 4,
+                            paddingHorizontal: 7,
+                            paddingVertical: 2,
+                            borderRadius: 999,
+                            borderWidth: 1,
+                            borderColor: color,
+                            backgroundColor: "white",
+                          }}
+                        >
+                          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color }} />
+                          <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>{name}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                ) : null}
+
+                <Text style={{ marginTop: 6, fontSize: 15, fontWeight: "900", color: "#0f172a" }} numberOfLines={2}>
+                  {preview.title}
+                </Text>
+                {preview.details ? (
+                  <Text style={{ marginTop: 3, color: "#475569" }} numberOfLines={2}>
+                    {preview.details}
+                  </Text>
+                ) : null}
+                {preview.moreCount > 0 ? (
+                  <Text style={{ marginTop: 4, color: "#1d4ed8", fontWeight: "800", fontSize: 12 }}>
+                    +{preview.moreCount} more {preview.session} workout{preview.moreCount === 1 ? "" : "s"}
+                  </Text>
+                ) : null}
+              </Pressable>
+            ))}
+          </View>
+        ) : !loading && todayRows.length === 0 ? (
+          <Text style={{ marginTop: 8, color: "#64748b" }}>No programmed workouts today.</Text>
+        ) : null}
         <Pressable
           onPress={() =>
             router.push({
@@ -533,116 +603,26 @@ export default function AthleteDashboardScreen() {
             borderWidth: 1,
             borderColor: "#bfdbfe",
             backgroundColor: "#eff6ff",
-            paddingVertical: 11,
+            paddingVertical: 10,
             alignItems: "center",
           }}
         >
-          <Text style={{ fontWeight: "800", color: "#1e40af" }}>Review Full Daily Plan</Text>
+          <Text style={{ fontWeight: "800", color: "#1e40af" }}>Open Today</Text>
         </Pressable>
       </View>
 
       <View
         style={{
-          marginTop: 14,
-          borderRadius: 14,
-          borderWidth: 1,
-          borderColor: "#e2e8f0",
-          backgroundColor: "#ffffff",
-          padding: 14,
-        }}
-      >
-        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>WORKOUT</Text>
-        <Text style={{ marginTop: 4, fontSize: 18, fontWeight: "900", color: "#0f172a" }}>Today's Workout</Text>
-        {loading ? (
-          <Text style={{ marginTop: 8, color: "#64748b", fontWeight: "700" }}>Loading workout...</Text>
-        ) : !todayWorkoutSummary.first ? (
-          <View
-            style={{
-              marginTop: 8,
-              borderRadius: 10,
-              borderWidth: 1,
-              borderColor: "#e2e8f0",
-              backgroundColor: "#f8fafc",
-              paddingVertical: 9,
-              paddingHorizontal: 10,
-            }}
-          >
-            <Text style={{ color: "#475569", fontWeight: "700" }}>No workout assigned for today.</Text>
-            <Text style={{ marginTop: 2, color: "#64748b", fontSize: 12 }}>Check Calendar for upcoming sessions.</Text>
-          </View>
-        ) : (
-          <>
-            <Text style={{ marginTop: 8, fontSize: 16, fontWeight: "900", color: "#111827" }}>
-              {String(todayWorkoutSummary.first.title ?? "Workout")}
-            </Text>
-            <Text style={{ marginTop: 4, color: "#475569", fontWeight: "700" }}>
-              {normalizeSession(todayWorkoutSummary.first.session)}
-              {String(todayWorkoutSummary.first.time_text ?? "").trim()
-                ? ` • ${String(todayWorkoutSummary.first.time_text).trim()}`
-                : ""}
-              {String(todayWorkoutSummary.first.primary_category ?? "").trim()
-                ? ` • ${String(todayWorkoutSummary.first.primary_category).trim()}`
-                : ""}
-            </Text>
-            {String(todayWorkoutSummary.first.details ?? "").trim() ? (
-              <Text style={{ marginTop: 6, color: "#334155" }} numberOfLines={3}>
-                {String(todayWorkoutSummary.first.details ?? "")}
-              </Text>
-            ) : null}
-            <Pressable
-              onPress={() =>
-                router.push({
-                  pathname: "/(athlete)/workout/[id]",
-                  params: {
-                    id: String(todayWorkoutSummary.first?.id ?? ""),
-                    name: String(selectedAthleteName ?? "Athlete"),
-                  },
-                })
-              }
-              style={{
-                marginTop: 10,
-                borderRadius: 10,
-                borderWidth: 1,
-                borderColor: "#cbd5e1",
-                backgroundColor: "#f8fafc",
-                paddingVertical: 11,
-                alignItems: "center",
-              }}
-            >
-              <Text style={{ fontWeight: "800", color: "#0f172a" }}>Open Today's Workout</Text>
-            </Pressable>
-            {todayWorkoutSummary.count > 1 ? (
-              <Pressable
-                onPress={() =>
-                  router.push({
-                    pathname: "/(athlete)/day",
-                    params: { date: todayISO },
-                  })
-                }
-                style={{ marginTop: 8, alignSelf: "center" }}
-              >
-                <Text style={{ color: "#2563eb", fontWeight: "800" }}>
-                  View all {todayWorkoutSummary.count} workouts today
-                </Text>
-              </Pressable>
-            ) : null}
-          </>
-        )}
-      </View>
-
-      <View
-        style={{
-          marginTop: 14,
           borderRadius: 14,
           borderWidth: 1,
           borderColor: pendingTarget ? "#fecaca" : "#bbf7d0",
           backgroundColor: "#ffffff",
-          padding: 14,
+          padding: 12,
         }}
       >
-        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>TASK</Text>
-        <View style={{ marginTop: 4, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <Text style={{ fontSize: 18, fontWeight: "900", color: "#0f172a" }}>Needs Feedback</Text>
+        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>FEEDBACK</Text>
+        <View style={{ marginTop: 3, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <Text style={{ fontSize: 18, fontWeight: "900", color: "#0f172a" }}>Next feedback task</Text>
           <View
             style={{
               borderRadius: 999,
@@ -654,12 +634,12 @@ export default function AthleteDashboardScreen() {
             }}
           >
             <Text style={{ fontSize: 11, fontWeight: "900", color: pendingTarget ? "#991b1b" : "#166534" }}>
-              {loading ? "Loading" : pendingTarget ? "Pending" : "All Clear"}
+              {pendingLoading ? "Loading" : pendingTarget ? "Pending" : "Clear"}
             </Text>
           </View>
         </View>
-        {loading ? (
-          <Text style={{ marginTop: 8, color: "#64748b", fontWeight: "700" }}>Checking feedback status...</Text>
+        {pendingLoading ? (
+          <Text style={{ marginTop: 8, color: "#64748b", fontWeight: "700" }}>Checking feedback...</Text>
         ) : !pendingTarget ? (
           <View
             style={{
@@ -668,7 +648,7 @@ export default function AthleteDashboardScreen() {
               borderWidth: 1,
               borderColor: "#bbf7d0",
               backgroundColor: "#f0fdf4",
-              paddingVertical: 9,
+              paddingVertical: 8,
               paddingHorizontal: 10,
             }}
           >
@@ -697,14 +677,58 @@ export default function AthleteDashboardScreen() {
                 borderWidth: 1,
                 borderColor: "#fecaca",
                 backgroundColor: "#fff1f2",
-                paddingVertical: 11,
+                paddingVertical: 10,
                 alignItems: "center",
               }}
             >
-              <Text style={{ fontWeight: "800", color: "#991b1b" }}>Open pending feedback</Text>
+              <Text style={{ fontWeight: "800", color: "#991b1b" }}>Open feedback</Text>
             </Pressable>
           </>
         )}
+      </View>
+
+      <View
+        style={{
+          borderRadius: 14,
+          borderWidth: 1,
+          borderColor: "#e2e8f0",
+          backgroundColor: "#ffffff",
+          padding: 12,
+        }}
+      >
+        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>CALENDAR</Text>
+        <Text style={{ marginTop: 3, fontSize: 18, fontWeight: "900", color: "#0f172a" }}>Browse schedule</Text>
+        <Text style={{ marginTop: 6, color: "#475569" }}>Open Month or Week view to navigate your training plan.</Text>
+        <View style={{ marginTop: 10, flexDirection: "row", gap: 8 }}>
+          <Pressable
+            onPress={() => router.push("/(athlete)/month")}
+            style={{
+              flex: 1,
+              borderRadius: 10,
+              borderWidth: 1,
+              borderColor: "#cbd5e1",
+              backgroundColor: "#f8fafc",
+              paddingVertical: 10,
+              alignItems: "center",
+            }}
+          >
+            <Text style={{ fontWeight: "800", color: "#0f172a" }}>Open Month</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => router.push({ pathname: "/(athlete)/week", params: { date: todayISO } })}
+            style={{
+              flex: 1,
+              borderRadius: 10,
+              borderWidth: 1,
+              borderColor: "#cbd5e1",
+              backgroundColor: "#f8fafc",
+              paddingVertical: 10,
+              alignItems: "center",
+            }}
+          >
+            <Text style={{ fontWeight: "800", color: "#0f172a" }}>Open Week</Text>
+          </Pressable>
+        </View>
       </View>
     </ScrollView>
   );

@@ -9,6 +9,10 @@ import {
   listTeamWorkoutsInRange,
   type TeamWorkoutRow,
 } from "../../../lib/teamWorkoutsCloud";
+import {
+  listTeamWorkoutBatchHeadersForDate,
+  saveTeamWorkoutBatchHeaderNotes,
+} from "../../../lib/teamWorkoutBatchHeadersCloud";
 import { loadCoreCoachSettings } from "../../../lib/settings";
 import { loadAuxiliaryRoutines } from "../../../lib/auxiliaryRoutines";
 import { loadJSON, saveJSON } from "../../../lib/storage";
@@ -689,9 +693,51 @@ export default function CoachWorkoutCatalogTab() {
         return;
       }
 
+      let sourceMainNotes: string | null = null;
+      const sourceBatchId = String(entry.sourceBatchId ?? "").trim();
+      const sourceDateISO = String(entry.sourceDateISO ?? "").trim();
+      if (sourceBatchId && sourceDateISO && isISODateOnly(sourceDateISO)) {
+        const sourceHeaderRows = await listTeamWorkoutBatchHeadersForDate(sourceDateISO);
+        const match = (Array.isArray(sourceHeaderRows) ? sourceHeaderRows : []).find((headerRow) => {
+          const headerBatchId = String(headerRow.batch_id ?? "").trim();
+          const headerDate = String(headerRow.date_iso ?? "").trim();
+          return headerBatchId === sourceBatchId && headerDate === sourceDateISO;
+        });
+        const headerNotes = String(match?.header_notes ?? "").trim();
+        sourceMainNotes = headerNotes || null;
+      }
+      if (!sourceMainNotes) {
+        sourceMainNotes = String(entry.details ?? "").trim() || null;
+      }
+
+      console.log("[workout-catalog] assignBatchFromCatalog", {
+        sourceBatchId: sourceBatchId || null,
+        sourceDateISO: sourceDateISO || null,
+        sourceTitle: String(entry.title ?? "").trim(),
+        sourceMainNotes: sourceMainNotes ?? null,
+        newBatchId,
+        selectedAthleteCount: selectedOrdered.length,
+      });
+
       setAssigningSignature(entry.signature);
       try {
         await createTeamWorkoutBatch(payload);
+        if (sourceMainNotes) {
+          await Promise.all([
+            saveTeamWorkoutBatchHeaderNotes({
+              batch_id: newBatchId,
+              date_iso: targetDateISO,
+              session: "AM",
+              header_notes: sourceMainNotes,
+            }),
+            saveTeamWorkoutBatchHeaderNotes({
+              batch_id: newBatchId,
+              date_iso: targetDateISO,
+              session: "PM",
+              header_notes: sourceMainNotes,
+            }),
+          ]);
+        }
         setAssignModalEntry(null);
         setAssignAthleteSearch("");
         router.push({

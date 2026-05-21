@@ -32,6 +32,15 @@ export default function AthleteTabs() {
           ),
         }}
       />
+      <Tabs.Screen
+        name="settings"
+        options={{
+          title: "Settings",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="settings" size={size} color={color} />
+          ),
+        }}
+      />
 
       {/* Hidden routes (NOT tabs) */}
       <Tabs.Screen name="index" options={{ href: null }} />

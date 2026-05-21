@@ -22,6 +22,7 @@ import {
 } from "../../../lib/mileageFeedback";
 import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../../lib/units";
 import { loadAuxiliaryRoutines } from "../../../lib/auxiliaryRoutines";
+import { parseNumericLike } from "../../../lib/feedbackParsing";
 import { getCurrentTeamId } from "../../../lib/team";
 import { loadRosterNameMapForTeam } from "../../../lib/rosterNameMap";
 import { getTeamWorkoutById, listTeamWorkoutsInRange, updateTeamWorkoutById, type TeamWorkoutRow } from "../../../lib/teamWorkoutsCloud";
@@ -85,11 +86,11 @@ function toAthleteWorkout(row: TeamWorkoutRow, rosterMap: Map<string, string>): 
     categories: row.categories ?? undefined,
     title: row.title ?? "Workout",
     details: row.details ?? undefined,
-    completedMiles: typeof (row as any).completed_miles === "number" ? (row as any).completed_miles : undefined,
-    completedTime: String((row as any).completed_time_text ?? "").trim() || undefined,
-    splitsOrPace: String((row as any).splits_or_pace ?? "").trim() || undefined,
-    additionalFeedback: String((row as any).additional_feedback ?? "").trim() || undefined,
-    feedback: String((row as any).additional_feedback ?? "").trim() || undefined,
+    completedMiles: parseNumericLike(row.completed_miles),
+    completedTime: String(row.completed_time_text ?? "").trim() || undefined,
+    splitsOrPace: String(row.splits_or_pace ?? "").trim() || undefined,
+    additionalFeedback: String(row.additional_feedback ?? "").trim() || undefined,
+    feedback: String(row.additional_feedback ?? "").trim() || undefined,
   };
 }
 
@@ -168,6 +169,7 @@ export default function AthleteWorkoutDetail() {
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
   const [submitStatus, setSubmitStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [rosterMap, setRosterMap] = useState<Map<string, string>>(new Map());
   const store = teamDataStore.use();
 
   function dismissKeyboard() {
@@ -200,6 +202,7 @@ export default function AthleteWorkoutDetail() {
         raw: weekStartResult.raw,
         normalized: resolvedWeekStart,
       });
+      setRosterMap(rosterMap);
       setDistanceUnit(unit);
       setRoutineTitleById(new Map(routines.map((routine) => [routine.id, routine.title] as const)));
       setWeekStartsOn(resolvedWeekStart);
@@ -291,14 +294,12 @@ export default function AthleteWorkoutDetail() {
       return;
     }
 
-    const hasAnyFeedback =
-      parsedCompletedMiles != null ||
-      completedTimeText.trim().length > 0 ||
-      splitsText.trim().length > 0 ||
-      additionalFeedbackText.trim().length > 0;
-
-    if (!hasAnyFeedback) {
-      Alert.alert("Nothing to submit", "Fill in at least one feedback field before submitting.");
+    const hasCompletion = parsedCompletedMiles != null || completedTimeText.trim().length > 0;
+    if (!hasCompletion) {
+      Alert.alert(
+        "Completion required",
+        "Enter either distance completed or time completed before submitting."
+      );
       return;
     }
 
@@ -333,16 +334,22 @@ export default function AthleteWorkoutDetail() {
           completed_time_text: completedTimeText.trim() || null,
           splits_or_pace: splitsText.trim() || null,
           additional_feedback: additionalFeedbackText.trim() || null,
-        } as any);
-
-        setWorkout({
-          ...workout,
-          completedMiles: parsedCompletedMiles,
-          completedTime: completedTimeText.trim() || undefined,
-          splitsOrPace: splitsText.trim() || undefined,
-          additionalFeedback: additionalFeedbackText.trim() || undefined,
-          feedback: additionalFeedbackText.trim() || undefined,
         });
+
+        const refreshedRow = await getTeamWorkoutById(workout.id);
+        if (!refreshedRow) {
+          throw new Error("Saved workout could not be reloaded.");
+        }
+        const refreshedWorkout = toAthleteWorkout(refreshedRow, rosterMap);
+        setWorkout(refreshedWorkout);
+        setCompletedMilesText(
+          refreshedWorkout.completedMiles != null ? String(refreshedWorkout.completedMiles) : ""
+        );
+        setCompletedTimeText(String(refreshedWorkout.completedTime ?? ""));
+        setSplitsText(String(refreshedWorkout.splitsOrPace ?? ""));
+        setAdditionalFeedbackText(
+          String(refreshedWorkout.additionalFeedback ?? refreshedWorkout.feedback ?? "")
+        );
       }
 
       setSubmitStatus("saved");

@@ -10,6 +10,7 @@ export type CoachNavItem = {
 
 export const COACH_NAV_ITEMS: CoachNavItem[] = [
   { key: "calendar", label: "Calendar", href: "/(coach)/(tabs)/calendar", icon: "calendar-outline" },
+  { key: "training-logs", label: "Training Logs", href: "/(coach)/(tabs)/training-logs", icon: "document-text-outline" },
   { key: "planner", label: "Create Session", href: "/(coach)/(tabs)/planner", icon: "create-outline" },
   { key: "mileage", label: "Mileage", href: "/(coach)/(tabs)/mileage", icon: "grid-outline" },
   { key: "roster", label: "Roster", href: "/(coach)/(tabs)/roster", icon: "people-outline" },
@@ -22,6 +23,7 @@ export function resolveCoachTitle(pathname: string): string {
   if (path.includes("/workout-batch/")) return "Edit Individual Workouts";
   if (path.includes("/workout/")) return "Edit Workout";
   if (path.includes("/workouts")) return "Athlete Workouts";
+  if (path.includes("/training-logs")) return "Training Logs";
   if (path.includes("/planner")) return "Create Session";
   if (path.includes("/mileage")) return "Mileage";
   if (path.includes("/roster")) return "Roster";

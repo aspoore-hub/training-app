@@ -24,7 +24,6 @@ import { supabase } from "../../../lib/supabase";
 import { getCurrentTeamId } from "../../../lib/team";
 import { buildTeamWorkoutInsertRows, createTeamWorkoutBatch } from "../../../lib/teamWorkoutsCloud";
 import { normalizeWorkoutTimeInput } from "../../../lib/time";
-import { loadCustomAthleteGroups, type CustomAthleteGroup } from "../../../lib/customGroups";
 import {
   loadCoreCoachSettings,
   loadWeekStartSetting,
@@ -47,12 +46,17 @@ import {
 } from "../../../lib/categoryRoutineDefaults";
 import {
   compareAthleteDisplayNamesByLastName,
+  isAthleteEligibleOnDate,
   normalizeTeamRosterAthlete,
   searchRoster,
   sortRosterByName,
   type TeamRosterAthlete,
 } from "../../../lib/teamRoster";
-import { teamDataStore } from "../../../lib/teamDataStore";
+import {
+  isActiveTrainingGroupMembership,
+  isAthleteExcludedFromSeason,
+  teamDataStore,
+} from "../../../lib/teamDataStore";
 import { useAppRuntime } from "../../../lib/appState";
 
 import type { WorkoutCategory } from "../../../lib/types";
@@ -319,6 +323,7 @@ function Chip({
 }
 
 export default function PlannerScreen() {
+  const store = teamDataStore.use();
   const router = useRouter();
   useAppTheme();
   const navigation = useNavigation();
@@ -386,7 +391,6 @@ export default function PlannerScreen() {
   const [athleteDropdownOpen, setAthleteDropdownOpen] = useState(false);
   const [athleteSearch, setAthleteSearch] = useState("");
 
-  const [customGroups, setCustomGroups] = useState<CustomAthleteGroup[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [title, setTitle] = useState("");
   const [details, setDetails] = useState("");
@@ -516,7 +520,7 @@ export default function PlannerScreen() {
             console.warn("[planner] teamDataStore refreshRoster failed", error);
           });
 
-          const storeRoster = teamDataStore.getState().roster ?? [];
+          const storeRoster = teamDataStore.getActiveRoster();
           const rosterResult = sortRosterByName(
             storeRoster
               .map((row) => normalizeTeamRosterAthlete(row))
@@ -528,10 +532,12 @@ export default function PlannerScreen() {
             return [];
           });
 
-          const savedGroups = await loadCustomAthleteGroups().catch((error) => {
-            console.warn("[planner] custom groups load failed", error);
-            return [];
-          });
+          await Promise.all([
+            teamDataStore.actions.loadTrainingGroups(),
+            teamDataStore.actions.loadSharedCoachFilters(),
+            teamDataStore.actions.loadTeamSeasons(),
+            teamDataStore.actions.loadAthleteSeasonOverrides(),
+          ]);
 
           const savedCoreSettings = await loadCoreCoachSettings().catch((error) => {
             console.warn("[planner] core coach settings load failed", error);
@@ -566,7 +572,6 @@ export default function PlannerScreen() {
           setWeekStartSetting(ws);
           setRoster(rosterResult);
           setCategories(plannerCategories);
-          setCustomGroups(Array.isArray(savedGroups) ? savedGroups : []);
           setCoreCoachSettings(savedCoreSettings);
           setPracticeDefaults(savedPracticeDefaults);
           setTemplates(Array.isArray(savedTemplates) ? savedTemplates : []);
@@ -584,8 +589,72 @@ export default function PlannerScreen() {
 
           const rosterIdSet = new Set(rosterResult.map((a) => a.id));
           const cleaned = (savedSelected ?? []).filter((id) => rosterIdSet.has(id));
+          const storeSnapshot = teamDataStore.getState();
+          const sharedGroupIds = Array.isArray(storeSnapshot.sharedSelectedTrainingGroupIds)
+            ? storeSnapshot.sharedSelectedTrainingGroupIds
+                .map((value) => String(value ?? "").trim())
+                .filter(Boolean)
+            : [];
+          const sharedSeasonId = String(storeSnapshot.sharedSelectedSeasonId ?? "").trim();
+          const selectedSeason = sharedSeasonId
+            ? (Array.isArray(storeSnapshot.teamSeasons) ? storeSnapshot.teamSeasons : []).find(
+                (season) => String(season?.id ?? "").trim() === sharedSeasonId
+              ) ?? null
+            : null;
+          const sharedHasActiveFilters = sharedGroupIds.length > 0 || !!selectedSeason;
+
+          const activeGroupAthleteIds = new Set<string>();
+          if (sharedGroupIds.length > 0) {
+            const selectedGroupSet = new Set(sharedGroupIds);
+            (Array.isArray(storeSnapshot.trainingGroupMemberships) ? storeSnapshot.trainingGroupMemberships : []).forEach(
+              (membership) => {
+                if (!isActiveTrainingGroupMembership(membership)) return;
+                const groupId = String(membership?.group_id ?? "").trim();
+                const athleteId = String(membership?.athlete_profile_id ?? "").trim();
+                if (!groupId || !athleteId) return;
+                if (!selectedGroupSet.has(groupId)) return;
+                activeGroupAthleteIds.add(athleteId);
+              }
+            );
+          }
+
+          const overrideLookup = new Map<string, (typeof storeSnapshot.athleteSeasonOverrides)[number]>();
+          (Array.isArray(storeSnapshot.athleteSeasonOverrides) ? storeSnapshot.athleteSeasonOverrides : []).forEach(
+            (override) => {
+              const seasonId = String(override?.season_id ?? "").trim();
+              const athleteId = String(override?.athlete_profile_id ?? "").trim();
+              if (!seasonId || !athleteId) return;
+              overrideLookup.set(`${seasonId}:${athleteId}`, override);
+            }
+          );
+
+          const sharedDefaultAthleteIds = rosterResult
+            .filter((athlete) => isAthleteEligibleOnDate(athlete, dateISO))
+            .map((athlete) => String(athlete.id ?? "").trim())
+            .filter(Boolean)
+            .filter((athleteId) => {
+              if (sharedGroupIds.length > 0 && !activeGroupAthleteIds.has(athleteId)) return false;
+              if (!selectedSeason) return true;
+              if (
+                isAthleteExcludedFromSeason(
+                  athleteId,
+                  String(selectedSeason.id ?? "").trim(),
+                  storeSnapshot.athleteSeasonOverrides
+                )
+              ) {
+                return false;
+              }
+              const override = overrideLookup.get(`${String(selectedSeason.id ?? "").trim()}:${athleteId}`) ?? null;
+              const resolved = teamDataStore.resolveAthleteSeasonWindow(selectedSeason, override);
+              const start = String(resolved?.start_date ?? "").trim();
+              const end = String(resolved?.end_date ?? "").trim();
+              if (!start || !end) return true;
+              return dateISO >= start && dateISO <= end;
+            });
+
+          const nextSelectedAthletes = sharedHasActiveFilters ? sharedDefaultAthleteIds : cleaned;
           const defaultsForDate = resolveDefaultSessionSlotAndTimeForDate(dateISO, savedPracticeDefaults, "AM", "");
-          setSelectedAthleteIds(cleaned);
+          setSelectedAthleteIds(nextSelectedAthletes);
           setActiveDraftId(null);
           setSession(defaultsForDate.session);
           setTimeText(defaultsForDate.timeText);
@@ -599,7 +668,7 @@ export default function PlannerScreen() {
             title: "",
             details: "",
             categoryIds: [],
-            selectedAthleteIds: cleaned,
+            selectedAthleteIds: nextSelectedAthletes,
             preRoutineIds: [],
             postRoutineIds: [],
           });
@@ -616,7 +685,6 @@ export default function PlannerScreen() {
 
           setRoster([]);
           setCategories([]);
-          setCustomGroups([]);
           setTemplates([]);
           setAuxiliaryRoutines([]);
           setCategoryRoutineDefaults({});
@@ -837,14 +905,98 @@ export default function PlannerScreen() {
   );
 
   const plannerGroups = useMemo(() => {
-    return [...customGroups]
+    const byGroup = new Map<string, string[]>();
+    (store.trainingGroupMemberships ?? []).forEach((membership) => {
+      if (!isActiveTrainingGroupMembership(membership)) return;
+      const groupId = String(membership.group_id ?? "").trim();
+      const athleteId = String(membership.athlete_profile_id ?? "").trim();
+      if (!groupId || !athleteId) return;
+      const prev = byGroup.get(groupId) ?? [];
+      byGroup.set(groupId, [...prev, athleteId]);
+    });
+
+    return [...(store.trainingGroups ?? [])]
+      .filter((group) => !group.archived_at)
       .map((group) => {
-        const athleteIds = group.athleteIds.filter((id) => rosterById.has(id));
+        const athleteIds = Array.from(new Set((byGroup.get(group.id) ?? []).filter((id) => rosterById.has(id))));
         return { ...group, athleteIds };
       })
       .filter((group) => group.athleteIds.length > 0)
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [customGroups, rosterById]);
+  }, [rosterById, store.trainingGroupMemberships, store.trainingGroups]);
+
+  const sharedGroupIds = useMemo(
+    () =>
+      (Array.isArray(store.sharedSelectedTrainingGroupIds) ? store.sharedSelectedTrainingGroupIds : [])
+        .map((value) => String(value ?? "").trim())
+        .filter(Boolean),
+    [store.sharedSelectedTrainingGroupIds]
+  );
+
+  const sharedSeason = useMemo(() => {
+    const selectedId = String(store.sharedSelectedSeasonId ?? "").trim();
+    if (!selectedId) return null;
+    return (Array.isArray(store.teamSeasons) ? store.teamSeasons : []).find(
+      (season) => String(season?.id ?? "").trim() === selectedId
+    ) ?? null;
+  }, [store.sharedSelectedSeasonId, store.teamSeasons]);
+
+  const sharedDefaultAthleteIdsForDate = useMemo(() => {
+    const activeRosterIds = rosterSorted
+      .filter((athlete) => isAthleteEligibleOnDate(athlete, dateISO))
+      .map((athlete) => String(athlete.id ?? "").trim())
+      .filter(Boolean);
+    const candidateGroupIds = new Set<string>();
+    if (sharedGroupIds.length > 0) {
+      const selectedGroupSet = new Set(sharedGroupIds);
+      (Array.isArray(store.trainingGroupMemberships) ? store.trainingGroupMemberships : []).forEach((membership) => {
+        if (!isActiveTrainingGroupMembership(membership)) return;
+        const groupId = String(membership?.group_id ?? "").trim();
+        const athleteId = String(membership?.athlete_profile_id ?? "").trim();
+        if (!groupId || !athleteId) return;
+        if (!selectedGroupSet.has(groupId)) return;
+        candidateGroupIds.add(athleteId);
+      });
+    }
+
+    const overrideLookup = new Map<string, (typeof store.athleteSeasonOverrides)[number]>();
+    (Array.isArray(store.athleteSeasonOverrides) ? store.athleteSeasonOverrides : []).forEach((override) => {
+      const seasonId = String(override?.season_id ?? "").trim();
+      const athleteId = String(override?.athlete_profile_id ?? "").trim();
+      if (!seasonId || !athleteId) return;
+      overrideLookup.set(`${seasonId}:${athleteId}`, override);
+    });
+
+    return activeRosterIds.filter((athleteId) => {
+      if (sharedGroupIds.length > 0 && !candidateGroupIds.has(athleteId)) return false;
+      if (!sharedSeason) return true;
+      if (
+        isAthleteExcludedFromSeason(
+          athleteId,
+          String(sharedSeason.id ?? "").trim(),
+          store.athleteSeasonOverrides
+        )
+      ) {
+        return false;
+      }
+      const override =
+        overrideLookup.get(`${String(sharedSeason.id ?? "").trim()}:${athleteId}`) ?? null;
+      const resolved = teamDataStore.resolveAthleteSeasonWindow(sharedSeason, override);
+      const start = String(resolved?.start_date ?? "").trim();
+      const end = String(resolved?.end_date ?? "").trim();
+      if (!start || !end) return true;
+      return dateISO >= start && dateISO <= end;
+    });
+  }, [
+    dateISO,
+    rosterSorted,
+    sharedGroupIds,
+    sharedSeason,
+    store.athleteSeasonOverrides,
+    store.trainingGroupMemberships,
+  ]);
+
+  const hasSharedGroupSeasonContext = sharedGroupIds.length > 0 || !!sharedSeason;
 
   const rosterForPicker = useMemo(() => {
     return searchRoster(rosterSorted, athleteSearch);
@@ -902,8 +1054,8 @@ export default function PlannerScreen() {
     setPostRoutineSlotCount((prev) => Math.max(prev, Math.max(1, effectivePostRoutineIds.length)));
   }, [effectivePostRoutineIds.length]);
 
-  const applyCustomGroup = useCallback(
-    async (group: CustomAthleteGroup) => {
+  const applyTrainingGroup = useCallback(
+    async (group: { athleteIds: string[] }) => {
       const next = group.athleteIds.filter((id) => rosterById.has(id));
       setSelectedAthleteIds(next);
       await saveJSON(KEY_PLANNER_SELECTED_ATHLETES, next);
@@ -2391,6 +2543,27 @@ export default function PlannerScreen() {
               <Text style={{ fontSize: 12, fontWeight: "800", color: "#334155" }}>{selectedAthleteIds.length} selected</Text>
             </View>
 
+            {hasSharedGroupSeasonContext && sharedDefaultAthleteIdsForDate.length === 0 ? (
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#fde68a",
+                  backgroundColor: "#fffbeb",
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  paddingVertical: 8,
+                  marginBottom: 8,
+                }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#92400e" }}>
+                  No athletes match the selected group and season for this date.
+                </Text>
+                <Text style={{ fontSize: 11, fontWeight: "700", color: "#a16207", marginTop: 2 }}>
+                  Clear Group/Season filters or choose a different date.
+                </Text>
+              </View>
+            ) : null}
+
             {plannerGroups.length > 0 ? (
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
                 <View style={{ flexDirection: "row" }}>
@@ -2400,7 +2573,7 @@ export default function PlannerScreen() {
                       label={group.name}
                       active={false}
                       onPress={() => {
-                        void applyCustomGroup(group);
+                        void applyTrainingGroup(group);
                       }}
                     />
                   ))}

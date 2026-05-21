@@ -12,6 +12,7 @@ export type WeeklyCalendarPdfGroup = {
 export type WeeklyCalendarPdfWorkout = {
   key: string;
   title: string;
+  details?: string;
   session: string;
   time?: string;
   location?: string;
@@ -66,6 +67,8 @@ function renderWorkoutHeaderLine(workout: WeeklyCalendarPdfWorkout): string {
 
 function renderWorkout(workout: WeeklyCalendarPdfWorkout): string {
   const title = String(workout.title ?? "").trim();
+  const batchNotes = String(workout.details ?? "").trim();
+  const showBatchNotes = batchNotes.length > 0 && batchNotes.toLowerCase() !== "no notes";
   const groupHtml = (Array.isArray(workout.groups) ? workout.groups : [])
     .map((group) => {
       const linesHtml = (Array.isArray(group.lines) ? group.lines : [])
@@ -96,6 +99,7 @@ function renderWorkout(workout: WeeklyCalendarPdfWorkout): string {
     <div class="workout-block">
       <div class="workout-header-line">${renderWorkoutHeaderLine(workout)}</div>
       ${title ? `<div class="workout-title-line">${escapeHtml(title)}</div>` : ""}
+      ${showBatchNotes ? `<div class="workout-batch-notes-line">${escapeHtml(batchNotes)}</div>` : ""}
       ${groupHtml}
     </div>
   `;
@@ -232,6 +236,13 @@ export function buildWeeklyCalendarPdfHtml(args: BuildWeeklyCalendarPdfHtmlArgs)
       .workout-title-line {
         font-size: 11px;
         font-weight: 500;
+        margin-bottom: 3px;
+      }
+
+      .workout-batch-notes-line {
+        font-size: 10px;
+        line-height: 1.2;
+        color: #334155;
         margin-bottom: 3px;
       }
 

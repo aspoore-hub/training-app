@@ -12,6 +12,10 @@ import { InlineSaveStatus } from "../../components/shared/InlineSaveStatus";
 import { loadCoachCategories } from "../../lib/coachCategories";
 import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
 import {
+  hasWorkoutFeedback as hasWorkoutFeedbackRow,
+  parseNumericLike,
+} from "../../lib/feedbackParsing";
+import {
   emptyPracticeTimeDefaults,
   getDefaultPracticeTime,
   loadPracticeTimeDefaults,
@@ -19,7 +23,11 @@ import {
 } from "../../lib/practiceDefaults";
 import { getCurrentTeamId } from "../../lib/team";
 import { fetchMileageCellsForWeek, type TeamMileageCellRow } from "../../lib/mileageCloud";
-import { formatMileageForSheet, getWeekIndex, getWeekStartISO } from "../../lib/mileagePlan";
+import { formatMileageForSheet, getWeekIndex, getWeekStartISO, parseMileageInput } from "../../lib/mileagePlan";
+import {
+  listTeamWorkoutBatchHeadersForDate,
+  saveTeamWorkoutBatchHeaderNotes,
+} from "../../lib/teamWorkoutBatchHeadersCloud";
 import {
   compareAthleteDisplayNamesByLastName,
   loadTeamRoster,
@@ -39,6 +47,7 @@ import {
   updateTeamWorkoutById,
 } from "../../lib/teamWorkoutsCloud";
 import { useAppRuntime } from "../../lib/appState";
+import { isActiveTrainingGroupMembership, teamDataStore } from "../../lib/teamDataStore";
 import type { WorkoutCategory } from "../../lib/types";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -115,6 +124,7 @@ type GroupAthletePropSlices = {
   athleteDrafts: Record<string, AthleteDraft>;
   athleteSaveState: Record<string, SaveState>;
   prescribedDistanceByWorkoutId: Record<string, string>;
+  distanceInvalidByWorkoutId: Record<string, boolean>;
 };
 
 type WebDragMoveState = {
@@ -136,6 +146,21 @@ type WebDragGhostState = {
   width: number;
   x: number;
   y: number;
+};
+
+type FeedbackModalState = {
+  workoutId: string;
+  athleteName: string;
+  completedMiles: number | null;
+  completedTimeText: string | null;
+  splitsOrPace: string | null;
+  additionalFeedback: string | null;
+  updatedAt: string | null;
+};
+
+type BatchDatePickerState = {
+  batchKey: string;
+  currentDateISO: string;
 };
 
 const COL = {
@@ -196,12 +221,30 @@ const GROUP_HEADER_BG = "#f7fafd";
 const GROUP_SUBHEADER_BG = "#fbfdff";
 const GROUP_HEADER_BORDER = "#e4ebf4";
 const COACH_WORKOUTS_DAY_DRAFT_CACHE_KEY = "coach_workouts_day_draft_cache_v1";
+const COACH_WORKOUTS_DAY_ATHLETE_FILTER_KEY = "coach_workouts_day_selected_athlete_filter_v1";
 
 type PersistedDayDraftState = {
   batchDrafts: Record<string, BatchDraft>;
   batchDirtyFields: Record<string, Partial<Record<BatchEditableField, true>>>;
   athleteDrafts: Record<string, AthleteDraft>;
   updatedAt: number;
+};
+
+type AthleteFilterOption = {
+  id: string;
+  label: string;
+};
+
+type TrainingGroupFilterOption = {
+  id: string;
+  label: string;
+  archived: boolean;
+};
+
+type SeasonFilterOption = {
+  id: string;
+  label: string;
+  archived: boolean;
 };
 
 async function loadPersistedDayDraftCache(): Promise<Record<string, PersistedDayDraftState>> {
@@ -303,7 +346,8 @@ function areGroupAthleteSlicesUnchanged(
   workoutIds: string[],
   athleteDrafts: Record<string, AthleteDraft>,
   athleteSaveState: Record<string, SaveState>,
-  prescribedDistanceByWorkoutId: Record<string, string>
+  prescribedDistanceByWorkoutId: Record<string, string>,
+  distanceInvalidByWorkoutId: Record<string, boolean>
 ): boolean {
   if (!previous) return false;
   if (!areOrderedWorkoutIdsUnchanged(previous.workoutIds, workoutIds)) return false;
@@ -316,8 +360,38 @@ function areGroupAthleteSlicesUnchanged(
     ) {
       return false;
     }
+    if (!!distanceInvalidByWorkoutId[workoutId] !== !!previous.distanceInvalidByWorkoutId[workoutId]) {
+      return false;
+    }
   }
   return true;
+}
+
+function formatFeedbackDistance(value: number): string {
+  const rounded = Math.round(value * 100) / 100;
+  if (Number.isInteger(rounded)) return String(rounded);
+  return String(rounded).replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "");
+}
+
+function hasRealWorkoutFeedback(row: TeamWorkoutRow): boolean {
+  return hasWorkoutFeedbackRow(row);
+}
+
+function buildCoachFeedbackSummary(row: TeamWorkoutRow): { hasFeedback: boolean; label: string } {
+  const completedMilesRaw = parseNumericLike(row.completed_miles);
+  const hasDistance = completedMilesRaw != null;
+  const completedTime = String(row.completed_time_text ?? "").trim();
+  const splitsOrPace = String(row.splits_or_pace ?? "").trim();
+  const additionalFeedback = String(row.additional_feedback ?? "").trim();
+  const hasNote = splitsOrPace.length > 0 || additionalFeedback.length > 0;
+
+  const parts: string[] = [];
+  if (hasDistance) parts.push(`${formatFeedbackDistance(completedMilesRaw)} mi`);
+  if (completedTime) parts.push(completedTime);
+  if (hasNote) parts.push("note");
+
+  if (!hasRealWorkoutFeedback(row) || parts.length === 0) return { hasFeedback: false, label: "No feedback" };
+  return { hasFeedback: true, label: `Feedback: ${parts.join(" • ")}` };
 }
 
 const GroupAthleteRows = memo(function GroupAthleteRows({
@@ -329,6 +403,8 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
   athleteDrafts,
   athleteSaveState,
   prescribedDistanceByWorkoutId,
+  distanceInvalidByWorkoutId,
+  onEditDistanceField,
   deletingKey,
   justMovedWorkoutId,
   onEditAthleteField,
@@ -344,6 +420,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
   setActiveGridId,
   onSelectionMetaChange,
   onRegisterGridApi,
+  onOpenFeedbackDetail,
   batchHeaderActiveRef,
 }: {
   groupKey: string;
@@ -354,6 +431,8 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
   athleteDrafts: Record<string, AthleteDraft>;
   athleteSaveState: Record<string, SaveState>;
   prescribedDistanceByWorkoutId: Record<string, string>;
+  distanceInvalidByWorkoutId: Record<string, boolean>;
+  onEditDistanceField: (workoutId: string, value: string) => void;
   deletingKey: string | null;
   justMovedWorkoutId: string | null;
   onEditAthleteField: (workoutId: string, field: AthleteEditableField, value: string) => void;
@@ -369,6 +448,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
   setActiveGridId: (id: string | null) => void;
   onSelectionMetaChange: (groupKey: string, meta: GroupSelectionMeta) => void;
   onRegisterGridApi: (groupKey: string, api: GroupGridApi | null) => void;
+  onOpenFeedbackDetail: (row: TeamWorkoutRow, athleteName: string) => void;
   batchHeaderActiveRef: MutableRefObject<boolean>;
 }) {
   const gridId = groupKey;
@@ -547,6 +627,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
               .map((c) => String(c ?? "").trim())
               .filter(Boolean),
           };
+        const feedbackSummary = buildCoachFeedbackSummary(workout);
         const athleteState = athleteSaveState[workoutId];
         const locationSelected = groupGrid.isCellSelected(workoutId, "location");
         const rowSelected = groupGrid.isRowSelected(workoutId);
@@ -765,9 +846,40 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
                 overflow: "hidden",
               }}
             >
-              <Text numberOfLines={2} style={{ fontSize: 12, fontWeight: "800", color: "#0f172a", lineHeight: 15 }}>
+              <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "800", color: "#0f172a", lineHeight: 15 }}>
                 {athleteName}
               </Text>
+              {feedbackSummary.hasFeedback ? (
+                <Pressable
+                  onPress={() => onOpenFeedbackDetail(workout, athleteName)}
+                  style={{ alignSelf: "flex-start", marginTop: 2 }}
+                >
+                  <Text
+                    numberOfLines={1}
+                    style={{
+                      fontSize: 11,
+                      fontWeight: "700",
+                      color: "#166534",
+                      lineHeight: 13,
+                    }}
+                  >
+                    {feedbackSummary.label}
+                  </Text>
+                </Pressable>
+              ) : (
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    marginTop: 2,
+                    fontSize: 11,
+                    fontWeight: "700",
+                    color: "#94a3b8",
+                    lineHeight: 13,
+                  }}
+                >
+                  {feedbackSummary.label}
+                </Text>
+              )}
             </View>
 
             <View
@@ -851,9 +963,27 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
                 overflow: "hidden",
               }}
             >
-              <Text numberOfLines={1} ellipsizeMode="tail" style={{ fontSize: 12, fontWeight: "800", color: "#1f2937" }}>
-                {prescribedDistanceByWorkoutId[workoutId] ?? "-"}
-              </Text>
+              <TextInput
+                value={String(prescribedDistanceByWorkoutId[workoutId] ?? "")}
+                onChangeText={(v) => onEditDistanceField(workoutId, v)}
+                placeholder="-"
+                placeholderTextColor="#94a3b8"
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={{
+                  width: "100%",
+                  textAlign: "right",
+                  fontSize: 12,
+                  fontWeight: "800",
+                  color: "#1f2937",
+                  paddingVertical: 2,
+                  paddingHorizontal: 4,
+                  borderWidth: distanceInvalidByWorkoutId[workoutId] ? 1 : 0,
+                  borderColor: distanceInvalidByWorkoutId[workoutId] ? "#dc2626" : "transparent",
+                  borderRadius: 6,
+                  backgroundColor: distanceInvalidByWorkoutId[workoutId] ? "rgba(220,38,38,0.08)" : "transparent",
+                }}
+              />
             </View>
 
             <View
@@ -1084,6 +1214,15 @@ function parseTimeTextToSortableMinutes(value: string): number | null {
   return hoursRaw * 60 + minutesRaw;
 }
 
+function isOffCategoryName(value: string): boolean {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "off" || normalized === "off / rest" || normalized === "rest";
+}
+
+function hasOffCategory(values: string[]): boolean {
+  return (Array.isArray(values) ? values : []).some((value) => isOffCategoryName(value));
+}
+
 function sanitizeAthleteCategories(raw: unknown): string[] {
   return (Array.isArray(raw) ? raw : [])
     .map((c) => String(c ?? "").trim())
@@ -1182,6 +1321,10 @@ function getBatchKey(row: TeamWorkoutRow): string {
   return `single:${String(row.id)}`;
 }
 
+function buildBatchHeaderLookupKey(batchId: string, dateISO: string): string {
+  return `${String(batchId ?? "").trim()}|${String(dateISO ?? "").trim()}`;
+}
+
 function parseBatchKey(batchKey: string): { isBatch: boolean; id: string } {
   if (batchKey.startsWith("batch:")) return { isBatch: true, id: batchKey.slice(6) };
   return { isBatch: false, id: batchKey.replace(/^single:/, "") };
@@ -1211,6 +1354,31 @@ function compareEncodedGroupOrder(a: string, b: string): number {
   return a.localeCompare(b);
 }
 
+function parseCreatedAtMs(value: unknown): number {
+  const raw = String(value ?? "").trim();
+  if (!raw) return Number.POSITIVE_INFINITY;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
+}
+
+function pickBatchSampleRow(rows: TeamWorkoutRow[]): TeamWorkoutRow {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("pickBatchSampleRow requires at least one workout row.");
+  }
+  return [...rows].sort((a, b) => {
+    const groupOrder = compareEncodedGroupOrder(
+      encodeGroupOrderId(String(a.group_id ?? "").trim() || null),
+      encodeGroupOrderId(String(b.group_id ?? "").trim() || null)
+    );
+    if (groupOrder !== 0) return groupOrder;
+
+    const createdAtOrder = parseCreatedAtMs(a.created_at) - parseCreatedAtMs(b.created_at);
+    if (createdAtOrder !== 0) return createdAtOrder;
+
+    return String(a.id ?? "").localeCompare(String(b.id ?? ""), undefined, { numeric: true });
+  })[0];
+}
+
 async function moveWorkoutToGroup(workoutId: string, newGroupId: string | null) {
   await updateTeamWorkoutById(workoutId, { group_id: newGroupId });
 }
@@ -1222,6 +1390,7 @@ function makeNewGroupId(): string {
 }
 
 export default function CoachWorkoutsDay() {
+  const teamStore = teamDataStore.use();
   const router = useRouter();
   const { patch: patchAppRuntime } = useAppRuntime();
   const { date, batch } = useLocalSearchParams<{ date?: string; batch?: string | string[] }>();
@@ -1237,6 +1406,8 @@ export default function CoachWorkoutsDay() {
   const batchSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const batchRoutineSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const athleteSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const batchDraftGenerationRef = useRef<Record<string, number>>({});
+  const athleteDraftGenerationRef = useRef<Record<string, number>>({});
   const savedAthleteDraftsRef = useRef<Record<string, AthleteDraft>>({});
   const batchDraftsRef = useRef<Record<string, BatchDraft>>({});
   const batchDirtyFieldsRef = useRef<Record<string, Partial<Record<BatchEditableField, true>>>>({});
@@ -1254,6 +1425,17 @@ export default function CoachWorkoutsDay() {
   const [rowsRaw, setRowsRaw] = useState<TeamWorkoutRow[]>([]);
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
   const [rosterOptions, setRosterOptions] = useState<RosterOption[]>([]);
+  const activeRosterOptions = useMemo(
+    () => rosterOptions.filter((athlete) => athlete.isActive !== false),
+    [rosterOptions]
+  );
+  const [selectedAthleteIds, setSelectedAthleteIds] = useState<string[]>([]);
+  const [athleteFilterOpen, setAthleteFilterOpen] = useState(false);
+  const [athleteFilterPrefsReady, setAthleteFilterPrefsReady] = useState(false);
+  const [trainingGroupFilterOpen, setTrainingGroupFilterOpen] = useState(false);
+  const selectedTrainingGroupIds = teamStore.sharedSelectedTrainingGroupIds;
+  const [seasonFilterOpen, setSeasonFilterOpen] = useState(false);
+  const selectedSeasonId = teamStore.sharedSelectedSeasonId;
 
   const [expandedByBatchKey, setExpandedByBatchKey] = useState<Record<string, boolean>>({});
   const [groupOrderByBatch, setGroupOrderByBatch] = useState<Record<string, string[]>>({});
@@ -1275,6 +1457,8 @@ export default function CoachWorkoutsDay() {
   const [batchDirtyFields, setBatchDirtyFields] = useState<Record<string, Partial<Record<BatchEditableField, true>>>>({});
   const [batchSaveState, setBatchSaveState] = useState<Record<string, SaveState>>({});
   const [mileageDistanceIndex, setMileageDistanceIndex] = useState<Map<string, any>>(new Map());
+  const [distanceDraftsByKey, setDistanceDraftsByKey] = useState<Record<string, string>>({});
+  const [distanceInvalidByKey, setDistanceInvalidByKey] = useState<Record<string, boolean>>({});
 
   const [athleteDrafts, setAthleteDrafts] = useState<Record<string, AthleteDraft>>({});
   const [athleteSaveState, setAthleteSaveState] = useState<Record<string, SaveState>>({});
@@ -1315,6 +1499,10 @@ export default function CoachWorkoutsDay() {
   const [athletePickerQuery, setAthletePickerQuery] = useState("");
   const [addingAthleteId, setAddingAthleteId] = useState<string | null>(null);
   const [athleteSelectionSyncByBatchKey, setAthleteSelectionSyncByBatchKey] = useState<Record<string, boolean>>({});
+  const [feedbackModal, setFeedbackModal] = useState<FeedbackModalState | null>(null);
+  const [batchDatePickerState, setBatchDatePickerState] = useState<BatchDatePickerState | null>(null);
+  const [batchDatePickerDraftDate, setBatchDatePickerDraftDate] = useState("");
+  const [batchDatePickerError, setBatchDatePickerError] = useState<string | null>(null);
   const [creatingBatch, setCreatingBatch] = useState(false);
   const [saveSignalTick, setSaveSignalTick] = useState(0);
   const [lastSavedAtMs, setLastSavedAtMs] = useState<number | null>(null);
@@ -1324,7 +1512,12 @@ export default function CoachWorkoutsDay() {
   const batchHeaderRootRef = useRef<any>(null);
   const headerBlurTimerRef = useRef<any>(null);
   const loadVersionRef = useRef(0);
-  const autoFlushAttemptedDayRef = useRef<string | null>(null);
+  const distanceDraftsRef = useRef<Record<string, string>>({});
+  const distanceSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const distanceDraftGenerationRef = useRef<Record<string, number>>({});
+  const distanceMetaByKeyRef = useRef<
+    Record<string, { athleteId: string; weekStartISO: string; dayIdx: number; session: "AM" | "PM" }>
+  >({});
 
   const bumpSaveSignal = useCallback(() => {
     setSaveSignalTick((prev) => prev + 1);
@@ -1332,6 +1525,19 @@ export default function CoachWorkoutsDay() {
 
   const markSavedNow = useCallback(() => {
     setLastSavedAtMs(Date.now());
+  }, []);
+
+  const openFeedbackDetail = useCallback((row: TeamWorkoutRow, athleteName: string) => {
+    if (!hasRealWorkoutFeedback(row)) return;
+    setFeedbackModal({
+      workoutId: String(row.id),
+      athleteName: String(athleteName ?? "").trim() || "Athlete",
+      completedMiles: parseNumericLike(row.completed_miles) ?? null,
+      completedTimeText: String(row.completed_time_text ?? "").trim() || null,
+      splitsOrPace: String(row.splits_or_pace ?? "").trim() || null,
+      additionalFeedback: String(row.additional_feedback ?? "").trim() || null,
+      updatedAt: String(row.updated_at ?? "").trim() || null,
+    });
   }, []);
 
   const handleGroupSelectionMetaChange = useCallback((groupKey: string, meta: GroupSelectionMeta) => {
@@ -1351,6 +1557,30 @@ export default function CoachWorkoutsDay() {
     });
   }, []);
 
+  const openBatchDatePicker = useCallback((batchKey: string, currentDateISO: string) => {
+    const normalized = String(currentDateISO ?? "").trim();
+    setBatchDatePickerState({ batchKey, currentDateISO: normalized });
+    setBatchDatePickerDraftDate(normalized);
+    setBatchDatePickerError(null);
+  }, []);
+
+  const closeBatchDatePicker = useCallback(() => {
+    setBatchDatePickerState(null);
+    setBatchDatePickerDraftDate("");
+    setBatchDatePickerError(null);
+  }, []);
+
+  const confirmBatchDatePicker = useCallback(() => {
+    if (!batchDatePickerState) return;
+    const nextDate = String(batchDatePickerDraftDate ?? "").trim();
+    if (!isISODateOnly(nextDate)) {
+      setBatchDatePickerError("Select a valid date (YYYY-MM-DD).");
+      return;
+    }
+    onEditBatchField(batchDatePickerState.batchKey, "date_iso", nextDate);
+    closeBatchDatePicker();
+  }, [batchDatePickerDraftDate, batchDatePickerState, closeBatchDatePicker]);
+
   useEffect(() => {
     batchDraftsRef.current = batchDrafts;
   }, [batchDrafts]);
@@ -1362,6 +1592,10 @@ export default function CoachWorkoutsDay() {
   useEffect(() => {
     athleteDraftsRef.current = athleteDrafts;
   }, [athleteDrafts]);
+
+  useEffect(() => {
+    distanceDraftsRef.current = distanceDraftsByKey;
+  }, [distanceDraftsByKey]);
 
   useEffect(() => {
     batchHeaderActiveRef.current = batchHeaderActive;
@@ -1459,6 +1693,34 @@ export default function CoachWorkoutsDay() {
     setMileageDistanceIndex(nextIndex);
   }, [athleteDrafts, batchDrafts, ensureTeamId, rowsRaw, resolveMileageLookupMeta]);
 
+  const workoutMileageMetaByWorkoutId = useMemo(() => {
+    const next: Record<
+      string,
+      { athleteId: string; weekStartISO: string; dayIdx: number; session: "AM" | "PM"; lookupKey: string } | null
+    > = {};
+    rowsRaw.forEach((row) => {
+      const workoutId = String(row.id ?? "");
+      if (!workoutId) return;
+      const rowDraft = athleteDrafts[workoutId];
+      const batchKey = row.batch_id ? getBatchKey(row) : null;
+      const batchDraft = batchKey ? batchDrafts[batchKey] : undefined;
+      const meta = resolveMileageLookupMeta(row, rowDraft, batchDraft);
+      if (!meta) {
+        next[workoutId] = null;
+        return;
+      }
+      const session = meta.effectiveSession === "AM" ? "AM" : "PM";
+      next[workoutId] = {
+        athleteId: meta.athleteId,
+        weekStartISO: meta.weekStartISO,
+        dayIdx: meta.dayIdx,
+        session,
+        lookupKey: buildMileageLookupKey(meta.athleteId, meta.weekStartISO, meta.dayIdx, session),
+      };
+    });
+    return next;
+  }, [athleteDrafts, batchDrafts, resolveMileageLookupMeta, rowsRaw]);
+
   const loadDay = useCallback(
     async (targetDateISO: string, requestVersion?: number) => {
       const isLatestRequest = () => requestVersion == null || requestVersion === loadVersionRef.current;
@@ -1476,10 +1738,11 @@ export default function CoachWorkoutsDay() {
         return true;
       }
 
-      const [workoutRows, rosterRows, persistedDraftCache] = await Promise.all([
+      const [workoutRows, rosterRows, persistedDraftCache, batchHeaderRows] = await Promise.all([
         listTeamWorkoutsInRange(targetDateISO, targetDateISO),
         loadTeamRoster(teamId),
         loadPersistedDayDraftCache(),
+        listTeamWorkoutBatchHeadersForDate(targetDateISO),
       ]);
       if (!isLatestRequest()) {
         console.log("[workouts] loadDay:staleSkipped", { targetDateISO, requestVersion });
@@ -1489,6 +1752,21 @@ export default function CoachWorkoutsDay() {
       const persistedForDay = persistedDraftCache[targetDateISO];
       let nextRows = workoutRows;
       console.log("[workouts] loadDay:rows", { count: nextRows.length });
+      const batchHeaderNotesByLookup = new Map<string, { notes: string; updatedAt: number }>();
+      (Array.isArray(batchHeaderRows) ? batchHeaderRows : []).forEach((row) => {
+        const batchId = String(row.batch_id ?? "").trim();
+        if (!batchId) return;
+        const key = buildBatchHeaderLookupKey(
+          batchId,
+          String(row.date_iso ?? "")
+        );
+        const headerNotes = String(row.header_notes ?? "");
+        const updatedAt = Date.parse(String(row.updated_at ?? "")) || 0;
+        const existing = batchHeaderNotesByLookup.get(key);
+        if (!existing || updatedAt >= existing.updatedAt) {
+          batchHeaderNotesByLookup.set(key, { notes: headerNotes, updatedAt });
+        }
+      });
 
       setRosterNameById(toRosterMapById(rosterRows));
       setRosterOptions(rosterRows);
@@ -1505,7 +1783,27 @@ export default function CoachWorkoutsDay() {
       });
 
       grouped.forEach((rows, key) => {
-        const sample = rows[0];
+        const sample = pickBatchSampleRow(rows);
+        const sampleBatchId = String(sample.batch_id ?? "").trim();
+        const batchHeaderNotesRecord =
+          sampleBatchId && sample.date_iso
+            ? batchHeaderNotesByLookup.get(
+                buildBatchHeaderLookupKey(
+                  sampleBatchId,
+                  String(sample.date_iso ?? "")
+                )
+              )
+            : undefined;
+        const normalizedRowDetails = Array.from(
+          new Set(
+            rows
+              .map((row) => String(row.details ?? "").trim())
+              .filter((value) => value.length > 0)
+          )
+        );
+        const fallbackSummaryNotes =
+          normalizedRowDetails.length === 1 ? normalizedRowDetails[0] : "";
+        const batchHeaderNotes = batchHeaderNotesRecord?.notes ?? fallbackSummaryNotes;
         const sampleCategories = (Array.isArray(sample.categories) ? sample.categories : [])
           .map((c) => String(c ?? "").trim())
           .filter((c) => !!c && c.toLowerCase() !== "other");
@@ -1516,7 +1814,7 @@ export default function CoachWorkoutsDay() {
           location: String(sample.location ?? ""),
           time_text: String(sample.time_text ?? ""),
           title: String(sample.title ?? "Workout"),
-          details: String(sample.details ?? ""),
+          details: String(batchHeaderNotes ?? ""),
           primary_category: samplePrimary,
           categories: sampleCategories.length > 0 ? sampleCategories : (samplePrimary ? [samplePrimary] : []),
           pre_routine_ids: (Array.isArray(sample.pre_routine_ids) ? sample.pre_routine_ids : [])
@@ -1612,6 +1910,13 @@ export default function CoachWorkoutsDay() {
       });
       savedAthleteDraftsRef.current = nextSavedAthleteDrafts;
       setAthleteSaveState({});
+      setDistanceDraftsByKey({});
+      distanceDraftsRef.current = {};
+      setDistanceInvalidByKey({});
+      distanceMetaByKeyRef.current = {};
+      distanceDraftGenerationRef.current = {};
+      Object.values(distanceSaveTimersRef.current).forEach((timer) => clearTimeout(timer));
+      distanceSaveTimersRef.current = {};
       setMoveMode(null);
       return true;
     },
@@ -1639,16 +1944,20 @@ export default function CoachWorkoutsDay() {
           weekStartISO: null,
           dayIdx: null,
           found: false,
-          display: "-",
+          display: "",
         });
-        return "-";
+        return "";
       }
 
       const { athleteId, effectiveSession, effectiveDate, weekStartISO, dayIdx } = meta;
       const key = buildMileageLookupKey(athleteId, weekStartISO, dayIdx, effectiveSession);
+      if (Object.prototype.hasOwnProperty.call(distanceDraftsByKey, key)) {
+        const draftValue = String(distanceDraftsByKey[key] ?? "");
+        return draftValue;
+      }
       const hasMatch = mileageDistanceIndex.has(key);
       const matchedValue = mileageDistanceIndex.get(key);
-      const display = hasMatch ? formatMileageForSheet(matchedValue as any) || "-" : "-";
+      const display = hasMatch ? formatMileageForSheet(matchedValue as any) || "" : "";
 
       console.log("[workouts-distance]", {
         athleteId,
@@ -1662,7 +1971,7 @@ export default function CoachWorkoutsDay() {
 
       return display;
     },
-    [mileageDistanceIndex, resolveMileageLookupMeta]
+    [distanceDraftsByKey, mileageDistanceIndex, resolveMileageLookupMeta]
   );
 
   useEffect(() => {
@@ -1680,6 +1989,95 @@ export default function CoachWorkoutsDay() {
     });
     return next;
   }, [athleteDrafts, batchDrafts, resolveMileageDisplayForWorkout, rowsRaw]);
+
+  const distanceInvalidByWorkoutId = useMemo(() => {
+    const next: Record<string, boolean> = {};
+    Object.entries(workoutMileageMetaByWorkoutId).forEach(([workoutId, meta]) => {
+      if (!meta?.lookupKey) return;
+      if (distanceInvalidByKey[meta.lookupKey]) next[workoutId] = true;
+    });
+    return next;
+  }, [distanceInvalidByKey, workoutMileageMetaByWorkoutId]);
+
+  const queueDistanceDraftSave = useCallback((lookupKey: string, delayMs = 420) => {
+    const meta = distanceMetaByKeyRef.current[lookupKey];
+    if (!meta) return;
+    const current = distanceSaveTimersRef.current[lookupKey];
+    if (current) clearTimeout(current);
+
+    distanceSaveTimersRef.current[lookupKey] = setTimeout(async () => {
+      delete distanceSaveTimersRef.current[lookupKey];
+      const expectedGeneration = distanceDraftGenerationRef.current[lookupKey] ?? 0;
+      const latestText = String(distanceDraftsRef.current[lookupKey] ?? "");
+      const trimmed = latestText.trim();
+      const parsed = trimmed ? parseMileageInput(trimmed) : null;
+      const invalid = !!trimmed && !parsed;
+      if (invalid) return;
+
+      try {
+        await teamDataStore.actions.setMileageCell(
+          meta.athleteId,
+          meta.weekStartISO,
+          meta.dayIdx,
+          meta.session,
+          parsed ?? null
+        );
+        const stillLatestGeneration = (distanceDraftGenerationRef.current[lookupKey] ?? 0) === expectedGeneration;
+        if (!stillLatestGeneration) return;
+
+        const normalized = parsed ? String(formatMileageForSheet(parsed as any) ?? "") : "";
+        setDistanceDraftsByKey((prev) => ({ ...prev, [lookupKey]: normalized }));
+        setDistanceInvalidByKey((prev) => {
+          if (!prev[lookupKey]) return prev;
+          const next = { ...prev };
+          delete next[lookupKey];
+          return next;
+        });
+        setMileageDistanceIndex((prev) => {
+          const next = new Map(prev);
+          if (parsed) next.set(lookupKey, parsed);
+          else next.delete(lookupKey);
+          return next;
+        });
+      } catch {
+        // Keep local draft as-is; retry on next edit.
+      }
+    }, delayMs);
+  }, []);
+
+  const onEditDistanceField = useCallback((workoutId: string, value: string) => {
+    const workoutKey = String(workoutId ?? "");
+    const meta = workoutMileageMetaByWorkoutId[workoutKey];
+    if (!meta?.lookupKey) return;
+    const lookupKey = meta.lookupKey;
+    const nextText = String(value ?? "");
+    const trimmed = nextText.trim();
+    const parsed = trimmed ? parseMileageInput(trimmed) : null;
+    const invalid = !!trimmed && !parsed;
+
+    distanceMetaByKeyRef.current[lookupKey] = {
+      athleteId: meta.athleteId,
+      weekStartISO: meta.weekStartISO,
+      dayIdx: meta.dayIdx,
+      session: meta.session,
+    };
+    distanceDraftGenerationRef.current[lookupKey] = (distanceDraftGenerationRef.current[lookupKey] ?? 0) + 1;
+
+    setDistanceDraftsByKey((prev) => ({ ...prev, [lookupKey]: nextText }));
+    setDistanceInvalidByKey((prev) => {
+      const next = { ...prev };
+      if (invalid) next[lookupKey] = true;
+      else delete next[lookupKey];
+      return next;
+    });
+
+    const current = distanceSaveTimersRef.current[lookupKey];
+    if (current) clearTimeout(current);
+    delete distanceSaveTimersRef.current[lookupKey];
+    if (!invalid) {
+      queueDistanceDraftSave(lookupKey, 420);
+    }
+  }, [queueDistanceDraftSave, workoutMileageMetaByWorkoutId]);
 
   useEffect(() => {
     patchAppRuntime({
@@ -1832,6 +2230,242 @@ export default function CoachWorkoutsDay() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(COACH_WORKOUTS_DAY_ATHLETE_FILTER_KEY);
+        if (!active) return;
+        const parsed = raw ? JSON.parse(raw) : [];
+        const next = Array.isArray(parsed)
+          ? parsed.map((value) => String(value ?? "").trim()).filter(Boolean)
+          : [];
+        setSelectedAthleteIds(next);
+      } finally {
+        if (!active) return;
+        setAthleteFilterPrefsReady(true);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    void teamDataStore.actions.loadSharedCoachFilters();
+    void teamDataStore.actions.loadTrainingGroups();
+    void teamDataStore.actions.loadTeamSeasons();
+    void teamDataStore.actions.loadAthleteSeasonOverrides();
+  }, []);
+
+  const athleteFilterOptions = useMemo<AthleteFilterOption[]>(() => {
+    const byId = new Map<string, string>();
+    activeRosterOptions.forEach((athlete) => {
+      const id = String((athlete as any)?.id ?? "").trim();
+      if (!id) return;
+      const label = String((athlete as any)?.displayName ?? "").trim() || "Athlete";
+      byId.set(id, label);
+    });
+    rowsRaw.forEach((row) => {
+      const athleteId = String(row.athlete_profile_id ?? "").trim();
+      if (!athleteId || byId.has(athleteId)) return;
+      const fallbackName = String((row as any)?.athlete_name ?? "").trim();
+      const label = resolveAthleteDisplayName(athleteId, rosterNameById, fallbackName);
+      byId.set(athleteId, String(label ?? "").trim() || "Athlete");
+    });
+    return Array.from(byId.entries())
+      .map(([id, label]) => ({ id, label }))
+      .sort((a, b) => compareAthleteDisplayNamesByLastName(a.label, b.label));
+  }, [activeRosterOptions, rowsRaw, rosterNameById]);
+
+  useEffect(() => {
+    if (!athleteFilterPrefsReady) return;
+    const validIds = new Set(athleteFilterOptions.map((option) => option.id));
+    const next = selectedAthleteIds.filter((id) => validIds.has(id));
+    if (next.length !== selectedAthleteIds.length) {
+      setSelectedAthleteIds(next);
+    }
+  }, [athleteFilterOptions, athleteFilterPrefsReady, selectedAthleteIds]);
+
+  useEffect(() => {
+    if (!athleteFilterPrefsReady) return;
+    void AsyncStorage.setItem(COACH_WORKOUTS_DAY_ATHLETE_FILTER_KEY, JSON.stringify(selectedAthleteIds)).catch(() => {});
+  }, [athleteFilterPrefsReady, selectedAthleteIds]);
+
+  const trainingGroupFilterOptions = useMemo<TrainingGroupFilterOption[]>(() => {
+    const byId = new Map<string, TrainingGroupFilterOption>();
+    (Array.isArray(teamStore.trainingGroups) ? teamStore.trainingGroups : []).forEach((group) => {
+      const id = String(group?.id ?? "").trim();
+      if (!id) return;
+      const label = String(group?.name ?? "").trim() || "Training Group";
+      const archived = !!group?.archived_at;
+      if (!archived) {
+        byId.set(id, { id, label, archived });
+      }
+    });
+    selectedTrainingGroupIds.forEach((groupIdRaw) => {
+      const id = String(groupIdRaw ?? "").trim();
+      if (!id || byId.has(id)) return;
+      const match = (teamStore.trainingGroups ?? []).find((group) => String(group?.id ?? "").trim() === id);
+      byId.set(id, {
+        id,
+        label: String(match?.name ?? "").trim() || `Group (${id.slice(-6)})`,
+        archived: !!match?.archived_at,
+      });
+    });
+    return Array.from(byId.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [selectedTrainingGroupIds, teamStore.trainingGroups]);
+
+  useEffect(() => {
+    if (!teamStore.sharedCoachFiltersLoaded) return;
+    if (!teamStore.trainingGroupsLoaded) return;
+    const validIds = new Set(trainingGroupFilterOptions.map((option) => option.id));
+    const next = selectedTrainingGroupIds.filter((id) => validIds.has(id));
+    if (next.length !== selectedTrainingGroupIds.length) {
+      void teamDataStore.actions.setSharedSelectedTrainingGroupIds(next);
+    }
+  }, [
+    selectedTrainingGroupIds,
+    teamStore.sharedCoachFiltersLoaded,
+    teamStore.trainingGroupsLoaded,
+    trainingGroupFilterOptions,
+  ]);
+
+  const seasonFilterOptions = useMemo<SeasonFilterOption[]>(() => {
+    const byId = new Map<string, SeasonFilterOption>();
+    (Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []).forEach((season) => {
+      const id = String(season?.id ?? "").trim();
+      if (!id) return;
+      const label = String(season?.name ?? "").trim() || "Season";
+      const archived = !!season?.archived_at;
+      if (!archived) byId.set(id, { id, label, archived });
+    });
+    const selectedId = String(selectedSeasonId ?? "").trim();
+    if (selectedId && !byId.has(selectedId)) {
+      const match = (teamStore.teamSeasons ?? []).find((season) => String(season?.id ?? "").trim() === selectedId);
+      byId.set(selectedId, {
+        id: selectedId,
+        label: String(match?.name ?? "").trim() || `Season (${selectedId.slice(-6)})`,
+        archived: !!match?.archived_at,
+      });
+    }
+    const order = new Map<string, number>();
+    (Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []).forEach((season, idx) => {
+      const id = String(season?.id ?? "").trim();
+      if (id) order.set(id, idx);
+    });
+    return Array.from(byId.values()).sort(
+      (a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+    );
+  }, [selectedSeasonId, teamStore.teamSeasons]);
+
+  useEffect(() => {
+    if (!teamStore.sharedCoachFiltersLoaded) return;
+    if (!teamStore.teamSeasonsLoaded) return;
+    const selectedId = String(selectedSeasonId ?? "").trim();
+    if (!selectedId) return;
+    const validIds = new Set(seasonFilterOptions.map((option) => option.id));
+    if (!validIds.has(selectedId)) {
+      void teamDataStore.actions.setSharedSelectedSeasonId(null);
+    }
+  }, [seasonFilterOptions, selectedSeasonId, teamStore.sharedCoachFiltersLoaded, teamStore.teamSeasonsLoaded]);
+
+  const selectedAthleteFilterLabel = useMemo(() => {
+    if (selectedAthleteIds.length === 0) return "Athletes: All";
+    if (selectedAthleteIds.length === 1) {
+      const match = athleteFilterOptions.find((option) => option.id === selectedAthleteIds[0]);
+      return match?.label ? `Athlete: ${match.label}` : "Athletes: 1 selected";
+    }
+    return `Athletes: ${selectedAthleteIds.length} selected`;
+  }, [athleteFilterOptions, selectedAthleteIds]);
+
+  const selectedTrainingGroupFilterLabel = useMemo(() => {
+    if (selectedTrainingGroupIds.length === 0) return "Groups: All";
+    if (selectedTrainingGroupIds.length === 1) {
+      const match = trainingGroupFilterOptions.find((option) => option.id === selectedTrainingGroupIds[0]);
+      return match?.label ? `Group: ${match.label}` : "Groups: 1 selected";
+    }
+    return `Groups: ${selectedTrainingGroupIds.length} selected`;
+  }, [selectedTrainingGroupIds, trainingGroupFilterOptions]);
+
+  const selectedSeasonFilterLabel = useMemo(() => {
+    if (!selectedSeasonId) return "Season: All";
+    const match = seasonFilterOptions.find((option) => option.id === selectedSeasonId);
+    return match?.label ? `Season: ${match.label}` : "Season: Selected";
+  }, [seasonFilterOptions, selectedSeasonId]);
+
+  const trainingGroupAthleteIdsByGroupId = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    (Array.isArray(teamStore.trainingGroupMemberships) ? teamStore.trainingGroupMemberships : []).forEach((row) => {
+      if (!isActiveTrainingGroupMembership(row)) return;
+      const groupId = String(row?.group_id ?? "").trim();
+      const athleteId = String(row?.athlete_profile_id ?? "").trim();
+      if (!groupId || !athleteId) return;
+      const prev = map.get(groupId) ?? new Set<string>();
+      prev.add(athleteId);
+      map.set(groupId, prev);
+    });
+    return map;
+  }, [teamStore.trainingGroupMemberships]);
+
+  const selectedTrainingGroupAthleteIds = useMemo(() => {
+    const out = new Set<string>();
+    selectedTrainingGroupIds.forEach((groupId) => {
+      const ids = trainingGroupAthleteIdsByGroupId.get(String(groupId ?? "").trim());
+      if (!ids) return;
+      ids.forEach((id) => out.add(id));
+    });
+    return out;
+  }, [selectedTrainingGroupIds, trainingGroupAthleteIdsByGroupId]);
+
+  const athleteSeasonOverridesBySeasonAndAthlete = useMemo(() => {
+    const map = new Map<string, (typeof teamStore.athleteSeasonOverrides)[number]>();
+    (Array.isArray(teamStore.athleteSeasonOverrides) ? teamStore.athleteSeasonOverrides : []).forEach((override) => {
+      const seasonId = String(override?.season_id ?? "").trim();
+      const athleteId = String(override?.athlete_profile_id ?? "").trim();
+      if (!seasonId || !athleteId) return;
+      map.set(`${seasonId}:${athleteId}`, override);
+    });
+    return map;
+  }, [teamStore.athleteSeasonOverrides]);
+
+  const filteredRowsRaw = useMemo(() => {
+    const selectedAthleteSet = new Set(selectedAthleteIds);
+    const selectedSeason = selectedSeasonId
+      ? (teamStore.teamSeasons ?? []).find((season) => String(season?.id ?? "").trim() === String(selectedSeasonId ?? "").trim()) ?? null
+      : null;
+    return rowsRaw.filter((row) => {
+      const athleteId = String(row.athlete_profile_id ?? "").trim();
+      const athletePass = selectedAthleteIds.length === 0 ? true : selectedAthleteSet.has(athleteId);
+      const groupPass =
+        selectedTrainingGroupIds.length === 0 ? true : selectedTrainingGroupAthleteIds.has(athleteId);
+      const rowDateISO = String(row.date_iso ?? "").trim();
+      const seasonPass = (() => {
+        if (!selectedSeason) return true;
+        const override = athleteId
+          ? athleteSeasonOverridesBySeasonAndAthlete.get(`${String(selectedSeason.id ?? "").trim()}:${athleteId}`) ?? null
+          : null;
+        const resolvedWindow = teamDataStore.resolveAthleteSeasonWindow(selectedSeason, override);
+        return (
+          rowDateISO >= String(resolvedWindow.start_date ?? "") &&
+          rowDateISO <= String(resolvedWindow.end_date ?? "")
+        );
+      })();
+      return athletePass && groupPass && seasonPass;
+    });
+  }, [
+    athleteSeasonOverridesBySeasonAndAthlete,
+    rowsRaw,
+    selectedAthleteIds,
+    selectedSeasonId,
+    selectedTrainingGroupAthleteIds,
+    selectedTrainingGroupIds.length,
+    teamStore.teamSeasons,
+  ]);
+
+  const hasActiveDisplayFilters =
+    selectedAthleteIds.length > 0 || selectedTrainingGroupIds.length > 0 || !!selectedSeasonId;
+
   const activateBatchHeader = useCallback((root?: any) => {
     if (headerBlurTimerRef.current) clearTimeout(headerBlurTimerRef.current);
     if (root) batchHeaderRootRef.current = root;
@@ -1948,7 +2582,7 @@ export default function CoachWorkoutsDay() {
     });
 
     const rows: WorksheetBatchRow[] = Array.from(map.entries()).map(([key, workouts]) => {
-      const sample = workouts[0];
+      const sample = pickBatchSampleRow(workouts);
       const uniqueAthletes = new Set(
         workouts.map((w) => String(w.athlete_profile_id ?? "").trim()).filter(Boolean)
       );
@@ -2012,18 +2646,40 @@ export default function CoachWorkoutsDay() {
 
     const indexedRows = rows.map((row, index) => ({ row, index }));
     indexedRows.sort((left, right) => {
+      const leftDraft = batchDrafts[left.row.key];
+      const rightDraft = batchDrafts[right.row.key];
+      const leftCategoryValues = [
+        ...(Array.isArray(leftDraft?.categories) ? leftDraft.categories : []),
+        ...(Array.isArray(left.row.sample.categories) ? left.row.sample.categories : []),
+        String(leftDraft?.primary_category ?? "").trim(),
+        String(left.row.sample.primary_category ?? "").trim(),
+      ]
+        .map((value) => String(value ?? "").trim())
+        .filter(Boolean);
+      const rightCategoryValues = [
+        ...(Array.isArray(rightDraft?.categories) ? rightDraft.categories : []),
+        ...(Array.isArray(right.row.sample.categories) ? right.row.sample.categories : []),
+        String(rightDraft?.primary_category ?? "").trim(),
+        String(right.row.sample.primary_category ?? "").trim(),
+      ]
+        .map((value) => String(value ?? "").trim())
+        .filter(Boolean);
+      const leftIsOff = hasOffCategory(leftCategoryValues);
+      const rightIsOff = hasOffCategory(rightCategoryValues);
+      if (leftIsOff !== rightIsOff) return leftIsOff ? 1 : -1;
+
       const leftSession = normalizeSession(
-        String(batchDrafts[left.row.key]?.session ?? left.row.sample.session ?? "")
+        String(leftDraft?.session ?? left.row.sample.session ?? "")
       );
       const rightSession = normalizeSession(
-        String(batchDrafts[right.row.key]?.session ?? right.row.sample.session ?? "")
+        String(rightDraft?.session ?? right.row.sample.session ?? "")
       );
       const leftSessionRank = leftSession === "AM" ? 0 : 1;
       const rightSessionRank = rightSession === "AM" ? 0 : 1;
       if (leftSessionRank !== rightSessionRank) return leftSessionRank - rightSessionRank;
 
-      const leftTimeText = String(batchDrafts[left.row.key]?.time_text ?? left.row.sample.time_text ?? "").trim();
-      const rightTimeText = String(batchDrafts[right.row.key]?.time_text ?? right.row.sample.time_text ?? "").trim();
+      const leftTimeText = String(leftDraft?.time_text ?? left.row.sample.time_text ?? "").trim();
+      const rightTimeText = String(rightDraft?.time_text ?? right.row.sample.time_text ?? "").trim();
       const leftMinutes = parseTimeTextToSortableMinutes(leftTimeText);
       const rightMinutes = parseTimeTextToSortableMinutes(rightTimeText);
       const leftHasUsableTime = leftMinutes != null;
@@ -2042,6 +2698,33 @@ export default function CoachWorkoutsDay() {
     return sortedRows;
   }, [batchDrafts, groupOrderByBatch, pendingRemovedAthleteKeys, rowsRaw, rosterNameById]);
 
+  const worksheetBatchesForDisplay = useMemo<WorksheetBatchRow[]>(() => {
+    if (!hasActiveDisplayFilters) return worksheetBatches;
+    const visibleWorkoutIds = new Set(filteredRowsRaw.map((row) => String(row.id ?? "")));
+    return worksheetBatches
+      .map((batch) => {
+        const workouts = batch.workouts.filter((row) => visibleWorkoutIds.has(String(row.id ?? "")));
+        if (workouts.length === 0) return null;
+        const groupedAthletes = batch.groupedAthletes
+          .map((group) => ({
+            ...group,
+            rows: group.rows.filter((row) => visibleWorkoutIds.has(String(row.id ?? ""))),
+          }))
+          .filter((group) => group.rows.length > 0);
+        const uniqueAthletes = new Set(
+          workouts.map((row) => String(row.athlete_profile_id ?? "").trim()).filter(Boolean)
+        );
+        return {
+          ...batch,
+          sample: pickBatchSampleRow(workouts),
+          workouts,
+          groupedAthletes,
+          athleteCount: Math.max(1, uniqueAthletes.size),
+        };
+      })
+      .filter((batch): batch is WorksheetBatchRow => !!batch);
+  }, [filteredRowsRaw, hasActiveDisplayFilters, worksheetBatches]);
+
   const getCachedGroupAthleteSlices = useCallback(
     (groupKey: string, groupWorkoutIds: string[]): GroupAthletePropSlices => {
       const previous = groupAthleteSliceCacheRef.current[groupKey];
@@ -2051,7 +2734,8 @@ export default function CoachWorkoutsDay() {
           groupWorkoutIds,
           athleteDrafts,
           athleteSaveState,
-          prescribedDistanceByWorkoutId
+          prescribedDistanceByWorkoutId,
+          distanceInvalidByWorkoutId
         )
       ) {
         return previous as GroupAthletePropSlices;
@@ -2060,6 +2744,7 @@ export default function CoachWorkoutsDay() {
       const nextAthleteDrafts: Record<string, AthleteDraft> = {};
       const nextAthleteSaveState: Record<string, SaveState> = {};
       const nextPrescribedDistanceByWorkoutId: Record<string, string> = {};
+      const nextDistanceInvalidByWorkoutId: Record<string, boolean> = {};
 
       groupWorkoutIds.forEach((workoutId) => {
         const draft = athleteDrafts[workoutId];
@@ -2068,6 +2753,7 @@ export default function CoachWorkoutsDay() {
         if (saveState) nextAthleteSaveState[workoutId] = saveState;
         const prescribed = resolvePrescribedForSlice(prescribedDistanceByWorkoutId, workoutId);
         if (prescribed) nextPrescribedDistanceByWorkoutId[workoutId] = prescribed;
+        if (distanceInvalidByWorkoutId[workoutId]) nextDistanceInvalidByWorkoutId[workoutId] = true;
       });
 
       const next: GroupAthletePropSlices = {
@@ -2075,11 +2761,12 @@ export default function CoachWorkoutsDay() {
         athleteDrafts: nextAthleteDrafts,
         athleteSaveState: nextAthleteSaveState,
         prescribedDistanceByWorkoutId: nextPrescribedDistanceByWorkoutId,
+        distanceInvalidByWorkoutId: nextDistanceInvalidByWorkoutId,
       };
       groupAthleteSliceCacheRef.current[groupKey] = next;
       return next;
     },
-    [athleteDrafts, athleteSaveState, prescribedDistanceByWorkoutId]
+    [athleteDrafts, athleteSaveState, distanceInvalidByWorkoutId, prescribedDistanceByWorkoutId]
   );
 
   useEffect(() => {
@@ -2200,8 +2887,20 @@ export default function CoachWorkoutsDay() {
     }, 2000);
   };
 
+  const bumpBatchDraftGeneration = useCallback((batchKey: string) => {
+    const key = String(batchKey ?? "").trim();
+    if (!key) return;
+    batchDraftGenerationRef.current[key] = (batchDraftGenerationRef.current[key] ?? 0) + 1;
+  }, []);
+
+  const bumpAthleteDraftGeneration = useCallback((workoutId: string) => {
+    const key = String(workoutId ?? "").trim();
+    if (!key) return;
+    athleteDraftGenerationRef.current[key] = (athleteDraftGenerationRef.current[key] ?? 0) + 1;
+  }, []);
+
   const commitBatchEdit = useCallback(
-    async (batchKey: string) => {
+    async (batchKey: string, expectedGeneration?: number) => {
       const dirty = batchDirtyFieldsRef.current[batchKey] ?? {};
       const dirtyKeys = Object.keys(dirty) as BatchEditableField[];
       if (dirtyKeys.length === 0) return;
@@ -2235,10 +2934,44 @@ export default function CoachWorkoutsDay() {
 
       try {
         const parsed = parseBatchKey(batchKey);
+        const shouldSyncHeaderNotes = parsed.isBatch && dirtyKeys.includes("details");
+        const payloadForTeamWorkouts = { ...payload };
+
+        if (shouldSyncHeaderNotes) {
+          const [amResult, pmResult] = await Promise.all([
+            saveTeamWorkoutBatchHeaderNotes({
+              batch_id: parsed.id,
+              date_iso: String(draft.date_iso ?? "").trim(),
+              session: "AM",
+              header_notes: String(draft.details ?? "").trim() || null,
+            }),
+            saveTeamWorkoutBatchHeaderNotes({
+              batch_id: parsed.id,
+              date_iso: String(draft.date_iso ?? "").trim(),
+              session: "PM",
+              header_notes: String(draft.details ?? "").trim() || null,
+            }),
+          ]);
+          delete (payloadForTeamWorkouts as any).details;
+        }
+
         if (parsed.isBatch) {
-          await updateTeamWorkoutsByBatchId(parsed.id, payload);
+          if (Object.keys(payloadForTeamWorkouts).length > 0) {
+            await updateTeamWorkoutsByBatchId(parsed.id, payloadForTeamWorkouts);
+          }
         } else {
-          await updateTeamWorkoutById(parsed.id, payload);
+          await updateTeamWorkoutById(parsed.id, payloadForTeamWorkouts);
+        }
+
+        const currentGeneration = batchDraftGenerationRef.current[batchKey] ?? 0;
+        const isLatest = expectedGeneration == null || currentGeneration === expectedGeneration;
+        if (!isLatest) {
+          console.log("[workouts] commitBatchEdit:staleResultIgnored", {
+            batchKey,
+            expectedGeneration,
+            currentGeneration,
+          });
+          return;
         }
 
         batchDirtyFieldsRef.current = { ...batchDirtyFieldsRef.current, [batchKey]: {} };
@@ -2280,7 +3013,8 @@ export default function CoachWorkoutsDay() {
       batchSaveTimersRef.current[batchKey] = setTimeout(() => {
         delete batchSaveTimersRef.current[batchKey];
         bumpSaveSignal();
-        void commitBatchEdit(batchKey);
+        const expectedGeneration = batchDraftGenerationRef.current[batchKey] ?? 0;
+        void commitBatchEdit(batchKey, expectedGeneration);
       }, delayMs);
     },
     [bumpSaveSignal, commitBatchEdit]
@@ -2322,7 +3056,7 @@ export default function CoachWorkoutsDay() {
   );
 
   const commitAthleteEdit = useCallback(
-    async (workoutId: string) => {
+    async (workoutId: string, expectedGeneration?: number) => {
       const draft = athleteDraftsRef.current[workoutId];
       if (!draft) return;
 
@@ -2334,6 +3068,17 @@ export default function CoachWorkoutsDay() {
 
       try {
         await updateTeamWorkoutById(workoutId, payload);
+
+        const currentGeneration = athleteDraftGenerationRef.current[workoutId] ?? 0;
+        const isLatest = expectedGeneration == null || currentGeneration === expectedGeneration;
+        if (!isLatest) {
+          console.log("[workouts] commitAthleteEdit:staleResultIgnored", {
+            workoutId,
+            expectedGeneration,
+            currentGeneration,
+          });
+          return;
+        }
 
         savedAthleteDraftsRef.current[workoutId] = toSavedAthleteDraftSnapshot(draft);
         if (!isUnmountingRef.current) {
@@ -2361,11 +3106,69 @@ export default function CoachWorkoutsDay() {
       athleteSaveTimersRef.current[workoutId] = setTimeout(() => {
         delete athleteSaveTimersRef.current[workoutId];
         bumpSaveSignal();
-        void commitAthleteEdit(workoutId);
+        const expectedGeneration = athleteDraftGenerationRef.current[workoutId] ?? 0;
+        void commitAthleteEdit(workoutId, expectedGeneration);
       }, delayMs);
     },
     [bumpSaveSignal, commitAthleteEdit]
   );
+
+  const flushAllPendingBatchRoutineSaves = useCallback(async () => {
+    const timerKeys = Object.keys(batchRoutineSaveTimersRef.current);
+    timerKeys.forEach((timerKey) => {
+      const timer = batchRoutineSaveTimersRef.current[timerKey];
+      if (timer) clearTimeout(timer);
+      delete batchRoutineSaveTimersRef.current[timerKey];
+    });
+    if (timerKeys.length > 0) bumpSaveSignal();
+
+    if (timerKeys.length === 0) return;
+
+    for (const timerKey of timerKeys) {
+      const splitAt = timerKey.lastIndexOf(":");
+      if (splitAt <= 0) continue;
+      const batchKey = timerKey.slice(0, splitAt);
+      const field = timerKey.slice(splitAt + 1) as "pre" | "post";
+      if (field !== "pre" && field !== "post") continue;
+
+      try {
+        if (!isUnmountingRef.current) {
+          setBatchSaveState((prev) => ({ ...prev, [batchKey]: { status: "saving" } }));
+        }
+        const parsed = parseBatchKey(batchKey);
+        const draft = batchDraftsRef.current[batchKey];
+        const nextIds = Array.from(
+          new Set(
+            (field === "pre"
+              ? draft?.pre_routine_ids ?? []
+              : draft?.post_routine_ids ?? []
+            ).map((id) => String(id ?? "").trim()).filter(Boolean)
+          )
+        );
+        const payload =
+          field === "pre"
+            ? ({ pre_routine_ids: nextIds } as Partial<TeamWorkoutRow>)
+            : ({ post_routine_ids: nextIds } as Partial<TeamWorkoutRow>);
+        if (parsed.isBatch) {
+          await updateTeamWorkoutsByBatchId(parsed.id, payload);
+        } else {
+          await updateTeamWorkoutById(parsed.id, payload);
+        }
+        if (!isUnmountingRef.current) {
+          setBatchSaveState((prev) => ({ ...prev, [batchKey]: { status: "saved" } }));
+          setBatchSavedSoonIdle(batchKey);
+          markSavedNow();
+        }
+      } catch (e: any) {
+        if (!isUnmountingRef.current) {
+          setBatchSaveState((prev) => ({
+            ...prev,
+            [batchKey]: { status: "error", message: String(e?.message ?? "Save failed") },
+          }));
+        }
+      }
+    }
+  }, [bumpSaveSignal, markSavedNow]);
 
   const flushAllPendingBatchSaves = useCallback(async () => {
     const timedBatchKeys = Object.keys(batchSaveTimersRef.current);
@@ -2388,7 +3191,8 @@ export default function CoachWorkoutsDay() {
     });
 
     for (const batchKey of batchKeysToFlush) {
-      await commitBatchEdit(batchKey);
+      const expectedGeneration = batchDraftGenerationRef.current[batchKey] ?? 0;
+      await commitBatchEdit(batchKey, expectedGeneration);
     }
   }, [bumpSaveSignal, commitBatchEdit]);
 
@@ -2414,16 +3218,18 @@ export default function CoachWorkoutsDay() {
 
     console.log("[workouts] flushAllPendingAthleteSaves", { count: workoutIds.length });
     for (const workoutId of workoutIds) {
-      await commitAthleteEdit(workoutId);
+      const expectedGeneration = athleteDraftGenerationRef.current[workoutId] ?? 0;
+      await commitAthleteEdit(workoutId, expectedGeneration);
     }
   }, [bumpSaveSignal, commitAthleteEdit]);
 
   useEffect(() => {
     flushPendingEditsRef.current = async () => {
       await flushAllPendingBatchSaves();
+      await flushAllPendingBatchRoutineSaves();
       await flushAllPendingAthleteSaves();
     };
-  }, [flushAllPendingAthleteSaves, flushAllPendingBatchSaves]);
+  }, [flushAllPendingAthleteSaves, flushAllPendingBatchRoutineSaves, flushAllPendingBatchSaves]);
 
   const hasQueuedDebounceSaves = useMemo(() => {
     return (
@@ -2483,18 +3289,13 @@ export default function CoachWorkoutsDay() {
 
   useEffect(() => {
     if (!dayISO) return;
-    if (!showPendingEdits) {
-      if (autoFlushAttemptedDayRef.current === dayISO) autoFlushAttemptedDayRef.current = null;
-      return;
-    }
+    if (!showPendingEdits) return;
     if (loading) return;
-    if (autoFlushAttemptedDayRef.current === dayISO) return;
-    autoFlushAttemptedDayRef.current = dayISO;
     const timer = setTimeout(() => {
       void flushPendingEditsRef.current();
     }, 220);
     return () => clearTimeout(timer);
-  }, [dayISO, loading, showPendingEdits]);
+  }, [athleteDrafts, batchDirtyFields, dayISO, loading, queuedDebounceSaveCount, showPendingEdits]);
 
   const pendingChangeCount = useMemo(() => {
     const pendingBatchCount = Object.values(batchDirtyFields).filter((dirty) => Object.keys(dirty ?? {}).length > 0).length;
@@ -2595,13 +3396,15 @@ export default function CoachWorkoutsDay() {
       console.log("[workouts] unmount:flushing pending saves");
       void (async () => {
         await flushAllPendingBatchSaves();
+        await flushAllPendingBatchRoutineSaves();
         await flushAllPendingAthleteSaves();
       })();
       Object.values(batchRoutineSaveTimersRef.current).forEach((t) => clearTimeout(t));
+      Object.values(distanceSaveTimersRef.current).forEach((t) => clearTimeout(t));
       if (headerBlurTimerRef.current) clearTimeout(headerBlurTimerRef.current);
       if (justMovedTimerRef.current) clearTimeout(justMovedTimerRef.current);
     };
-  }, [flushAllPendingAthleteSaves, flushAllPendingBatchSaves]);
+  }, [flushAllPendingAthleteSaves, flushAllPendingBatchRoutineSaves, flushAllPendingBatchSaves]);
 
   const onEditBatchField = (batchKey: string, field: BatchEditableField, value: string | string[]) => {
     console.log("[workouts] onEditBatchField", { batchKey, field, value });
@@ -2649,13 +3452,25 @@ export default function CoachWorkoutsDay() {
       return next;
     });
     setBatchDirtyFields((prev) => {
-      const next = {
+      const currentDirty: Partial<Record<BatchEditableField, true>> = prev[batchKey] ?? {};
+
+      const nextDirty: Partial<Record<BatchEditableField, true>> =
+        field === "session"
+          ? {
+              ...currentDirty,
+              session: true,
+              time_text: true,
+            }
+          : {
+              ...currentDirty,
+              [field]: true,
+            };
+
+      const next: Record<string, Partial<Record<BatchEditableField, true>>> = {
         ...prev,
-        [batchKey]:
-          field === "session"
-            ? { ...(prev[batchKey] ?? {}), session: true, time_text: true }
-            : { ...(prev[batchKey] ?? {}), [field]: true },
+        [batchKey]: nextDirty,
       };
+
       batchDirtyFieldsRef.current = next;
       return next;
     });
@@ -2695,7 +3510,7 @@ export default function CoachWorkoutsDay() {
         if (field === "title") return { ...w, title: String(value ?? "") };
         if (field === "location") return { ...w, location: String(value ?? "") };
         if (field === "time_text") return { ...w, time_text: String(value ?? "") };
-        if (field === "details") return { ...w, details: String(value ?? "") };
+        if (field === "details") return w;
         if (field === "categories") {
           const cleaned = normalizeCategoryArrayForGrid(Array.isArray(value) ? value : []);
           return {
@@ -2752,10 +3567,7 @@ export default function CoachWorkoutsDay() {
           next[workoutId] = { ...current, time_text: String(value ?? "") };
           return;
         }
-        if (field === "details") {
-          next[workoutId] = { ...current, details: String(value ?? "") };
-          return;
-        }
+        if (field === "details") return;
         if (field === "categories") {
           const cleaned = normalizeCategoryArrayForGrid(Array.isArray(value) ? value : []);
           next[workoutId] = {
@@ -2777,6 +3589,8 @@ export default function CoachWorkoutsDay() {
       athleteDraftsRef.current = next;
       return next;
     });
+    bumpBatchDraftGeneration(batchKey);
+    matchingWorkoutIds.forEach((workoutId) => bumpAthleteDraftGeneration(workoutId));
 
     console.log("[workouts] onEditBatchField:applied", {
       batchKey,
@@ -2791,7 +3605,8 @@ export default function CoachWorkoutsDay() {
     workoutId: string,
     field: AthleteEditableField,
     value: string
-  ) => {
+    ) => {
+    bumpAthleteDraftGeneration(workoutId);
     setAthleteDrafts((prev) => {
       const next = {
         ...prev,
@@ -2832,7 +3647,7 @@ export default function CoachWorkoutsDay() {
     );
 
     scheduleAthleteSave(workoutId);
-  }, [scheduleAthleteSave]);
+  }, [bumpAthleteDraftGeneration, scheduleAthleteSave]);
 
   const onEditAthleteSession = useCallback((workoutId: string, session: "AM" | "PM") => {
     const row = rowsRaw.find((w) => String(w.id) === workoutId);
@@ -2846,6 +3661,7 @@ export default function CoachWorkoutsDay() {
       currentTimeText: String(currentDraft?.time_text ?? row?.time_text ?? ""),
     });
 
+    bumpAthleteDraftGeneration(workoutId);
     setAthleteDrafts((prev) => {
       const next = {
         ...prev,
@@ -2871,7 +3687,7 @@ export default function CoachWorkoutsDay() {
     );
 
     scheduleAthleteSave(workoutId);
-  }, [practiceDefaults, rowsRaw, scheduleAthleteSave]);
+  }, [bumpAthleteDraftGeneration, practiceDefaults, rowsRaw, scheduleAthleteSave]);
 
   const applyCategoriesToWorkoutIds = useCallback((workoutIds: string[], categoriesInput: string[]) => {
     const ids = Array.from(new Set((Array.isArray(workoutIds) ? workoutIds : []).map((id) => String(id ?? "").trim()).filter(Boolean)));
@@ -2879,6 +3695,7 @@ export default function CoachWorkoutsDay() {
     const normalized = normalizeCategoryArrayForGrid(Array.isArray(categoriesInput) ? categoriesInput : []);
     const primary = normalized[0] ?? "";
     const idsSet = new Set(ids);
+    ids.forEach((workoutId) => bumpAthleteDraftGeneration(workoutId));
 
     setAthleteDrafts((prev) => {
       const next = { ...prev };
@@ -2913,7 +3730,7 @@ export default function CoachWorkoutsDay() {
     );
 
     ids.forEach((workoutId) => scheduleAthleteSave(workoutId));
-  }, [scheduleAthleteSave]);
+  }, [bumpAthleteDraftGeneration, scheduleAthleteSave]);
 
   const onEditAthleteCategories = useCallback((workoutId: string, categoriesInput: string[]) => {
     applyCategoriesToWorkoutIds([workoutId], categoriesInput);
@@ -2921,7 +3738,7 @@ export default function CoachWorkoutsDay() {
 
   const goToDate = useCallback((targetDateISO: string) => {
     void (async () => {
-      void flushPendingEditsRef.current();
+      await flushPendingEditsRef.current();
       router.replace({ pathname: "/(coach)/workouts", params: { date: targetDateISO } });
     })();
   }, [router]);
@@ -3004,7 +3821,43 @@ export default function CoachWorkoutsDay() {
         planned_distance_unit: w.planned_distance_unit,
       }));
 
+      let sourceBatchHeaderNotes: string | null = null;
+      if (row.batchId) {
+        const sourceHeaderRows = await listTeamWorkoutBatchHeadersForDate(dayISO);
+        const match = (Array.isArray(sourceHeaderRows) ? sourceHeaderRows : []).find((headerRow) => {
+          const headerBatchId = String(headerRow.batch_id ?? "").trim();
+          const headerDateISO = String(headerRow.date_iso ?? "").trim();
+          return headerBatchId === String(row.batchId ?? "").trim() && headerDateISO === dayISO;
+        });
+        const normalizedHeaderNotes = String(match?.header_notes ?? "").trim();
+        sourceBatchHeaderNotes = normalizedHeaderNotes || null;
+      }
+
+      console.log("[workouts] duplicateBatchOrSingle", {
+        sourceBatchId: row.batchId ?? null,
+        newBatchId,
+        sourceTitle: String(row.sample.title ?? "").trim(),
+        sourceMainNotes: sourceBatchHeaderNotes ?? "(fallback: row details)",
+        rowCount: payload.length,
+      });
       await createTeamWorkoutBatch(payload);
+
+      if (row.batchId && newBatchId && sourceBatchHeaderNotes) {
+        await Promise.all([
+          saveTeamWorkoutBatchHeaderNotes({
+            batch_id: newBatchId,
+            date_iso: dayISO,
+            session: "AM",
+            header_notes: sourceBatchHeaderNotes,
+          }),
+          saveTeamWorkoutBatchHeaderNotes({
+            batch_id: newBatchId,
+            date_iso: dayISO,
+            session: "PM",
+            header_notes: sourceBatchHeaderNotes,
+          }),
+        ]);
+      }
 
       await refreshDayGuarded(dayISO);
     } catch (e: any) {
@@ -3141,7 +3994,7 @@ export default function CoachWorkoutsDay() {
   const openAthletePickerOptions = useMemo(() => {
     if (!openAthletePickerBatch) return [];
     const rosterById = new Map<string, TeamRosterAthlete>();
-    rosterOptions.forEach((athlete) => {
+    activeRosterOptions.forEach((athlete) => {
       const athleteId = String((athlete as any)?.id ?? "").trim();
       if (!athleteId) return;
       rosterById.set(athleteId, athlete);
@@ -3172,8 +4025,8 @@ export default function CoachWorkoutsDay() {
     athletePickerQuery,
     openAthletePickerBatch,
     openAthletePickerSelectedAthleteIds,
+    activeRosterOptions,
     rosterNameById,
-    rosterOptions,
   ]);
 
   useEffect(() => {
@@ -3195,7 +4048,7 @@ export default function CoachWorkoutsDay() {
         return;
       }
 
-      if (rosterOptions.length === 0) {
+      if (activeRosterOptions.length === 0) {
         Alert.alert("Create failed", "No athletes found on roster.");
         return;
       }
@@ -3204,7 +4057,7 @@ export default function CoachWorkoutsDay() {
       setPracticeDefaults(freshDefaults);
       const newBatchId = createBatchId(dayISO);
       const defaultsForDay = resolveDefaultSessionSlotAndTimeForDate(dayISO, freshDefaults, "AM", "");
-      const payload = rosterOptions
+      const payload = activeRosterOptions
         .map((athlete) => String((athlete as any)?.id ?? "").trim())
         .filter(Boolean)
         .map((athleteId) => ({
@@ -3246,7 +4099,7 @@ export default function CoachWorkoutsDay() {
     } finally {
       setCreatingBatch(false);
     }
-  }, [creatingBatch, dayISO, ensureTeamId, practiceDefaults, refreshDayGuarded, rosterOptions]);
+  }, [activeRosterOptions, creatingBatch, dayISO, ensureTeamId, practiceDefaults, refreshDayGuarded]);
 
   const handleRemoveAthleteFromBatch = useCallback(
     async (batchRow: WorksheetBatchRow, athleteId: string) => {
@@ -3356,7 +4209,7 @@ export default function CoachWorkoutsDay() {
         location: String(batchDraft.location ?? "").trim() || null,
         time_text: String(batchDraft.time_text ?? "").trim() || null,
         title: String(batchDraft.title ?? "").trim() || "Workout",
-        details: String(batchDraft.details ?? "").trim() || null,
+        details: null,
         primary_category: String(batchDraft.primary_category ?? "").trim() || null,
         categories: (Array.isArray(batchDraft.categories) ? batchDraft.categories : [])
           .map((c) => String(c ?? "").trim())
@@ -3468,7 +4321,7 @@ export default function CoachWorkoutsDay() {
               location: String(batchDraft.location ?? "").trim() || null,
               time_text: String(batchDraft.time_text ?? "").trim() || null,
               title: String(batchDraft.title ?? "").trim() || "Workout",
-              details: String(batchDraft.details ?? "").trim() || null,
+              details: null,
               primary_category: String(batchDraft.primary_category ?? "").trim() || null,
               categories: (Array.isArray(batchDraft.categories) ? batchDraft.categories : [])
                 .map((c) => String(c ?? "").trim())
@@ -3541,7 +4394,7 @@ export default function CoachWorkoutsDay() {
           location: String(batchDraft.location ?? "").trim() || null,
           time_text: String(batchDraft.time_text ?? "").trim() || null,
           title: String(batchDraft.title ?? "").trim() || "Workout",
-          details: String(batchDraft.details ?? "").trim() || null,
+          details: null,
           primary_category: String(batchDraft.primary_category ?? "").trim() || null,
           categories: (Array.isArray(batchDraft.categories) ? batchDraft.categories : [])
             .map((c) => String(c ?? "").trim())
@@ -3578,7 +4431,7 @@ export default function CoachWorkoutsDay() {
       const batchId = String(batchRow.batchId ?? "").trim();
       if (!batchId) return;
       if (athleteSelectionSyncByBatchKey[batchRow.key]) return;
-      const allRosterIds = rosterOptions
+      const allRosterIds = activeRosterOptions
         .map((r) => String((r as any)?.id ?? "").trim())
         .filter(Boolean);
       if (allRosterIds.length === 0) return;
@@ -3597,7 +4450,7 @@ export default function CoachWorkoutsDay() {
         setAthleteSelectionSyncByBatchKey((prev) => ({ ...prev, [batchRow.key]: false }));
       }
     },
-    [applyBatchAthleteSelectionOptimistic, athleteSelectionSyncByBatchKey, patchAppRuntime, rosterOptions, rowsRaw, syncBatchAthleteSelection]
+    [activeRosterOptions, applyBatchAthleteSelectionOptimistic, athleteSelectionSyncByBatchKey, patchAppRuntime, rowsRaw, syncBatchAthleteSelection]
   );
 
   const clearAthletesForBatch = useCallback(
@@ -3737,6 +4590,221 @@ export default function CoachWorkoutsDay() {
           >
             <Text style={{ fontSize: 12, fontWeight: "800", color: "#24334f" }}>Next Day</Text>
           </Pressable>
+
+          <View style={{ minWidth: 210, position: "relative", zIndex: 120 }}>
+            <Text style={{ fontSize: 10, fontWeight: "800", color: "#64748b", marginBottom: 2, marginLeft: 4 }}>
+              Athlete
+            </Text>
+            <Pressable
+              onPress={() => setAthleteFilterOpen((prev) => !prev)}
+              style={{
+                height: 32,
+                borderWidth: 1,
+                borderColor: "#cfd7e6",
+                borderRadius: 8,
+                paddingHorizontal: 10,
+                backgroundColor: "#fff",
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+              }}
+            >
+              <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, fontWeight: "700", color: "#1f2937" }}>
+                {selectedAthleteFilterLabel}
+              </Text>
+              <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>
+                {athleteFilterOpen ? "▴" : "▾"}
+              </Text>
+            </Pressable>
+            {athleteFilterOpen ? (
+              <View
+                style={{
+                  position: "absolute",
+                  top: 40,
+                  left: 0,
+                  right: 0,
+                  borderWidth: 1,
+                  borderColor: "#dbe2ee",
+                  borderRadius: 8,
+                  backgroundColor: "#fff",
+                  zIndex: 140,
+                  ...(Platform.OS === "android" ? { elevation: 8 } : null),
+                }}
+              >
+                <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
+                  <Pressable
+                    onPress={() => {
+                      setSelectedAthleteIds([]);
+                      setAthleteFilterOpen(false);
+                    }}
+                    style={{
+                      borderBottomWidth: 1,
+                      borderBottomColor: "#edf2f7",
+                      paddingHorizontal: 10,
+                      paddingVertical: 8,
+                      backgroundColor: selectedAthleteIds.length === 0 ? "#eff6ff" : "#fff",
+                    }}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>All athletes (clear)</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      setSelectedAthleteIds(athleteFilterOptions.map((option) => option.id));
+                      setAthleteFilterOpen(false);
+                    }}
+                    style={{
+                      borderBottomWidth: 1,
+                      borderBottomColor: "#edf2f7",
+                      paddingHorizontal: 10,
+                      paddingVertical: 8,
+                      backgroundColor: "#fff",
+                    }}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>Select all</Text>
+                  </Pressable>
+                  {athleteFilterOptions.map((option) => (
+                    <Pressable
+                      key={`workouts-athlete-filter-${option.id}`}
+                      onPress={() => {
+                        setSelectedAthleteIds((prev) =>
+                          prev.includes(option.id)
+                            ? prev.filter((id) => id !== option.id)
+                            : [...prev, option.id]
+                        );
+                      }}
+                      style={{
+                        borderBottomWidth: 1,
+                        borderBottomColor: "#edf2f7",
+                        paddingHorizontal: 10,
+                        paddingVertical: 8,
+                        backgroundColor: selectedAthleteIds.includes(option.id) ? "#eff6ff" : "#fff",
+                      }}
+                    >
+                      <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
+                        {selectedAthleteIds.includes(option.id) ? "☑ " : "☐ "}
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            ) : null}
+          </View>
+
+          <View style={{ minWidth: 210, position: "relative", zIndex: 115 }}>
+            <Text style={{ fontSize: 10, fontWeight: "800", color: "#64748b", marginBottom: 2, marginLeft: 4 }}>
+              Groups
+            </Text>
+            <Pressable
+              onPress={() => setTrainingGroupFilterOpen((prev) => !prev)}
+              style={{
+                height: 32,
+                borderWidth: 1,
+                borderColor: "#cfd7e6",
+                borderRadius: 8,
+                paddingHorizontal: 10,
+                backgroundColor: "#fff",
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+              }}
+            >
+              <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, fontWeight: "700", color: "#1f2937" }}>
+                {selectedTrainingGroupFilterLabel}
+              </Text>
+              <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>
+                {trainingGroupFilterOpen ? "▴" : "▾"}
+              </Text>
+            </Pressable>
+          </View>
+
+          <View style={{ minWidth: 210, position: "relative", zIndex: 110 }}>
+            <Text style={{ fontSize: 10, fontWeight: "800", color: "#64748b", marginBottom: 2, marginLeft: 4 }}>
+              Season
+            </Text>
+            <Pressable
+              onPress={() => setSeasonFilterOpen((prev) => !prev)}
+              style={{
+                height: 32,
+                borderWidth: 1,
+                borderColor: "#cfd7e6",
+                borderRadius: 8,
+                paddingHorizontal: 10,
+                backgroundColor: "#fff",
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+              }}
+            >
+              <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, fontWeight: "700", color: "#1f2937" }}>
+                {selectedSeasonFilterLabel}
+              </Text>
+              <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>
+                {seasonFilterOpen ? "▴" : "▾"}
+              </Text>
+            </Pressable>
+            {seasonFilterOpen ? (
+              <View
+                style={{
+                  position: "absolute",
+                  top: 40,
+                  left: 0,
+                  right: 0,
+                  borderWidth: 1,
+                  borderColor: "#dbe2ee",
+                  borderRadius: 8,
+                  backgroundColor: "#fff",
+                  zIndex: 140,
+                  ...(Platform.OS === "android" ? { elevation: 8 } : null),
+                }}
+              >
+                <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
+                  <Pressable
+                    onPress={() => {
+                      void teamDataStore.actions.setSharedSelectedSeasonId(null);
+                      setSeasonFilterOpen(false);
+                    }}
+                    style={{
+                      borderBottomWidth: 1,
+                      borderBottomColor: "#edf2f7",
+                      paddingHorizontal: 10,
+                      paddingVertical: 8,
+                      backgroundColor: !selectedSeasonId ? "#eff6ff" : "#fff",
+                    }}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>All seasons (clear)</Text>
+                  </Pressable>
+                  {seasonFilterOptions.map((option) => (
+                    <Pressable
+                      key={`workouts-season-filter-${option.id}`}
+                      onPress={() => {
+                        void teamDataStore.actions.setSharedSelectedSeasonId(option.id);
+                        setSeasonFilterOpen(false);
+                      }}
+                      style={{
+                        borderBottomWidth: 1,
+                        borderBottomColor: "#edf2f7",
+                        paddingHorizontal: 10,
+                        paddingVertical: 8,
+                        backgroundColor: selectedSeasonId === option.id ? "#eff6ff" : "#fff",
+                      }}
+                    >
+                      <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
+                        {selectedSeasonId === option.id ? "◉ " : "○ "}
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            ) : null}
+            <Text style={{ fontSize: 10, fontWeight: "700", color: "#64748b", marginTop: 4, marginLeft: 4 }}>
+              Uses athlete-specific dates where set.
+            </Text>
+          </View>
         </View>
 
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -3802,12 +4870,15 @@ export default function CoachWorkoutsDay() {
             <View style={{ padding: 14 }}>
               <Text style={{ fontSize: 13, fontWeight: "700", color: "#64748b" }}>Loading...</Text>
             </View>
-          ) : worksheetBatches.length === 0 ? (
+          ) : worksheetBatchesForDisplay.length === 0 ? (
             <View style={{ padding: 14 }}>
-              <Text style={{ fontSize: 13, fontWeight: "700", color: "#64748b" }}>No workouts scheduled for this day.</Text>
+              <Text style={{ fontSize: 13, fontWeight: "700", color: "#64748b" }}>
+                {selectedAthleteIds.length > 0 ? "No workouts for the selected athletes on this day." : "No workouts scheduled for this day."}
+              </Text>
             </View>
           ) : (
-            worksheetBatches.map((batchRow, index) => {
+            worksheetBatchesForDisplay.map((batchRow, index) => {
+              const fullBatchRow = worksheetBatches.find((row) => row.key === batchRow.key) ?? batchRow;
               const batchDraft =
                 batchDrafts[batchRow.key] ??
                 {
@@ -3893,7 +4964,7 @@ export default function CoachWorkoutsDay() {
                 openBatchPicker?.batchKey === batchRow.key || athletePickerOpen || groupCategoryPickerOpenForBatch;
               const batchOverlayZIndex = groupCategoryPickerOpenForBatch ? 50000 : batchHasOpenOverlay ? 200 : 1;
               const isFirstBatch = index === 0;
-              const isLastBatch = index === worksheetBatches.length - 1;
+              const isLastBatch = index === worksheetBatchesForDisplay.length - 1;
               return (
                 <View
                   key={batchRow.key}
@@ -4044,20 +5115,42 @@ export default function CoachWorkoutsDay() {
 
                       <View style={{ ...batchSheetCellBase, width: COL.date, backgroundColor: BATCH_GROUP_CORE_BG }}>
                         <Text style={batchSheetLabelText}>Date</Text>
-                        <TextCellEditor
-                          value={batchDraft.date_iso}
-                          onChangeText={(v) => onEditBatchField(batchRow.key, "date_iso", v)}
-                          inputRef={(el: any) => {
+                        <Pressable
+                          ref={(el) => {
                             batchHeaderInputRefs.current[`${batchRow.key}:date`] = el;
                           }}
-                          webProps={{
-                            onFocus: () => activateBatchHeaderField(batchRow.key, "date"),
-                            onBlur: () => scheduleBatchHeaderDeactivate(),
-                            onKeyDown: (e: any) => handleBatchHeaderKeyDown(batchRow.key, "date", e),
+                          onPress={() => openBatchDatePicker(batchRow.key, batchDraft.date_iso)}
+                          style={{
+                            minHeight: 28,
+                            borderWidth: 1,
+                            borderColor: "#cbd5e1",
+                            borderRadius: 4,
+                            paddingHorizontal: 8,
+                            paddingVertical: 5,
+                            justifyContent: "center",
+                            backgroundColor: "#fff",
                           }}
-                          style={{ fontSize: 12, fontWeight: "700", color: "#111827", paddingVertical: 3 }}
-                          placeholder="YYYY-MM-DD"
-                        />
+                          {...(Platform.OS === "web"
+                            ? ({
+                                tabIndex: 0,
+                                onFocus: () => activateBatchHeaderField(batchRow.key, "date"),
+                                onBlur: () => scheduleBatchHeaderDeactivate(),
+                                onKeyDown: (e: any) => {
+                                  const key = String(e?.key ?? "");
+                                  if (key === "Enter" || key === " ") {
+                                    e.preventDefault?.();
+                                    openBatchDatePicker(batchRow.key, batchDraft.date_iso);
+                                    return;
+                                  }
+                                  handleBatchHeaderKeyDown(batchRow.key, "date", e);
+                                },
+                              } as any)
+                            : null)}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: "700", color: "#111827" }}>
+                            {String(batchDraft.date_iso ?? "").trim() || "Select date"}
+                          </Text>
+                        </Pressable>
                       </View>
 
                       <View style={{ ...batchSheetCellBase, minWidth: 160, flex: 1, backgroundColor: BATCH_GROUP_CORE_BG }}>
@@ -4172,7 +5265,7 @@ export default function CoachWorkoutsDay() {
                             />
                             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
                               <Pressable
-                                onPress={() => void selectAllAthletesForBatch(batchRow)}
+                                onPress={() => void selectAllAthletesForBatch(fullBatchRow)}
                                 disabled={athleteSelectionSyncing}
                                 style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: "#fff" }}
                               >
@@ -4181,7 +5274,7 @@ export default function CoachWorkoutsDay() {
                                 </Text>
                               </Pressable>
                               <Pressable
-                                onPress={() => void clearAthletesForBatch(batchRow)}
+                                onPress={() => void clearAthletesForBatch(fullBatchRow)}
                                 disabled={athleteSelectionSyncing}
                                 style={{ borderWidth: 1, borderColor: "#f2c4c4", backgroundColor: "#fff0f0", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 }}
                               >
@@ -4196,7 +5289,7 @@ export default function CoachWorkoutsDay() {
                                 return (
                                   <Pressable
                                     key={`athlete-toggle-${batchRow.key}-${item.athleteId}`}
-                                    onPress={() => void toggleAthleteInBatch(batchRow, item.athleteId, item.selected)}
+                                    onPress={() => void toggleAthleteInBatch(fullBatchRow, item.athleteId, item.selected)}
                                     disabled={busy}
                                     style={{
                                       borderWidth: 1,
@@ -4612,6 +5705,7 @@ export default function CoachWorkoutsDay() {
                           athleteDrafts: athleteDraftsForGroup,
                           athleteSaveState: athleteSaveStateForGroup,
                           prescribedDistanceByWorkoutId: prescribedDistanceByWorkoutIdForGroup,
+                          distanceInvalidByWorkoutId: distanceInvalidByWorkoutIdForGroup,
                         } = getCachedGroupAthleteSlices(groupKey, groupWorkoutIds);
                         const isFilling = fillingGroupKey === groupKey;
                         const selectedRowIds = selectedByGroup[groupKey]?.rowIds ?? [];
@@ -4985,6 +6079,8 @@ export default function CoachWorkoutsDay() {
                               athleteDrafts={athleteDraftsForGroup}
                               athleteSaveState={athleteSaveStateForGroup}
                               prescribedDistanceByWorkoutId={prescribedDistanceByWorkoutIdForGroup}
+                              distanceInvalidByWorkoutId={distanceInvalidByWorkoutIdForGroup}
+                              onEditDistanceField={onEditDistanceField}
                               deletingKey={deletingKey}
                               justMovedWorkoutId={justMovedWorkoutId}
                               onEditAthleteField={onEditAthleteField}
@@ -5000,6 +6096,7 @@ export default function CoachWorkoutsDay() {
                               setActiveGridId={setActiveGridId}
                               onSelectionMetaChange={handleGroupSelectionMetaChange}
                               onRegisterGridApi={handleRegisterGroupGridApi}
+                              onOpenFeedbackDetail={openFeedbackDetail}
                               batchHeaderActiveRef={batchHeaderActiveRef}
                             />
                           </View>
@@ -5216,6 +6313,239 @@ export default function CoachWorkoutsDay() {
         </div>
       ) : null}
 
+      <Modal
+        visible={trainingGroupFilterOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setTrainingGroupFilterOpen(false)}
+      >
+        <Pressable
+          onPress={() => setTrainingGroupFilterOpen(false)}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(2,6,23,0.28)",
+            alignItems: "center",
+            justifyContent: Platform.OS === "web" ? "flex-start" : "center",
+            paddingTop: Platform.OS === "web" ? 84 : 24,
+            paddingHorizontal: 16,
+          }}
+        >
+          <Pressable
+            onPress={() => {}}
+            style={{
+              width: "100%",
+              maxWidth: 520,
+              maxHeight: Platform.OS === "web" ? 520 : 460,
+              borderWidth: 1,
+              borderColor: "#dbe2ee",
+              borderRadius: 12,
+              backgroundColor: "#fff",
+              overflow: "hidden",
+              shadowColor: "#000",
+              shadowOpacity: 0.22,
+              shadowRadius: 14,
+              shadowOffset: { width: 0, height: 6 },
+              elevation: 16,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                borderBottomWidth: 1,
+                borderBottomColor: "#dbe2ee",
+              }}
+            >
+              <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a" }}>Training Groups</Text>
+              <Pressable
+                onPress={() => setTrainingGroupFilterOpen(false)}
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#e2e8f0",
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                  alignItems: "center",
+                }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Done</Text>
+              </Pressable>
+            </View>
+
+            <ScrollView style={{ maxHeight: Platform.OS === "web" ? 440 : 360 }} keyboardShouldPersistTaps="handled">
+              <Pressable
+                onPress={() => {
+                  void teamDataStore.actions.setSharedSelectedTrainingGroupIds([]);
+                  setTrainingGroupFilterOpen(false);
+                }}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#edf2f7",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  backgroundColor: selectedTrainingGroupIds.length === 0 ? "#eff6ff" : "#fff",
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>All groups (clear)</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  void teamDataStore.actions.setSharedSelectedTrainingGroupIds(
+                    trainingGroupFilterOptions.map((option) => option.id)
+                  );
+                }}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#edf2f7",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  backgroundColor: "#fff",
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>Select all</Text>
+              </Pressable>
+              {trainingGroupFilterOptions.map((option) => (
+                <Pressable
+                  key={`workouts-training-group-filter-modal-${option.id}`}
+                  onPress={() => {
+                    const next = selectedTrainingGroupIds.includes(option.id)
+                      ? selectedTrainingGroupIds.filter((id) => id !== option.id)
+                      : [...selectedTrainingGroupIds, option.id];
+                    void teamDataStore.actions.setSharedSelectedTrainingGroupIds(next);
+                  }}
+                  style={{
+                    borderBottomWidth: 1,
+                    borderBottomColor: "#edf2f7",
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    backgroundColor: selectedTrainingGroupIds.includes(option.id) ? "#eff6ff" : "#fff",
+                  }}
+                >
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>
+                    {selectedTrainingGroupIds.includes(option.id) ? "☑ " : "☐ "}
+                    {option.label}
+                  </Text>
+                </Pressable>
+              ))}
+              {trainingGroupFilterOptions.length === 0 ? (
+                <View style={{ paddingHorizontal: 12, paddingVertical: 10 }}>
+                  <Text style={{ fontSize: 12, color: "#64748b" }}>No training groups found</Text>
+                </View>
+              ) : null}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={!!batchDatePickerState}
+        transparent
+        animationType="fade"
+        onRequestClose={closeBatchDatePicker}
+      >
+        <Pressable
+          onPress={closeBatchDatePicker}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(2,6,23,0.35)",
+            alignItems: "center",
+            justifyContent: "center",
+            paddingHorizontal: 16,
+          }}
+        >
+          <Pressable
+            onPress={() => {}}
+            style={{
+              width: "100%",
+              maxWidth: 420,
+              borderWidth: 1,
+              borderColor: "#dbe2ee",
+              borderRadius: 12,
+              backgroundColor: "#fff",
+              paddingHorizontal: 14,
+              paddingVertical: 12,
+              gap: 10,
+            }}
+          >
+            <Text style={{ fontSize: 15, fontWeight: "900", color: "#0f172a" }}>Select Batch Date</Text>
+            {Platform.OS === "web" ? (
+              <input
+                type="date"
+                value={batchDatePickerDraftDate}
+                onChange={(e) => {
+                  setBatchDatePickerDraftDate(String((e.target as HTMLInputElement)?.value ?? "").trim());
+                  if (batchDatePickerError) setBatchDatePickerError(null);
+                }}
+                style={{
+                  width: "100%",
+                  minHeight: 40,
+                  border: "1px solid #cbd5e1",
+                  borderRadius: 8,
+                  padding: "8px 10px",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  color: "#111827",
+                }}
+              />
+            ) : (
+              <TextInput
+                value={batchDatePickerDraftDate}
+                onChangeText={(v) => {
+                  setBatchDatePickerDraftDate(v);
+                  if (batchDatePickerError) setBatchDatePickerError(null);
+                }}
+                autoCapitalize="none"
+                autoCorrect={false}
+                placeholder="YYYY-MM-DD"
+                style={{
+                  minHeight: 40,
+                  borderWidth: 1,
+                  borderColor: "#cbd5e1",
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  fontSize: 14,
+                  fontWeight: "700",
+                  color: "#111827",
+                }}
+              />
+            )}
+            {batchDatePickerError ? (
+              <Text style={{ fontSize: 12, color: "#b91c1c" }}>{batchDatePickerError}</Text>
+            ) : null}
+            <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+              <Pressable
+                onPress={closeBatchDatePicker}
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#cbd5e1",
+                  borderRadius: 8,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={confirmBatchDatePicker}
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#0f172a",
+                  backgroundColor: "#0f172a",
+                  borderRadius: 8,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "800", color: "#fff" }}>Apply Date</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {moveMode ? (
         <Modal transparent animationType="fade" visible onRequestClose={() => setMoveMode(null)}>
           <Pressable
@@ -5293,6 +6623,84 @@ export default function CoachWorkoutsDay() {
                 }}
               >
                 <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Cancel</Text>
+              </Pressable>
+            </Pressable>
+          </Pressable>
+        </Modal>
+      ) : null}
+
+      {feedbackModal ? (
+        <Modal transparent animationType="fade" visible onRequestClose={() => setFeedbackModal(null)}>
+          <Pressable
+            onPress={() => setFeedbackModal(null)}
+            style={{ flex: 1, backgroundColor: "rgba(2, 6, 23, 0.35)", alignItems: "center", justifyContent: "center", padding: 16 }}
+          >
+            <Pressable
+              onPress={(e) => e.stopPropagation()}
+              style={{
+                width: "100%",
+                maxWidth: 540,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: "#dbe2ee",
+                backgroundColor: "#fff",
+                paddingHorizontal: 14,
+                paddingVertical: 12,
+                gap: 8,
+              }}
+            >
+              <Text style={{ fontSize: 16, fontWeight: "900", color: "#0f172a" }}>Athlete Feedback</Text>
+              <Text style={{ fontSize: 13, fontWeight: "800", color: "#1e293b" }}>{feedbackModal.athleteName}</Text>
+
+              {typeof feedbackModal.completedMiles === "number" ? (
+                <View style={{ gap: 2 }}>
+                  <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>Completed distance</Text>
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: "#0f172a" }}>
+                    {formatFeedbackDistance(feedbackModal.completedMiles)} mi
+                  </Text>
+                </View>
+              ) : null}
+
+              {feedbackModal.completedTimeText ? (
+                <View style={{ gap: 2 }}>
+                  <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>Completed time</Text>
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: "#0f172a" }}>{feedbackModal.completedTimeText}</Text>
+                </View>
+              ) : null}
+
+              {feedbackModal.splitsOrPace ? (
+                <View style={{ gap: 2 }}>
+                  <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>Splits / pace</Text>
+                  <Text style={{ fontSize: 13, color: "#1f2937", lineHeight: 18 }}>{feedbackModal.splitsOrPace}</Text>
+                </View>
+              ) : null}
+
+              {feedbackModal.additionalFeedback ? (
+                <View style={{ gap: 2 }}>
+                  <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>Notes</Text>
+                  <Text style={{ fontSize: 13, color: "#1f2937", lineHeight: 18 }}>{feedbackModal.additionalFeedback}</Text>
+                </View>
+              ) : null}
+
+              {feedbackModal.updatedAt && Number.isFinite(Date.parse(feedbackModal.updatedAt)) ? (
+                <Text style={{ marginTop: 2, fontSize: 11, fontWeight: "700", color: "#64748b" }}>
+                  Updated: {new Date(feedbackModal.updatedAt).toLocaleString()}
+                </Text>
+              ) : null}
+
+              <Pressable
+                onPress={() => setFeedbackModal(null)}
+                style={{
+                  marginTop: 4,
+                  borderWidth: 1,
+                  borderColor: "#cbd5e1",
+                  borderRadius: 8,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  alignItems: "center",
+                }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#334155" }}>Close</Text>
               </Pressable>
             </Pressable>
           </Pressable>

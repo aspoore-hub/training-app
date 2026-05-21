@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Dimensions, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
+import { Alert, Dimensions, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -25,6 +25,11 @@ import {
   type TeamWorkoutRow,
 } from "../../../lib/teamWorkoutsCloud";
 import {
+  listTeamWorkoutBatchHeadersForDate,
+  listTeamWorkoutBatchHeadersInRange,
+  saveTeamWorkoutBatchHeaderNotes,
+} from "../../../lib/teamWorkoutBatchHeadersCloud";
+import {
   getCachedCoachCategories,
   getCategoryOptions,
   loadCoachCategoriesFromTeamKV,
@@ -32,15 +37,24 @@ import {
   loadWeekStartSetting,
   saveCoachWeekLabel,
 } from "../../../lib/settings";
-import { getRosterMapById, resolveAthleteDisplayName } from "../../../lib/teamRoster";
+import {
+  compareAthleteDisplayNamesByLastName,
+  getRosterMapById,
+  loadTeamRoster,
+  resolveAthleteDisplayName,
+} from "../../../lib/teamRoster";
 import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
 import { loadJSON, saveJSON } from "../../../lib/storage";
 import { normalizeWorkoutTimeInput } from "../../../lib/time";
 import { getWeekLabelTone, getWeekLabelToneText } from "../../../lib/weekLabelStyle";
+import { isActiveTrainingGroupMembership, teamDataStore } from "../../../lib/teamDataStore";
 
 const SCREEN_W = Dimensions.get("window").width;
 const COACH_CALENDAR_VIEW_PREFS_KEY = "coach_calendar_view_prefs_v1";
 const COACH_CALENDAR_WORKOUTS_CACHE_KEY = "coach_calendar_workouts_cache_v1";
+const COACH_CALENDAR_ATHLETE_FILTER_KEY = "coach_calendar_selected_athlete_filter_v1";
+const COACH_TRAINING_PLAN_EXPORT_RANGE_KEY = "coach_training_plan_export_range_v1";
+const MAX_TRAINING_PLAN_EXPORT_RANGE_DAYS = 112;
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -59,7 +73,7 @@ type MonthCell = {
 };
 
 type WeeklyGroupLine = {
-  details: string;
+  individualNotes?: string;
   athleteNames: string[];
 };
 
@@ -136,6 +150,17 @@ type MonthWorkoutSummaryRow = {
   firstSeenOrder: number;
 };
 
+type AthleteFilterOption = {
+  id: string;
+  label: string;
+};
+
+type TrainingPlanWeekSection = {
+  weekStartISO: string;
+  weekLabel: string;
+  days: WeeklyDaySection[];
+};
+
 function escapePdfHtml(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -175,6 +200,8 @@ function buildWeeklyHandoutHtml(args: {
                 const location = String(workout.location ?? "").trim();
                 const headerLine = [time, location ? `@ ${location}` : ""].filter(Boolean).join(" ");
                 const title = String(workout.title ?? "").trim();
+                const batchNotes = String(workout.details ?? "").trim();
+                const showBatchNotes = batchNotes.length > 0 && batchNotes.toLowerCase() !== "no notes";
                 const accentColors = normalizeWorkoutAccentColors(workout.categories, args.categories);
                 const accentBackground = buildVerticalAccentBackground(accentColors);
                 const dotsHtml = (Array.isArray(workout.categories) ? workout.categories : [])
@@ -192,9 +219,9 @@ function buildWeeklyHandoutHtml(args: {
                   .map((group) =>
                     (Array.isArray(group.lines) ? group.lines : [])
                       .map((line) => {
-                        const details = String(line.details ?? "").trim();
+                        const details = String(line.individualNotes ?? "").trim();
                         const names = (Array.isArray(line.athleteNames) ? line.athleteNames : []).join(", ");
-                        const showDetails = details && details.toLowerCase() !== "no notes";
+                        const showDetails = !!details;
                         return `
                           ${showDetails ? `<div class="group-details">${escapePdfHtml(details)}</div>` : ""}
                           <div class="group-athletes">${escapePdfHtml(names || "Unknown athlete")}</div>
@@ -213,6 +240,7 @@ function buildWeeklyHandoutHtml(args: {
                       </div>
                       ${dotsHtml ? `<div class="workout-categories-row">${dotsHtml}</div>` : ""}
                       ${title ? `<div class="workout-title">${escapePdfHtml(title)}</div>` : ""}
+                      ${showBatchNotes ? `<div class="workout-batch-notes">${escapePdfHtml(batchNotes)}</div>` : ""}
                       ${groups}
                     </div>
                   </div>
@@ -406,6 +434,15 @@ function buildWeeklyHandoutHtml(args: {
         word-break: break-word;
       }
 
+      .workout-batch-notes {
+        font-size: 7.5px;
+        line-height: 1.2;
+        margin: 0 0 2px 0;
+        color: #334155;
+        white-space: normal;
+        word-break: break-word;
+      }
+
       .group-details {
         font-size: 7.5px;
         line-height: 1.2;
@@ -453,6 +490,164 @@ function buildWeeklyHandoutHtml(args: {
       <div class="week-grid">
         ${dayColumns}
       </div>
+    </div>
+  </body>
+</html>
+`.trim();
+}
+
+function formatTrainingPlanRangeLabel(startISO: string, endISO: string): string {
+  const [sy, sm, sd] = String(startISO ?? "").split("-").map(Number);
+  const [ey, em, ed] = String(endISO ?? "").split("-").map(Number);
+  if (!sy || !sm || !sd || !ey || !em || !ed) return `${startISO} - ${endISO}`;
+  const start = new Date(sy, sm - 1, sd);
+  const end = new Date(ey, em - 1, ed);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return `${startISO} - ${endISO}`;
+  const startLabel = start.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const endOpts = start.getFullYear() === end.getFullYear()
+    ? { month: "short", day: "numeric", year: "numeric" } as const
+    : { month: "short", day: "numeric", year: "numeric" } as const;
+  const endLabel = end.toLocaleDateString(undefined, endOpts);
+  return `${startLabel} - ${endLabel}`;
+}
+
+function buildTrainingPlanRangeHtml(args: {
+  title: string;
+  rangeLabel: string;
+  generatedAtLabel?: string;
+  weeks: TrainingPlanWeekSection[];
+  categories: WorkoutCategory[];
+}): string {
+  const weekBlocks = (Array.isArray(args.weeks) ? args.weeks : [])
+    .map((week) => {
+      const dayColumns = (Array.isArray(week.days) ? week.days : [])
+        .map((day) => {
+          const workoutHtml =
+            day.workouts.length === 0
+              ? `<div class="off-line">Off / No team workout scheduled</div>`
+              : day.workouts
+                  .map((workout) => {
+                    const time = String(workout.time ?? "").trim() || String(workout.session ?? "").trim();
+                    const location = String(workout.location ?? "").trim();
+                    const headerLine = [time, location ? `@ ${location}` : ""].filter(Boolean).join(" ");
+                    const title = String(workout.title ?? "").trim();
+                    const batchNotes = String(workout.details ?? "").trim();
+                    const showBatchNotes = batchNotes.length > 0 && batchNotes.toLowerCase() !== "no notes";
+                    const accentColors = normalizeWorkoutAccentColors(workout.categories, args.categories);
+                    const accentBackground = buildVerticalAccentBackground(accentColors);
+                    const dotsHtml = (Array.isArray(workout.categories) ? workout.categories : [])
+                      .map((cat) => {
+                        const color = categoryColorByName(args.categories, cat);
+                        return `
+                          <span class="workout-category-item">
+                            <span class="workout-dot" style="background:${escapePdfHtml(color)};"></span>
+                            <span class="workout-category-label">${escapePdfHtml(String(cat ?? "").trim() || "Other")}</span>
+                          </span>
+                        `;
+                      })
+                      .join("");
+                    const groups = (Array.isArray(workout.groups) ? workout.groups : [])
+                      .map((group) =>
+                        (Array.isArray(group.lines) ? group.lines : [])
+                          .map((line) => {
+                            const details = String(line.individualNotes ?? "").trim();
+                            const names = (Array.isArray(line.athleteNames) ? line.athleteNames : []).join(", ");
+                            const showDetails = !!details;
+                            return `
+                              ${showDetails ? `<div class="group-details">${escapePdfHtml(details)}</div>` : ""}
+                              <div class="group-athletes">${escapePdfHtml(names || "Unknown athlete")}</div>
+                            `;
+                          })
+                          .join("")
+                      )
+                      .join("");
+
+                    return `
+                      <div class="workout-block">
+                        <div class="workout-accent" style="background:${escapePdfHtml(accentBackground)};"></div>
+                        <div class="workout-content">
+                          <div class="workout-header-row">
+                            <div class="workout-header">${escapePdfHtml(headerLine || "Workout")}</div>
+                          </div>
+                          ${dotsHtml ? `<div class="workout-categories-row">${dotsHtml}</div>` : ""}
+                          ${title ? `<div class="workout-title">${escapePdfHtml(title)}</div>` : ""}
+                          ${showBatchNotes ? `<div class="workout-batch-notes">${escapePdfHtml(batchNotes)}</div>` : ""}
+                          ${groups}
+                        </div>
+                      </div>
+                    `;
+                  })
+                  .join("");
+
+          return `
+            <div class="day-column">
+              <div class="day-head">
+                <div class="day-name">${escapePdfHtml(day.weekday)}</div>
+                <div class="day-date">${escapePdfHtml(formatPdfDateShort(day.dateISO))}</div>
+              </div>
+              <div class="day-workouts">
+                ${workoutHtml}
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+
+      return `
+        <section class="week-block">
+          <h2 class="week-title">${escapePdfHtml(week.weekLabel)}</h2>
+          <div class="week-grid">
+            ${dayColumns}
+          </div>
+        </section>
+      `;
+    })
+    .join("");
+
+  return `
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Training Plan</title>
+    <style>
+      @page { size: Letter landscape; margin: 0.22in; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #fff; color: #111827; font-family: Arial, Helvetica, sans-serif; }
+      .page { width: 100%; }
+      .title { font-size: 14px; font-weight: 800; margin: 0 0 2px 0; line-height: 1.1; }
+      .subtitle { font-size: 8px; font-weight: 700; margin: 0 0 6px 0; color: #374151; line-height: 1.1; }
+      .week-block { break-inside: avoid; page-break-inside: avoid; margin: 0 0 8px 0; }
+      .week-title { font-size: 10px; font-weight: 800; margin: 0 0 4px 0; color: #111827; }
+      .week-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; align-items: stretch; overflow: visible; }
+      .day-column { border: 1px solid #9ca3af; border-radius: 4px; background: #fff; overflow: visible; break-inside: auto; page-break-inside: auto; display: flex; flex-direction: column; height: 100%; }
+      .day-head { display: flex; align-items: center; justify-content: space-between; gap: 5px; border-bottom: 1px solid #d1d5db; padding: 4px 5px 3px 5px; background: #f8fafc; }
+      .day-name { font-size: 9px; font-weight: 800; color: #111827; line-height: 1.1; }
+      .day-date { font-size: 8px; font-weight: 800; color: #334155; line-height: 1.1; white-space: nowrap; }
+      .day-workouts { padding: 4px; overflow: visible; flex: 1 1 auto; align-content: flex-start; }
+      .workout-block { break-inside: avoid; page-break-inside: avoid; margin-bottom: 4px; border: 1px solid #d1d5db; border-radius: 3px; background: #ffffff; padding: 0; display: flex; align-items: stretch; overflow: hidden; }
+      .workout-block:last-child { margin-bottom: 0; }
+      .workout-accent { width: 4px; flex: 0 0 4px; }
+      .workout-content { flex: 1; min-width: 0; padding: 3px 4px; }
+      .workout-header-row { display: flex; align-items: center; gap: 4px; margin: 0 0 2px 0; }
+      .workout-header { font-size: 8px; font-weight: 800; line-height: 1.2; margin: 0; flex: 1; min-width: 0; white-space: normal; word-break: break-word; }
+      .workout-categories-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 0 0 2px 0; }
+      .workout-category-item { display: inline-flex; align-items: center; gap: 3px; min-width: 0; }
+      .workout-dot { width: 6px; height: 6px; border-radius: 999px; display: inline-block; border: 0.5px solid rgba(0,0,0,0.18); }
+      .workout-category-label { font-size: 7px; font-weight: 700; color: #334155; line-height: 1.15; }
+      .workout-title { font-size: 8px; font-weight: 700; line-height: 1.2; margin: 0 0 2px 0; white-space: normal; word-break: break-word; }
+      .workout-batch-notes { font-size: 7.5px; line-height: 1.2; margin: 0 0 2px 0; color: #334155; white-space: normal; word-break: break-word; }
+      .group-details { font-size: 7.5px; line-height: 1.2; margin: 0 0 1px 0; white-space: normal; word-break: break-word; }
+      .group-athletes { font-size: 7px; font-style: italic; color: #4b5563; line-height: 1.2; margin: 0 0 2px 0; white-space: normal; word-break: break-word; }
+      .group-athletes:last-child { margin-bottom: 0; }
+      .off-line { font-size: 7.5px; font-style: italic; color: #4b5563; line-height: 1.2; padding: 1px 0; }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <h1 class="title">${escapePdfHtml(args.title)}</h1>
+      <p class="subtitle">${escapePdfHtml(args.rangeLabel)}${args.generatedAtLabel ? ` • Generated ${escapePdfHtml(args.generatedAtLabel)}` : ""}</p>
+      ${weekBlocks}
     </div>
   </body>
 </html>
@@ -510,6 +705,11 @@ function toISODate(d: Date) {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+function parseISODate(iso: string): Date {
+  const [y, m, d] = String(iso ?? "").split("-").map(Number);
+  return new Date(y, (m ?? 1) - 1, d ?? 1);
 }
 
 function monthStart(d: Date) {
@@ -572,6 +772,15 @@ function startOfWeek(d: Date, weekStartsOn: WeekStartDay) {
   return addDays(new Date(d.getFullYear(), d.getMonth(), d.getDate()), -offset);
 }
 
+function formatWeekRangeFromStartISO(weekStartISO: string): string {
+  const start = parseISODate(weekStartISO);
+  if (Number.isNaN(start.getTime())) return weekStartISO;
+  const end = addDays(start, 6);
+  const startLabel = start.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const endLabel = end.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  return `${startLabel} - ${endLabel}`;
+}
+
 function buildMonthGrid(anchor: Date, weekStartsOn: WeekStartDay): MonthCell[] {
   const first = monthStart(anchor);
   const jsDay = first.getDay();
@@ -620,6 +829,55 @@ function parseWeeklyBatchKey(key: string): ParsedWeeklyBatchKey {
 
 function normalizeSession(value: string): "AM" | "PM" {
   return String(value ?? "").trim().toUpperCase() === "AM" ? "AM" : "PM";
+}
+
+function toWorkoutBatchHeaderNotesKey(dateISO: string, batchId: string, session: string): string {
+  return `${String(dateISO ?? "").trim()}::${String(batchId ?? "").trim()}::${normalizeSession(String(session ?? ""))}`;
+}
+
+function toWorkoutBatchHeaderNotesBaseKey(dateISO: string, batchId: string): string {
+  return `${String(dateISO ?? "").trim()}::${String(batchId ?? "").trim()}`;
+}
+
+function applyHeaderNotesToWeeklySections(
+  days: WeeklyDaySection[],
+  headerByKey: Record<string, string>,
+  headerByBaseKey: Record<string, string>,
+  headerByBatchId: Record<string, string>
+): WeeklyDaySection[] {
+  return (Array.isArray(days) ? days : []).map((day) => ({
+    ...day,
+    workouts: (Array.isArray(day.workouts) ? day.workouts : []).map((workout) => {
+      const parsed = parseWeeklyBatchKey(workout.saveKey);
+      if (!parsed.isBatch) return workout;
+      const exactKey = toWorkoutBatchHeaderNotesKey(day.dateISO, parsed.id, String(workout.session ?? ""));
+      const exact = String(headerByKey[exactKey] ?? "").trim();
+      if (exact) return { ...workout, details: exact };
+      const baseKey = toWorkoutBatchHeaderNotesBaseKey(day.dateISO, parsed.id);
+      const base = String(headerByBaseKey[baseKey] ?? "").trim();
+      if (base) return { ...workout, details: base };
+      const byBatch = String(headerByBatchId[parsed.id] ?? "").trim();
+      if (byBatch) return { ...workout, details: byBatch };
+      return workout;
+    }),
+  }));
+}
+
+function summarizeWeeklySectionDetails(days: WeeklyDaySection[]) {
+  return (Array.isArray(days) ? days : []).flatMap((day) =>
+    (Array.isArray(day.workouts) ? day.workouts : []).map((workout) => {
+      const parsed = parseWeeklyBatchKey(workout.saveKey);
+      const firstLine = String(workout.details ?? "").trim().split(/\n+/)[0] ?? "";
+      return {
+        dateISO: day.dateISO,
+        batchId: parsed.isBatch ? parsed.id : "",
+        session: String(workout.session ?? ""),
+        title: String(workout.title ?? ""),
+        details: String(workout.details ?? ""),
+        detailsPreview: firstLine,
+      };
+    })
+  );
 }
 
 function sanitizeBatchCategories(raw: unknown): string[] {
@@ -776,12 +1034,13 @@ function hasValidWorkoutTime(value: string | undefined): boolean {
   return !!normalizeWorkoutTimeInput(raw);
 }
 
-function isRaceCategoryName(value: string): boolean {
-  return String(value ?? "").trim().toLowerCase() === "race";
+function isOffCategoryName(value: string): boolean {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "off" || normalized === "off / rest" || normalized === "rest";
 }
 
-function hasRaceCategory(categories: string[]): boolean {
-  return (Array.isArray(categories) ? categories : []).some((value) => isRaceCategoryName(value));
+function hasOffCategory(categories: string[]): boolean {
+  return (Array.isArray(categories) ? categories : []).some((value) => isOffCategoryName(value));
 }
 
 function compareWorkoutTimes(a: string | undefined, b: string | undefined): number {
@@ -790,31 +1049,28 @@ function compareWorkoutTimes(a: string | undefined, b: string | undefined): numb
   return aTime.localeCompare(bTime);
 }
 
-function weeklyWorkoutDisplayRank(workout: WeeklyWorkoutSection): number {
-  const race = hasRaceCategory(workout.categories);
-  const timed = hasValidWorkoutTime(workout.time);
-  if (race && timed) return 0;
-  if (race && !timed) return 1;
-  if (!race && timed) return 2;
-  return 3;
+function compareWeeklyWorkoutSections(a: WeeklyWorkoutSection, b: WeeklyWorkoutSection): number {
+  const aOff = hasOffCategory(a.categories);
+  const bOff = hasOffCategory(b.categories);
+  if (aOff !== bOff) return aOff ? 1 : -1;
+
+  const sessionRank = (session: string) => (normalizeSession(session) === "AM" ? 0 : 1);
+  const sessionOrder = sessionRank(a.session) - sessionRank(b.session);
+  if (sessionOrder !== 0) return sessionOrder;
+
+  const aTimed = hasValidWorkoutTime(a.time);
+  const bTimed = hasValidWorkoutTime(b.time);
+  if (aTimed !== bTimed) return aTimed ? -1 : 1;
+  if (aTimed && bTimed) {
+    const byTime = compareWorkoutTimes(a.time, b.time);
+    if (byTime !== 0) return byTime;
+  }
+
+  return a.title.localeCompare(b.title);
 }
 
 function sortWeeklyDayWorkoutsForDisplay(workouts: WeeklyWorkoutSection[]): WeeklyWorkoutSection[] {
-  return [...workouts].sort((a, b) => {
-    const rankDiff = weeklyWorkoutDisplayRank(a) - weeklyWorkoutDisplayRank(b);
-    if (rankDiff !== 0) return rankDiff;
-
-    const aTimed = hasValidWorkoutTime(a.time);
-    const bTimed = hasValidWorkoutTime(b.time);
-    if (aTimed && bTimed) {
-      const byTime = compareWorkoutTimes(a.time, b.time);
-      if (byTime !== 0) return byTime;
-    }
-
-    const sessionOrder = (normalizeSession(a.session) === "AM" ? 0 : 1) - (normalizeSession(b.session) === "AM" ? 0 : 1);
-    if (sessionOrder !== 0) return sessionOrder;
-    return a.title.localeCompare(b.title);
-  });
+  return [...workouts].sort(compareWeeklyWorkoutSections);
 }
 
 function athleteLastNamePreview(workout: WeeklyWorkoutSection): string {
@@ -844,7 +1100,52 @@ function getWorkoutLocation(w: CoachCalendarWorkout): string {
 
 function getAthleteFallbackName(w: CoachCalendarWorkout): string {
   const candidate = String(w.athleteName ?? w.athleteDisplayName ?? "").trim();
-  return candidate || "Unknown athlete";
+  if (!candidate) return "";
+  const normalized = candidate.toLowerCase();
+  if (normalized === "athlete" || normalized === "unknown athlete") return "";
+  return candidate;
+}
+
+function normalizeWorkoutTimeLabel(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return normalizeWorkoutTimeInput(raw) ?? raw;
+}
+
+function compareGroupIdForMasterRow(a: string, b: string): number {
+  const aNorm = String(a ?? "").trim();
+  const bNorm = String(b ?? "").trim();
+  const aUngrouped = !aNorm;
+  const bUngrouped = !bNorm;
+  if (aUngrouped && !bUngrouped) return -1;
+  if (!aUngrouped && bUngrouped) return 1;
+  const aNum = Number(aNorm);
+  const bNum = Number(bNorm);
+  const aIsNum = Number.isFinite(aNum) && /^\d+$/.test(aNorm);
+  const bIsNum = Number.isFinite(bNum) && /^\d+$/.test(bNorm);
+  if (aIsNum && bIsNum && aNum !== bNum) return aNum - bNum;
+  if (aIsNum && !bIsNum) return -1;
+  if (!aIsNum && bIsNum) return 1;
+  return aNorm.localeCompare(bNorm, undefined, { numeric: true });
+}
+
+function pickMasterWorkoutRow(rows: CoachCalendarWorkout[]): CoachCalendarWorkout {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("pickMasterWorkoutRow requires at least one workout row.");
+  }
+  return [...rows].sort((a, b) => {
+    const groupOrder = compareGroupIdForMasterRow(
+      String(a.groupId ?? "").trim(),
+      String(b.groupId ?? "").trim()
+    );
+    if (groupOrder !== 0) return groupOrder;
+
+    const aCreated = Number(a.createdAt ?? Number.POSITIVE_INFINITY);
+    const bCreated = Number(b.createdAt ?? Number.POSITIVE_INFINITY);
+    if (aCreated !== bCreated) return aCreated - bCreated;
+
+    return String(a.id ?? "").localeCompare(String(b.id ?? ""), undefined, { numeric: true });
+  })[0];
 }
 
 function parseDisplayName(fullName: string): ParsedDisplayName {
@@ -984,6 +1285,7 @@ function toLegacyWorkout(row: TeamWorkoutRow): CoachCalendarWorkout {
 }
 
 export default function CoachCalendarMonth() {
+  const teamStore = teamDataStore.use();
   const router = useRouter();
   const { height: windowHeight } = useWindowDimensions();
   const { saved } = useLocalSearchParams<{ saved?: string | string[] }>();
@@ -991,6 +1293,11 @@ export default function CoachCalendarMonth() {
   const [calendarMode, setCalendarMode] = useState<"month" | "week">("month");
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
   const [allWorkouts, setAllWorkouts] = useState<CoachCalendarWorkout[]>([]);
+  const [selectedAthleteIds, setSelectedAthleteIds] = useState<string[]>([]);
+  const [athleteFilterOptions, setAthleteFilterOptions] = useState<AthleteFilterOption[]>([]);
+  const [athleteFilterOpen, setAthleteFilterOpen] = useState(false);
+  const [trainingGroupFilterOpen, setTrainingGroupFilterOpen] = useState(false);
+  const [seasonFilterOpen, setSeasonFilterOpen] = useState(false);
   const [categories, setCategories] = useState<WorkoutCategory[]>(() => getCachedCoachCategories());
   const [auxiliaryRoutines, setAuxiliaryRoutines] = useState<AuxiliaryRoutine[]>([]);
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
@@ -999,7 +1306,16 @@ export default function CoachCalendarMonth() {
   const [showSavedBanner, setShowSavedBanner] = useState(false);
   const [expandedWeeklyWorkouts, setExpandedWeeklyWorkouts] = useState<Record<string, boolean>>({});
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [exportingTrainingPlanPdf, setExportingTrainingPlanPdf] = useState(false);
+  const [trainingPlanExportOpen, setTrainingPlanExportOpen] = useState(false);
+  const [trainingPlanExportError, setTrainingPlanExportError] = useState<string | null>(null);
+  const [trainingPlanExportSeasonId, setTrainingPlanExportSeasonId] = useState<string | null>(null);
+  const [exportStartDateISO, setExportStartDateISO] = useState(() => toISODate(startOfWeek(new Date(), 1)));
+  const [exportEndDateISO, setExportEndDateISO] = useState(() => toISODate(addDays(startOfWeek(new Date(), 1), 27)));
   const [copyingWeek, setCopyingWeek] = useState(false);
+  const [copyWeekModalOpen, setCopyWeekModalOpen] = useState(false);
+  const [copySourceDateInput, setCopySourceDateInput] = useState(() => toISODate(addDays(startOfWeek(new Date(), 1), -7)));
+  const [copyWeekError, setCopyWeekError] = useState<string | null>(null);
   const [clearingWeek, setClearingWeek] = useState(false);
   const [jumpToWeekOpen, setJumpToWeekOpen] = useState(false);
   const [jumpDateInput, setJumpDateInput] = useState(() => toISODate(new Date()));
@@ -1007,6 +1323,8 @@ export default function CoachCalendarMonth() {
   const [weekLabelDraft, setWeekLabelDraft] = useState("");
   const [isWeekLabelEditing, setIsWeekLabelEditing] = useState(false);
   const [weekLabelSaveState, setWeekLabelSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [weeklyBatchHeaderNotesByKey, setWeeklyBatchHeaderNotesByKey] = useState<Record<string, string>>({});
+  const [weeklyBatchHeaderNotesByBaseKey, setWeeklyBatchHeaderNotesByBaseKey] = useState<Record<string, string>>({});
   const [weeklyBatchDrafts, setWeeklyBatchDrafts] = useState<Record<string, WeeklyBatchDraft>>({});
   const [weeklyBatchSaveState, setWeeklyBatchSaveState] = useState<Record<string, WeeklySaveState>>({});
   const [weeklyBatchDirtyFields, setWeeklyBatchDirtyFields] = useState<
@@ -1021,6 +1339,7 @@ export default function CoachCalendarMonth() {
   const weekLabelSaveSeqRef = useRef(0);
   const restoredCalendarPrefsRef = useRef(false);
   const [calendarPrefsReady, setCalendarPrefsReady] = useState(false);
+  const [athleteFilterPrefsReady, setAthleteFilterPrefsReady] = useState(false);
   const lastCalendarFetchKeyRef = useRef<string | null>(null);
   const lastCalendarFetchAtRef = useRef(0);
   const inFlightCalendarFetchRef = useRef<Promise<void> | null>(null);
@@ -1028,6 +1347,8 @@ export default function CoachCalendarMonth() {
 
   const isWebDesktop = Platform.OS === "web";
   const todayISO = useMemo(() => toISODate(new Date()), []);
+  const selectedTrainingGroupIds = teamStore.sharedSelectedTrainingGroupIds;
+  const selectedSeasonId = teamStore.sharedSelectedSeasonId;
 
   useEffect(() => {
     let active = true;
@@ -1051,6 +1372,27 @@ export default function CoachCalendarMonth() {
         if (!active) return;
         restoredCalendarPrefsRef.current = true;
         setCalendarPrefsReady(true);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(COACH_CALENDAR_ATHLETE_FILTER_KEY);
+        if (!active) return;
+        const parsed = raw ? JSON.parse(raw) : [];
+        const next = Array.isArray(parsed)
+          ? parsed.map((value) => String(value ?? "").trim()).filter(Boolean)
+          : [];
+        setSelectedAthleteIds(next);
+      } finally {
+        if (!active) return;
+        setAthleteFilterPrefsReady(true);
       }
     })();
     return () => {
@@ -1140,6 +1482,7 @@ export default function CoachCalendarMonth() {
       const metadataPromise = Promise.all([
         loadCoachCategoriesFromTeamKV(),
         getRosterMapById().catch(() => new Map<string, string>()),
+        loadTeamRoster().catch(() => []),
         loadAuxiliaryRoutines().catch(() => []),
         loadCoachWeekLabels().catch(() => ({})),
       ]);
@@ -1147,7 +1490,7 @@ export default function CoachCalendarMonth() {
       // Hydrate metadata as soon as it resolves so category colors are ready
       // for first visible workout render (especially when workouts come from cache).
       const metadataHydrationPromise = metadataPromise.then(
-        ([categoryDefs, rosterMap, savedAuxiliaryRoutines, weekLabels]) => {
+        ([categoryDefs, rosterMap, rosterRows, savedAuxiliaryRoutines, weekLabels]) => {
           setCategories(getCategoryOptions({ categories: categoryDefs }));
           setAuxiliaryRoutines(Array.isArray(savedAuxiliaryRoutines) ? savedAuxiliaryRoutines : []);
           setRosterNameById(rosterMap);
@@ -1167,6 +1510,31 @@ export default function CoachCalendarMonth() {
         COACH_CALENDAR_WORKOUTS_CACHE_KEY,
         JSON.stringify({ workouts: nextWorkouts, updatedAt: Date.now() })
       ).catch(() => {});
+
+      const [, rosterMapForOptions, rosterRowsForOptions] = await metadataPromise;
+      const activeOptions = (Array.isArray(rosterRowsForOptions) ? rosterRowsForOptions : [])
+        .filter((athlete) => athlete.isActive !== false)
+        .map((athlete) => ({
+          id: String(athlete.id ?? "").trim(),
+          label: String(athlete.displayName ?? "").trim() || "Athlete",
+        }))
+        .filter((athlete) => !!athlete.id);
+      const byId = new Map<string, string>();
+      activeOptions.forEach((option) => byId.set(option.id, option.label));
+      (nextWorkouts ?? []).forEach((workout) => {
+        const athleteId = String(workout.athleteId ?? "").trim();
+        if (!athleteId || byId.has(athleteId)) return;
+        const label = resolveAthleteDisplayName(
+          athleteId,
+          rosterMapForOptions,
+          String(workout.athleteName ?? "").trim()
+        );
+        byId.set(athleteId, String(label ?? "").trim() || "Athlete");
+      });
+      const nextOptions = Array.from(byId.entries())
+        .map(([id, label]) => ({ id, label: String(label ?? "").trim() || "Athlete" }))
+        .sort((a, b) => compareAthleteDisplayNamesByLastName(a.label, b.label));
+      setAthleteFilterOptions(nextOptions);
 
       await metadataHydrationPromise;
       lastCalendarFetchKeyRef.current = fetchKey;
@@ -1192,6 +1560,16 @@ export default function CoachCalendarMonth() {
     }, [calendarPrefsReady, loadCalendarData])
   );
 
+  useFocusEffect(
+    useCallback(() => {
+      if (!calendarPrefsReady) return;
+      void teamDataStore.actions.loadSharedCoachFilters();
+      void teamDataStore.actions.loadTrainingGroups();
+      void teamDataStore.actions.loadTeamSeasons();
+      void teamDataStore.actions.loadAthleteSeasonOverrides();
+    }, [calendarPrefsReady])
+  );
+
   useEffect(() => {
     const raw = Array.isArray(saved) ? saved[0] : saved;
     if (String(raw ?? "") !== "1") return;
@@ -1201,6 +1579,187 @@ export default function CoachCalendarMonth() {
   }, [saved]);
 
   const monthCells = useMemo(() => buildMonthGrid(anchorMonth, weekStartsOn), [anchorMonth, weekStartsOn]);
+
+  useEffect(() => {
+    if (!athleteFilterPrefsReady) return;
+    const validIds = new Set(athleteFilterOptions.map((option) => option.id));
+    const next = selectedAthleteIds.filter((id) => validIds.has(id));
+    if (next.length !== selectedAthleteIds.length) {
+      setSelectedAthleteIds(next);
+    }
+  }, [athleteFilterOptions, athleteFilterPrefsReady, selectedAthleteIds]);
+
+  useEffect(() => {
+    if (!athleteFilterPrefsReady) return;
+    void AsyncStorage.setItem(COACH_CALENDAR_ATHLETE_FILTER_KEY, JSON.stringify(selectedAthleteIds)).catch(() => {});
+  }, [athleteFilterPrefsReady, selectedAthleteIds]);
+
+  const trainingGroupFilterOptions = useMemo(() => {
+    const byId = new Map<string, { id: string; label: string; archived: boolean }>();
+    (Array.isArray(teamStore.trainingGroups) ? teamStore.trainingGroups : []).forEach((group) => {
+      const id = String(group?.id ?? "").trim();
+      if (!id) return;
+      const label = String(group?.name ?? "").trim() || "Training Group";
+      const archived = !!group?.archived_at;
+      if (!archived) {
+        byId.set(id, { id, label, archived });
+      }
+    });
+    selectedTrainingGroupIds.forEach((idRaw) => {
+      const id = String(idRaw ?? "").trim();
+      if (!id || byId.has(id)) return;
+      const match = (teamStore.trainingGroups ?? []).find((group) => String(group?.id ?? "").trim() === id);
+      const label = String(match?.name ?? "").trim() || `Group (${id.slice(-6)})`;
+      byId.set(id, { id, label, archived: !!match?.archived_at });
+    });
+    return Array.from(byId.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [selectedTrainingGroupIds, teamStore.trainingGroups]);
+
+  useEffect(() => {
+    if (!teamStore.sharedCoachFiltersLoaded) return;
+    if (!teamStore.trainingGroupsLoaded) return;
+    const validIds = new Set(trainingGroupFilterOptions.map((option) => option.id));
+    const next = selectedTrainingGroupIds.filter((id) => validIds.has(id));
+    if (next.length !== selectedTrainingGroupIds.length) {
+      void teamDataStore.actions.setSharedSelectedTrainingGroupIds(next);
+    }
+  }, [
+    selectedTrainingGroupIds,
+    teamStore.sharedCoachFiltersLoaded,
+    teamStore.trainingGroupsLoaded,
+    trainingGroupFilterOptions,
+  ]);
+
+  const seasonFilterOptions = useMemo(() => {
+    const byId = new Map<string, { id: string; label: string; archived: boolean }>();
+    (Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []).forEach((season) => {
+      const id = String(season?.id ?? "").trim();
+      if (!id) return;
+      const label = String(season?.name ?? "").trim() || "Season";
+      const archived = !!season?.archived_at;
+      if (!archived) byId.set(id, { id, label, archived });
+    });
+    const selectedId = String(selectedSeasonId ?? "").trim();
+    if (selectedId && !byId.has(selectedId)) {
+      const match = (teamStore.teamSeasons ?? []).find((season) => String(season?.id ?? "").trim() === selectedId);
+      const label = String(match?.name ?? "").trim() || `Season (${selectedId.slice(-6)})`;
+      byId.set(selectedId, { id: selectedId, label, archived: !!match?.archived_at });
+    }
+    const order = new Map<string, number>();
+    (Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []).forEach((season, idx) => {
+      const id = String(season?.id ?? "").trim();
+      if (id) order.set(id, idx);
+    });
+    return Array.from(byId.values()).sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+  }, [selectedSeasonId, teamStore.teamSeasons]);
+
+  useEffect(() => {
+    if (!teamStore.sharedCoachFiltersLoaded) return;
+    if (!teamStore.teamSeasonsLoaded) return;
+    const selectedId = String(selectedSeasonId ?? "").trim();
+    if (!selectedId) return;
+    const validIds = new Set(seasonFilterOptions.map((option) => option.id));
+    if (!validIds.has(selectedId)) void teamDataStore.actions.setSharedSelectedSeasonId(null);
+  }, [seasonFilterOptions, selectedSeasonId, teamStore.sharedCoachFiltersLoaded, teamStore.teamSeasonsLoaded]);
+
+  const trainingGroupAthleteIdsByGroupId = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    (Array.isArray(teamStore.trainingGroupMemberships) ? teamStore.trainingGroupMemberships : []).forEach((row) => {
+      if (!isActiveTrainingGroupMembership(row)) return;
+      const groupId = String(row?.group_id ?? "").trim();
+      const athleteId = String(row?.athlete_profile_id ?? "").trim();
+      if (!groupId || !athleteId) return;
+      const prev = map.get(groupId) ?? new Set<string>();
+      prev.add(athleteId);
+      map.set(groupId, prev);
+    });
+    return map;
+  }, [teamStore.trainingGroupMemberships]);
+
+  const selectedTrainingGroupAthleteIds = useMemo(() => {
+    const out = new Set<string>();
+    selectedTrainingGroupIds.forEach((groupId) => {
+      const ids = trainingGroupAthleteIdsByGroupId.get(String(groupId ?? "").trim());
+      if (!ids) return;
+      ids.forEach((id) => out.add(id));
+    });
+    return out;
+  }, [selectedTrainingGroupIds, trainingGroupAthleteIdsByGroupId]);
+
+  const athleteSeasonOverridesBySeasonAndAthlete = useMemo(() => {
+    const map = new Map<string, (typeof teamStore.athleteSeasonOverrides)[number]>();
+    (Array.isArray(teamStore.athleteSeasonOverrides) ? teamStore.athleteSeasonOverrides : []).forEach((override) => {
+      const seasonId = String(override?.season_id ?? "").trim();
+      const athleteId = String(override?.athlete_profile_id ?? "").trim();
+      if (!seasonId || !athleteId) return;
+      map.set(`${seasonId}:${athleteId}`, override);
+    });
+    return map;
+  }, [teamStore.athleteSeasonOverrides]);
+
+  const selectedSeason = useMemo(
+    () =>
+      selectedSeasonId
+        ? (teamStore.teamSeasons ?? []).find((season) => String(season?.id ?? "").trim() === String(selectedSeasonId ?? "").trim()) ?? null
+        : null,
+    [selectedSeasonId, teamStore.teamSeasons]
+  );
+
+  const filteredWorkouts = useMemo(() => {
+    const athleteSelectedSet = new Set(selectedAthleteIds);
+    return allWorkouts.filter((workout) => {
+      const athleteId = String(workout.athleteId ?? "").trim();
+      const athletePass =
+        selectedAthleteIds.length === 0 ? true : athleteSelectedSet.has(athleteId);
+      const groupPass =
+        selectedTrainingGroupIds.length === 0 ? true : selectedTrainingGroupAthleteIds.has(athleteId);
+      const workoutDateISO = getWorkoutDateISO(workout);
+      const seasonPass = (() => {
+        if (!selectedSeason) return true;
+        const override = athleteId
+          ? athleteSeasonOverridesBySeasonAndAthlete.get(`${String(selectedSeason.id ?? "").trim()}:${athleteId}`) ?? null
+          : null;
+        const resolvedWindow = teamDataStore.resolveAthleteSeasonWindow(selectedSeason, override);
+        return (
+          workoutDateISO >= String(resolvedWindow.start_date ?? "") &&
+          workoutDateISO <= String(resolvedWindow.end_date ?? "")
+        );
+      })();
+      return athletePass && groupPass && seasonPass;
+    });
+  }, [
+    athleteSeasonOverridesBySeasonAndAthlete,
+    allWorkouts,
+    selectedAthleteIds,
+    selectedSeason,
+    selectedTrainingGroupAthleteIds,
+    selectedTrainingGroupIds.length,
+  ]);
+
+  const selectedAthleteLabel = useMemo(() => {
+    if (selectedAthleteIds.length === 0) return "Athletes: All";
+    if (selectedAthleteIds.length === 1) {
+      const match = athleteFilterOptions.find((option) => option.id === selectedAthleteIds[0]);
+      return match?.label ? `Athlete: ${match.label}` : "Athletes: 1 selected";
+    }
+    return `Athletes: ${selectedAthleteIds.length} selected`;
+  }, [athleteFilterOptions, selectedAthleteIds]);
+
+  const selectedTrainingGroupLabel = useMemo(() => {
+    if (selectedTrainingGroupIds.length === 0) return "Groups: All";
+    if (selectedTrainingGroupIds.length === 1) {
+      const match = trainingGroupFilterOptions.find((option) => option.id === selectedTrainingGroupIds[0]);
+      return match?.label ? `Group: ${match.label}` : "Groups: 1 selected";
+    }
+    return `Groups: ${selectedTrainingGroupIds.length} selected`;
+  }, [selectedTrainingGroupIds, trainingGroupFilterOptions]);
+
+  const selectedSeasonLabel = useMemo(() => {
+    if (!selectedSeasonId) return "Season: All";
+    const match = seasonFilterOptions.find((option) => option.id === selectedSeasonId);
+    return match?.label ? `Season: ${match.label}` : "Season: Selected";
+  }, [seasonFilterOptions, selectedSeasonId]);
+
   const monthRows = useMemo(() => {
     const rows: MonthCell[][] = [];
     for (let i = 0; i < monthCells.length; i += 7) rows.push(monthCells.slice(i, i + 7));
@@ -1212,6 +1771,52 @@ export default function CoachCalendarMonth() {
   }, [anchorWeekStart]);
   const weekDateISOs = useMemo(() => weekDates.map((d) => toISODate(d)), [weekDates]);
   const currentWeekStartISO = weekDateISOs[0] ?? toISODate(anchorWeekStart);
+  const copyTargetWeekLabel = useMemo(() => formatWeekRangeFromStartISO(currentWeekStartISO), [currentWeekStartISO]);
+  const copySourceWeekStartISO = useMemo(() => {
+    const raw = String(copySourceDateInput ?? "").trim();
+    if (!isValidISODate(raw)) return "";
+    return toISODate(startOfWeek(parseISODate(raw), weekStartsOn));
+  }, [copySourceDateInput, weekStartsOn]);
+  const copySourceWeekLabel = useMemo(
+    () => (copySourceWeekStartISO ? formatWeekRangeFromStartISO(copySourceWeekStartISO) : "Invalid source week"),
+    [copySourceWeekStartISO]
+  );
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const rowsByDate = await Promise.all(
+          weekDateISOs.map((dateISO) =>
+            listTeamWorkoutBatchHeadersForDate(dateISO).catch(() => [])
+          )
+        );
+        if (!active) return;
+        const next: Record<string, string> = {};
+        const nextBase: Record<string, string> = {};
+        rowsByDate.flat().forEach((row) => {
+          const batchId = String(row.batch_id ?? "").trim();
+          if (!batchId) return;
+          const key = toWorkoutBatchHeaderNotesKey(row.date_iso, batchId, row.session);
+          const value = String(row.header_notes ?? "").trim();
+          next[key] = value;
+          if (value) {
+            const baseKey = toWorkoutBatchHeaderNotesBaseKey(row.date_iso, batchId);
+            if (!nextBase[baseKey]) nextBase[baseKey] = value;
+          }
+        });
+        setWeeklyBatchHeaderNotesByKey(next);
+        setWeeklyBatchHeaderNotesByBaseKey(nextBase);
+      } catch {
+        if (!active) return;
+        setWeeklyBatchHeaderNotesByKey({});
+        setWeeklyBatchHeaderNotesByBaseKey({});
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [weekDateISOs]);
 
   const monthLabel = useMemo(
     () =>
@@ -1275,7 +1880,7 @@ export default function CoachCalendarMonth() {
   const workoutCountByDate = useMemo(() => {
     const grouped = new Map<string, Set<string>>();
 
-    for (const w of allWorkouts) {
+    for (const w of filteredWorkouts) {
       const dateISO = getWorkoutDateISO(w);
       if (!dateISO) continue;
 
@@ -1292,14 +1897,14 @@ export default function CoachCalendarMonth() {
     const counts = new Map<string, number>();
     for (const [dateISO, set] of grouped.entries()) counts.set(dateISO, set.size);
     return counts;
-  }, [allWorkouts]);
+  }, [filteredWorkouts]);
 
   const weeklyTitleRowsByDate = useMemo(() => {
     const map = new Map<string, MonthWorkoutSummaryRow[]>();
     const grouped = new Map<string, Map<string, MonthWorkoutSummaryRow>>();
     let globalOrder = 0;
 
-    for (const w of allWorkouts) {
+    for (const w of filteredWorkouts) {
       const dateISO = getWorkoutDateISO(w);
       if (!dateISO) continue;
 
@@ -1348,17 +1953,32 @@ export default function CoachCalendarMonth() {
     }
 
     return map;
-  }, [allWorkouts, categories]);
+  }, [categories, filteredWorkouts]);
 
-  const weeklyDaySections = useMemo<WeeklyDaySection[]>(() => {
+  const buildWeeklyDaySectionsForExport = useCallback((args: {
+    workouts: CoachCalendarWorkout[];
+    weekDates: Date[];
+    weekDateISOs: string[];
+    headerByKey: Record<string, string>;
+    headerByBaseKey: Record<string, string>;
+    headerByBatchId: Record<string, string>;
+  }): WeeklyDaySection[] => {
+    const { workouts, weekDates, weekDateISOs, headerByKey, headerByBaseKey, headerByBatchId } = args;
+    const athleteOptionNameById = new Map(
+      athleteFilterOptions
+        .map((option) => [String(option.id ?? "").trim(), String(option.label ?? "").trim()] as const)
+        .filter(([id, label]) => !!id && !!label)
+    );
+    const rosterNameLookup = new Map<string, string>([...athleteOptionNameById, ...rosterNameById]);
+
     const weeklyAthleteLabelById = buildCompactWeeklyAthleteLabels(
-      allWorkouts
+      workouts
         .filter((w) => weekDateISOs.includes(getWorkoutDateISO(w)))
         .map((w) => {
           const athleteId = String(w.athleteId ?? "").trim();
           const resolvedName = resolveAthleteDisplayName(
             athleteId,
-            rosterNameById,
+            rosterNameLookup,
             getAthleteFallbackName(w)
           );
           return { athleteId, resolvedName: resolvedName || "Unknown athlete" };
@@ -1378,7 +1998,7 @@ export default function CoachCalendarMonth() {
       >
     >();
 
-    for (const workout of allWorkouts) {
+    for (const workout of workouts) {
       const dateISO = getWorkoutDateISO(workout);
       if (!dateSet.has(dateISO)) continue;
       const workoutKey = getWorkoutBatchKey(workout);
@@ -1402,7 +2022,12 @@ export default function CoachCalendarMonth() {
       const workouts = entries
         .map((entry): WeeklyWorkoutSection => {
           const rows = entry.rows;
-          const first = rows[0];
+          const first = pickMasterWorkoutRow(rows);
+          const workoutTimeLabel = normalizeWorkoutTimeLabel(first.time);
+          const distinctWorkoutTimes = new Set(
+            rows.map((r) => normalizeWorkoutTimeLabel(r.time)).filter(Boolean)
+          );
+          const hasMixedGroupTimes = distinctWorkoutTimes.size > 1;
           const categoriesForWorkout: string[] = Array.from(
             new Set(rows.flatMap((r) => workoutCategoryNames(r).map((c) => String(c).trim()).filter(Boolean)))
           );
@@ -1418,18 +2043,55 @@ export default function CoachCalendarMonth() {
             groupsMap.set(groupId, groupRows);
           });
 
+          const batchIdForNotes = String(first.batchId ?? "").trim();
+          const mainBatchNotes = (() => {
+            if (batchIdForNotes) {
+              const headerKey = toWorkoutBatchHeaderNotesKey(dateISO, batchIdForNotes, String(first.session ?? ""));
+              const headerNotes = String(headerByKey[headerKey] ?? "").trim();
+              if (headerNotes && headerNotes.toLowerCase() !== "no notes") return headerNotes;
+              const baseKey = toWorkoutBatchHeaderNotesBaseKey(dateISO, batchIdForNotes);
+              const baseHeaderNotes = String(headerByBaseKey[baseKey] ?? "").trim();
+              if (baseHeaderNotes && baseHeaderNotes.toLowerCase() !== "no notes") return baseHeaderNotes;
+              const batchHeaderNotes = String(headerByBatchId[batchIdForNotes] ?? "").trim();
+              if (batchHeaderNotes && batchHeaderNotes.toLowerCase() !== "no notes") return batchHeaderNotes;
+            }
+            const rowNotes = rows
+              .map((row) => normalizeDetailsText(row.details))
+              .filter((note) => !!note && note.toLowerCase() !== "no notes");
+            if (rowNotes.length === 0) return "";
+            return rowNotes.reduce((longest, current) => (current.length > longest.length ? current : longest), "");
+          })();
+          const normalizedMainBatchNotes = normalizeDetailsText(mainBatchNotes).toLowerCase();
+
           const groups = Array.from(groupsMap.entries())
             .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
             .map(([groupId, groupRows], groupIndex) => {
-              const detailsBuckets = new Map<string, { details: string; names: Set<string> }>();
+              const distinctGroupTimes = new Set(
+                groupRows.map((r) => normalizeWorkoutTimeLabel(r.time)).filter(Boolean)
+              );
+              const groupTimeLabel = distinctGroupTimes.size === 1 ? Array.from(distinctGroupTimes)[0] : "";
+              const showGroupTimePrefix =
+                hasMixedGroupTimes &&
+                !!groupTimeLabel;
+              const detailsBuckets = new Map<string, { individualNotes?: string; names: Set<string> }>();
               groupRows.forEach((r) => {
-                const details = normalizeDetailsText(r.details);
-                const key = details || "__no_notes__";
-                const bucket = detailsBuckets.get(key) ?? { details: details || "No notes", names: new Set<string>() };
+                const rawDetails = normalizeDetailsText(r.details);
+                const hasRawDetails = !!rawDetails && rawDetails.toLowerCase() !== "no notes";
+                const matchesMain =
+                  hasRawDetails &&
+                  rawDetails.toLowerCase() === normalizedMainBatchNotes &&
+                  normalizedMainBatchNotes.length > 0;
+                const individualNotes = !hasRawDetails || matchesMain
+                  ? ""
+                  : showGroupTimePrefix
+                    ? `${groupTimeLabel} • ${rawDetails}`
+                    : rawDetails;
+                const key = individualNotes || "__no_individual_notes__";
+                const bucket = detailsBuckets.get(key) ?? { individualNotes: individualNotes || undefined, names: new Set<string>() };
                 const athleteId = String(r.athleteId ?? "").trim();
                 const resolvedName = resolveAthleteDisplayName(
                   athleteId,
-                  rosterNameById,
+                  rosterNameLookup,
                   getAthleteFallbackName(r)
                 );
                 const compactName =
@@ -1441,7 +2103,7 @@ export default function CoachCalendarMonth() {
               });
 
               const lines: WeeklyGroupLine[] = Array.from(detailsBuckets.values()).map((bucket) => ({
-                details: bucket.details,
+                individualNotes: bucket.individualNotes,
                 athleteNames: Array.from(bucket.names).sort((a, b) => a.localeCompare(b)),
               }));
 
@@ -1460,7 +2122,7 @@ export default function CoachCalendarMonth() {
             session: String(first.session ?? ""),
             time: String(first.time ?? "").trim() || undefined,
             location: getWorkoutLocation(first) || undefined,
-            details: String(first.details ?? "").trim() || undefined,
+            details: mainBatchNotes || undefined,
             categories: categoriesForWorkout,
             preRoutineIds: sanitizeRoutineIds(first.preRoutineIds),
             postRoutineIds: sanitizeRoutineIds(first.postRoutineIds),
@@ -1470,21 +2132,7 @@ export default function CoachCalendarMonth() {
             groups,
           };
         })
-        .sort((a, b) => {
-          const sessionRank = (session: string) => (normalizeSession(session) === "AM" ? 0 : 1);
-          const sessionOrder = sessionRank(a.session) - sessionRank(b.session);
-          if (sessionOrder !== 0) return sessionOrder;
-
-          const aHasTime = hasValidWorkoutTime(a.time);
-          const bHasTime = hasValidWorkoutTime(b.time);
-          if (aHasTime !== bHasTime) return aHasTime ? -1 : 1;
-
-          const aTime = normalizeWorkoutTimeInput(String(a.time ?? "").trim()) ?? "";
-          const bTime = normalizeWorkoutTimeInput(String(b.time ?? "").trim()) ?? "";
-          const timeOrder = aTime.localeCompare(bTime);
-          if (timeOrder !== 0) return timeOrder;
-          return a.title.localeCompare(b.title);
-        });
+        .sort(compareWeeklyWorkoutSections);
 
       return {
         dateISO,
@@ -1493,7 +2141,35 @@ export default function CoachCalendarMonth() {
         workouts,
       };
     });
-  }, [allWorkouts, categories, rosterNameById, weekDateISOs, weekDates]);
+  }, [athleteFilterOptions, categories, rosterNameById]);
+
+  const weeklyDaySections = useMemo<WeeklyDaySection[]>(() => {
+    const headerByBatchId: Record<string, string> = {};
+    Object.entries(weeklyBatchHeaderNotesByBaseKey).forEach(([baseKey, value]) => {
+      const notes = String(value ?? "").trim();
+      if (!notes || notes.toLowerCase() === "no notes") return;
+      const parts = String(baseKey ?? "").split("::");
+      const batchId = String(parts[1] ?? "").trim();
+      if (!batchId) return;
+      const prev = String(headerByBatchId[batchId] ?? "").trim();
+      if (!prev || notes.length > prev.length) headerByBatchId[batchId] = notes;
+    });
+    return buildWeeklyDaySectionsForExport({
+      workouts: filteredWorkouts,
+      weekDates,
+      weekDateISOs,
+      headerByKey: weeklyBatchHeaderNotesByKey,
+      headerByBaseKey: weeklyBatchHeaderNotesByBaseKey,
+      headerByBatchId,
+    });
+  }, [
+    buildWeeklyDaySectionsForExport,
+    filteredWorkouts,
+    weekDateISOs,
+    weekDates,
+    weeklyBatchHeaderNotesByBaseKey,
+    weeklyBatchHeaderNotesByKey,
+  ]);
 
   const weeklyDaySectionsForDisplay = useMemo<WeeklyDaySection[]>(() => {
     return weeklyDaySections.map((day) => ({
@@ -1757,12 +2433,47 @@ export default function CoachCalendarMonth() {
     setExportingPdf(true);
     try {
       const generatedAtLabel = new Date().toLocaleString();
+      const headerRowsByDate = await Promise.all(
+        weekDateISOs.map((dateISO) => listTeamWorkoutBatchHeadersForDate(dateISO).catch(() => []))
+      );
+      const exportHeaderByKey: Record<string, string> = {};
+      const exportHeaderByBaseKey: Record<string, string> = {};
+      const exportHeaderByBatchId: Record<string, string> = {};
+      headerRowsByDate.flat().forEach((row) => {
+        const batchId = String(row.batch_id ?? "").trim();
+        if (!batchId) return;
+        const value = String(row.header_notes ?? "").trim();
+        const key = toWorkoutBatchHeaderNotesKey(row.date_iso, batchId, row.session);
+        exportHeaderByKey[key] = value;
+        if (value) {
+          const baseKey = toWorkoutBatchHeaderNotesBaseKey(row.date_iso, batchId);
+          if (!exportHeaderByBaseKey[baseKey]) exportHeaderByBaseKey[baseKey] = value;
+          const prev = String(exportHeaderByBatchId[batchId] ?? "").trim();
+          if (!prev || value.length > prev.length) exportHeaderByBatchId[batchId] = value;
+        }
+      });
+      const exportDays = applyHeaderNotesToWeeklySections(
+        weeklyDaySectionsForDisplay,
+        exportHeaderByKey,
+        exportHeaderByBaseKey,
+        exportHeaderByBatchId
+      );
+      if ((weekDateISOs[0] ?? "") === "2026-11-09") {
+        console.log("[weekly-pdf][debug:2026-11-09] map-keys", {
+          exactCount: Object.keys(exportHeaderByKey).length,
+          baseCount: Object.keys(exportHeaderByBaseKey).length,
+          batchCount: Object.keys(exportHeaderByBatchId).length,
+          exactKeysSample: Object.keys(exportHeaderByKey).slice(0, 30),
+        });
+        console.log("[weekly-pdf][debug:2026-11-09] sections-before", summarizeWeeklySectionDetails(weeklyDaySectionsForDisplay));
+        console.log("[weekly-pdf][debug:2026-11-09] sections-after", summarizeWeeklySectionDetails(exportDays));
+      }
       const html = buildWeeklyHandoutHtml({
         weekLabel,
         weekAnnotation: currentWeekAnnotation || "",
         weekAnnotationTone: getWeekLabelTone(currentWeekAnnotation || ""),
         generatedAtLabel,
-        days: weeklyDaySectionsForDisplay,
+        days: exportDays,
         categories,
       });
       console.log("[weekly-pdf] using handout html builder");
@@ -1791,7 +2502,373 @@ export default function CoachCalendarMonth() {
     } finally {
       setExportingPdf(false);
     }
-  }, [calendarMode, categories, currentWeekAnnotation, exportingPdf, weekLabel, weeklyDaySectionsForDisplay]);
+  }, [calendarMode, categories, currentWeekAnnotation, exportingPdf, weekDateISOs, weekLabel, weeklyDaySectionsForDisplay]);
+
+  const openTrainingPlanExport = useCallback(() => {
+    const startISO = currentWeekStartISO;
+    const endISO = shiftISODateByDays(startISO, 27);
+    void (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(COACH_TRAINING_PLAN_EXPORT_RANGE_KEY);
+        const parsed = raw ? JSON.parse(raw) as { startDateISO?: string; endDateISO?: string; seasonId?: string | null } : null;
+        const savedStart = String(parsed?.startDateISO ?? "").trim();
+        const savedEnd = String(parsed?.endDateISO ?? "").trim();
+        const savedSeasonId = String(parsed?.seasonId ?? "").trim() || null;
+        setExportStartDateISO(isValidISODate(savedStart) ? savedStart : startISO);
+        setExportEndDateISO(isValidISODate(savedEnd) ? savedEnd : endISO);
+        setTrainingPlanExportSeasonId(savedSeasonId);
+      } catch {
+        setExportStartDateISO(startISO);
+        setExportEndDateISO(endISO);
+        setTrainingPlanExportSeasonId(null);
+      }
+      setTrainingPlanExportError(null);
+      setTrainingPlanExportOpen(true);
+    })();
+  }, [currentWeekStartISO]);
+
+  const trainingPlanExportSeasonOptions = useMemo(() => {
+    const byId = new Map<string, { id: string; label: string; archived: boolean }>();
+    (Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []).forEach((season) => {
+      const id = String(season?.id ?? "").trim();
+      if (!id) return;
+      const archived = !!season?.archived_at;
+      if (!archived) byId.set(id, { id, label: String(season?.name ?? "").trim() || "Season", archived });
+    });
+    const selectedId = String(trainingPlanExportSeasonId ?? "").trim();
+    if (selectedId && !byId.has(selectedId)) {
+      const match = (teamStore.teamSeasons ?? []).find((season) => String(season?.id ?? "").trim() === selectedId);
+      if (match) byId.set(selectedId, { id: selectedId, label: String(match.name ?? "").trim() || "Season", archived: !!match.archived_at });
+    }
+    const order = new Map<string, number>();
+    (Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []).forEach((season, idx) => {
+      const id = String(season?.id ?? "").trim();
+      if (id) order.set(id, idx);
+    });
+    return Array.from(byId.values()).sort((a, b) => (order.get(a.id) ?? 9999) - (order.get(b.id) ?? 9999));
+  }, [teamStore.teamSeasons, trainingPlanExportSeasonId]);
+
+  const applyTrainingPlanSeasonRange = useCallback((seasonId: string | null) => {
+    const normalized = String(seasonId ?? "").trim();
+    if (!normalized) {
+      setTrainingPlanExportSeasonId(null);
+      return;
+    }
+    const season = (teamStore.teamSeasons ?? []).find((row) => String(row?.id ?? "").trim() === normalized);
+    if (!season) return;
+    const singleAthleteId = selectedAthleteIds.length === 1 ? String(selectedAthleteIds[0] ?? "").trim() : "";
+    const override = singleAthleteId
+      ? athleteSeasonOverridesBySeasonAndAthlete.get(`${normalized}:${singleAthleteId}`) ?? null
+      : null;
+    const resolved = teamDataStore.resolveAthleteSeasonWindow(season, override ?? null);
+    setExportStartDateISO(String(resolved.start_date ?? season.start_date ?? "").trim());
+    setExportEndDateISO(String(resolved.end_date ?? season.end_date ?? "").trim());
+    setTrainingPlanExportSeasonId(normalized);
+    setTrainingPlanExportError(null);
+  }, [athleteSeasonOverridesBySeasonAndAthlete, selectedAthleteIds, teamStore.teamSeasons]);
+
+  const shiftTrainingPlanExportDate = useCallback((field: "start" | "end", deltaDays: number) => {
+    const current = field === "start" ? exportStartDateISO : exportEndDateISO;
+    const shifted = shiftISODateByDays(current, deltaDays);
+    if (field === "start") setExportStartDateISO(shifted);
+    else setExportEndDateISO(shifted);
+    if (trainingPlanExportSeasonId) setTrainingPlanExportSeasonId(null);
+    setTrainingPlanExportError(null);
+  }, [exportEndDateISO, exportStartDateISO, trainingPlanExportSeasonId]);
+
+  const handleExportTrainingPlanPdf = useCallback(async () => {
+    if (exportingTrainingPlanPdf) return;
+    const startISO = String(exportStartDateISO ?? "").trim();
+    const endISO = String(exportEndDateISO ?? "").trim();
+
+    if (!isValidISODate(startISO) || !isValidISODate(endISO)) {
+      const message = "Use valid YYYY-MM-DD dates.";
+      setTrainingPlanExportError(message);
+      Alert.alert("Invalid date range", message);
+      return;
+    }
+    if (endISO < startISO) {
+      const message = "End date must be on or after start date.";
+      setTrainingPlanExportError(message);
+      Alert.alert("Invalid date range", message);
+      return;
+    }
+    const spanDays = diffISODateDays(startISO, endISO) + 1;
+    if (spanDays > MAX_TRAINING_PLAN_EXPORT_RANGE_DAYS) {
+      const message = `Range too large. Maximum is ${MAX_TRAINING_PLAN_EXPORT_RANGE_DAYS} days.`;
+      setTrainingPlanExportError(message);
+      Alert.alert("Range too large", message);
+      return;
+    }
+
+    setTrainingPlanExportError(null);
+    setExportingTrainingPlanPdf(true);
+    try {
+      const rows = await listTeamWorkoutsInRange(startISO, endISO);
+      const debugDateSet = new Set(["2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-16", "2026-05-17"]);
+      const countRowsByDate = (items: Array<{ dateISO: string }>) =>
+        Array.from(debugDateSet.values()).reduce<Record<string, number>>((acc, dateISO) => {
+          acc[dateISO] = items.filter((item) => item.dateISO === dateISO).length;
+          return acc;
+        }, {});
+      const rawRows = Array.isArray(rows) ? rows : [];
+      console.log("[training-plan-pdf] fetched raw rows", {
+        count: rawRows.length,
+        uniqueDates: Array.from(new Set(rawRows.map((row) => String(row.date_iso ?? "").trim()))).sort(),
+        countsByDate: countRowsByDate(rawRows.map((row) => ({ dateISO: String(row.date_iso ?? "").trim() }))),
+      });
+      console.log(
+        "[training-plan-pdf] fetched raw rows detail (May 13-17)",
+        rawRows
+          .filter((row) => debugDateSet.has(String(row.date_iso ?? "").trim()) && String(row.date_iso ?? "").trim() >= "2026-05-13")
+          .map((row) => ({
+            id: row.id,
+            date_iso: row.date_iso,
+            athlete_profile_id: row.athlete_profile_id,
+            session: row.session,
+            title: row.title,
+            batch_id: row.batch_id,
+            group_id: row.group_id,
+          }))
+      );
+      const workoutsInRange: CoachCalendarWorkout[] = (Array.isArray(rows) ? rows : []).map((row) => toLegacyWorkout(row));
+      const isInExportRange = (dateISO: string) => dateISO >= startISO && dateISO <= endISO;
+      const [startY, startM, startD] = startISO.split("-").map(Number);
+      const [endY, endM, endD] = endISO.split("-").map(Number);
+
+      console.log("[training-plan-pdf] export range", {
+        exportStartDateISO: startISO,
+        exportEndDateISO: endISO,
+        dayCountInclusive: diffISODateDays(startISO, endISO) + 1,
+      });
+      console.log("[training-plan-pdf] fetched workouts", {
+        count: workoutsInRange.length,
+        countsByDate: countRowsByDate(
+          workoutsInRange.map((workout) => ({ dateISO: String(getWorkoutDateISO(workout) ?? "").trim() }))
+        ),
+      });
+
+      const athleteSelectedSet = new Set(selectedAthleteIds);
+      const debugFilterDrops: Array<{
+        workoutId: string;
+        athleteId: string;
+        workoutDateISO: string;
+        athletePass: boolean;
+        groupPass: boolean;
+        seasonPass: boolean;
+        selectedSeasonId: string | null;
+        resolvedStart: string | null;
+        resolvedEnd: string | null;
+      }> = [];
+      const filteredRangeWorkouts = workoutsInRange.filter((workout) => {
+        const workoutDateISO = getWorkoutDateISO(workout);
+        if (!isInExportRange(workoutDateISO)) return false;
+        const athleteId = String(workout.athleteId ?? "").trim();
+        const athletePass = selectedAthleteIds.length === 0 ? true : athleteSelectedSet.has(athleteId);
+        const groupPass =
+          selectedTrainingGroupIds.length === 0 ? true : selectedTrainingGroupAthleteIds.has(athleteId);
+        const { seasonPass, resolvedStart, resolvedEnd } = (() => {
+          if (!selectedSeason) {
+            return { seasonPass: true, resolvedStart: null, resolvedEnd: null };
+          }
+          const override = athleteId
+            ? athleteSeasonOverridesBySeasonAndAthlete.get(`${String(selectedSeason.id ?? "").trim()}:${athleteId}`) ?? null
+            : null;
+          const resolvedWindow = teamDataStore.resolveAthleteSeasonWindow(selectedSeason, override);
+          const start = String(resolvedWindow.start_date ?? "");
+          const end = String(resolvedWindow.end_date ?? "");
+          return {
+            seasonPass: workoutDateISO >= start && workoutDateISO <= end,
+            resolvedStart: start,
+            resolvedEnd: end,
+          };
+        })();
+        const finalPass = athletePass && groupPass && seasonPass;
+        if (!finalPass && debugDateSet.has(workoutDateISO)) {
+          debugFilterDrops.push({
+            workoutId: String(workout.id ?? ""),
+            athleteId,
+            workoutDateISO,
+            athletePass,
+            groupPass,
+            seasonPass,
+            selectedSeasonId: selectedSeason ? String(selectedSeason.id ?? "") : null,
+            resolvedStart: resolvedStart ?? null,
+            resolvedEnd: resolvedEnd ?? null,
+          });
+        }
+        return finalPass;
+      });
+      console.log("[training-plan-pdf] filtered workouts", {
+        count: filteredRangeWorkouts.length,
+        uniqueDates: Array.from(new Set(filteredRangeWorkouts.map((w) => getWorkoutDateISO(w)))).sort(),
+        countsByDate: countRowsByDate(
+          filteredRangeWorkouts.map((workout) => ({ dateISO: String(getWorkoutDateISO(workout) ?? "").trim() }))
+        ),
+        selectedAthleteIds,
+        selectedTrainingGroupIds,
+        selectedSeasonId: selectedSeason ? String(selectedSeason.id ?? "") : null,
+      });
+      console.log("[training-plan-pdf] final-week filter drops", debugFilterDrops);
+      Array.from(debugDateSet.values()).forEach((dateISO) => {
+        const count = filteredRangeWorkouts.filter((w) => getWorkoutDateISO(w) === dateISO).length;
+        console.log("[training-plan-pdf] date workout count", { dateISO, count });
+      });
+
+      const startDate = new Date(startY, startM - 1, startD);
+      const endDate = new Date(endY, endM - 1, endD);
+      const firstWeekStartISO = toISODate(startOfWeek(startDate, weekStartsOn));
+      const lastWeekStartISO = toISODate(startOfWeek(endDate, weekStartsOn));
+      const weekStartISOs: string[] = [];
+      for (let cursorISO = firstWeekStartISO; cursorISO <= lastWeekStartISO; cursorISO = shiftISODateByDays(cursorISO, 7)) {
+        weekStartISOs.push(cursorISO);
+      }
+      console.log("[training-plan-pdf] weeks", {
+        firstWeekStartISO,
+        lastWeekStartISO,
+        generatedWeekStarts: weekStartISOs,
+      });
+
+      const rangeFetchStartISO = weekStartISOs[0] ?? startISO;
+      const rangeFetchEndISO = weekStartISOs.length > 0
+        ? shiftISODateByDays(weekStartISOs[weekStartISOs.length - 1] ?? endISO, 6)
+        : endISO;
+      const headerRowsByDate = await listTeamWorkoutBatchHeadersInRange(rangeFetchStartISO, rangeFetchEndISO);
+      const exportHeaderByKey: Record<string, string> = {};
+      const exportHeaderByBaseKey: Record<string, string> = {};
+      const exportHeaderByBatchId: Record<string, string> = {};
+      headerRowsByDate.forEach((row) => {
+        const batchId = String(row.batch_id ?? "").trim();
+        if (!batchId) return;
+        const value = String(row.header_notes ?? "").trim();
+        const key = toWorkoutBatchHeaderNotesKey(row.date_iso, batchId, row.session);
+        exportHeaderByKey[key] = value;
+        if (value) {
+          const baseKey = toWorkoutBatchHeaderNotesBaseKey(row.date_iso, batchId);
+          if (!exportHeaderByBaseKey[baseKey]) exportHeaderByBaseKey[baseKey] = value;
+          const prev = String(exportHeaderByBatchId[batchId] ?? "").trim();
+          if (!prev || value.length > prev.length) exportHeaderByBatchId[batchId] = value;
+        }
+      });
+
+      const sectionsByWeek = weekStartISOs.map((weekStartISO) => {
+        const weekDateISOs = Array.from({ length: 7 }, (_, idx) => shiftISODateByDays(weekStartISO, idx));
+        const weekDates = weekDateISOs.map((iso) => {
+          const [y, m, d] = iso.split("-").map(Number);
+          return new Date(y, (m ?? 1) - 1, d ?? 1);
+        });
+        const weekEndISO = weekDateISOs[6] ?? "";
+        const days = buildWeeklyDaySectionsForExport({
+          workouts: filteredRangeWorkouts.filter((w) => isInExportRange(getWorkoutDateISO(w))),
+          weekDates,
+          weekDateISOs,
+          headerByKey: exportHeaderByKey,
+          headerByBaseKey: exportHeaderByBaseKey,
+          headerByBatchId: exportHeaderByBatchId,
+        });
+        if (weekStartISO === "2026-11-09" || weekStartISO === "2026-11-16") {
+          console.log("[training-plan-pdf][debug] map-keys", {
+            weekStartISO,
+            exactCount: Object.keys(exportHeaderByKey).length,
+            baseCount: Object.keys(exportHeaderByBaseKey).length,
+            batchCount: Object.keys(exportHeaderByBatchId).length,
+            exactKeysSample: Object.keys(exportHeaderByKey)
+              .filter((key) => key.startsWith("2026-11-"))
+              .slice(0, 50),
+          });
+          console.log("[training-plan-pdf][debug] sections-before", {
+            weekStartISO,
+            sections: summarizeWeeklySectionDetails(days),
+          });
+        }
+        const daysWithHeaderOverrides = applyHeaderNotesToWeeklySections(
+          days,
+          exportHeaderByKey,
+          exportHeaderByBaseKey,
+          exportHeaderByBatchId
+        );
+        if (weekStartISO === "2026-11-09" || weekStartISO === "2026-11-16") {
+          console.log("[training-plan-pdf][debug] sections-after", {
+            weekStartISO,
+            sections: summarizeWeeklySectionDetails(daysWithHeaderOverrides),
+          });
+        }
+
+        return {
+          weekStartISO,
+          weekLabel: `${weekDates[0].toLocaleDateString(undefined, { month: "short", day: "numeric" })} - ${weekDates[6].toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`,
+          days: daysWithHeaderOverrides.map((day) =>
+            !isInExportRange(day.dateISO) ? { ...day, workouts: [] } : day
+          ),
+          weekEndISO,
+        };
+      });
+      const may11Week = sectionsByWeek.find((week) => week.weekStartISO === "2026-05-11");
+      console.log("[training-plan-pdf] bucket counts week of May 11", {
+        weekFound: !!may11Week,
+        countsByDate: may11Week
+          ? may11Week.days.reduce<Record<string, number>>((acc, day) => {
+              acc[day.dateISO] = day.workouts.length;
+              return acc;
+            }, {})
+          : null,
+      });
+
+      const exportWeeks: TrainingPlanWeekSection[] = sectionsByWeek.map((week) => ({
+        weekStartISO: week.weekStartISO,
+        weekLabel: week.weekLabel,
+        days: week.days,
+      }));
+
+      const generatedAtLabel = new Date().toLocaleString();
+      const html = buildTrainingPlanRangeHtml({
+        title: "Training Plan",
+        rangeLabel: formatTrainingPlanRangeLabel(startISO, endISO),
+        generatedAtLabel,
+        weeks: exportWeeks,
+        categories,
+      });
+
+      if (Platform.OS === "web") {
+        printHtmlInWebWindow(html);
+        Alert.alert("Export PDF", "Print dialog opened.");
+      } else {
+        const result = await Print.printToFileAsync({ html });
+        const canShare = await Sharing.isAvailableAsync();
+        if (canShare) await Sharing.shareAsync(result.uri);
+        else Alert.alert("PDF created", result.uri);
+      }
+      await AsyncStorage.setItem(
+        COACH_TRAINING_PLAN_EXPORT_RANGE_KEY,
+        JSON.stringify({
+          startDateISO: startISO,
+          endDateISO: endISO,
+          seasonId: trainingPlanExportSeasonId ?? null,
+        })
+      ).catch(() => {});
+      setTrainingPlanExportOpen(false);
+    } catch (e: any) {
+      const message = String(e?.message ?? "Could not export training plan PDF.");
+      setTrainingPlanExportError(message);
+      Alert.alert("Export failed", message);
+    } finally {
+      setExportingTrainingPlanPdf(false);
+    }
+  }, [
+    athleteSeasonOverridesBySeasonAndAthlete,
+    athleteFilterOptions,
+    categories,
+    exportEndDateISO,
+    exportStartDateISO,
+    exportingTrainingPlanPdf,
+    rosterNameById,
+    selectedAthleteIds,
+    selectedSeason,
+    selectedTrainingGroupAthleteIds,
+    selectedTrainingGroupIds.length,
+    trainingPlanExportSeasonId,
+    weekStartsOn,
+  ]);
 
   const persistWeekLabelDraft = useCallback(async (targetWeekStartISO: string, nextDraftRaw: string) => {
     const seq = ++weekLabelSaveSeqRef.current;
@@ -1849,33 +2926,60 @@ export default function CoachCalendarMonth() {
     }
   }, [currentWeekAnnotation, persistWeekLabelDraft, weekLabelDraft]);
 
-  const runCopyPreviousWeek = useCallback(async () => {
+  const runCopyWeekFromSource = useCallback(async (sourceWeekStartISO: string) => {
     if (copyingWeek || clearingWeek) return;
-    console.log("[coach-calendar] runCopyPreviousWeek start");
+    const normalizedSourceWeekStartISO = String(sourceWeekStartISO ?? "").trim();
+    if (!isValidISODate(normalizedSourceWeekStartISO)) {
+      Alert.alert("Copy Week", "Please choose a valid source week.");
+      return;
+    }
+    console.log("[coach-calendar] runCopyWeekFromSource start");
     setCopyingWeek(true);
     try {
       const currentWeekStartISO = toISODate(anchorWeekStart);
-      const previousWeekStartISO = toISODate(addDays(anchorWeekStart, -7));
-      const previousWeekEndISO = toISODate(addDays(anchorWeekStart, -1));
-      const previousWeekRows = await listTeamWorkoutsInRange(previousWeekStartISO, previousWeekEndISO);
-      console.log("[coach-calendar] copy previous week range", {
+      const sourceWeekEndISO = toISODate(addDays(parseISODate(normalizedSourceWeekStartISO), 6));
+      const sourceWeekRows = await listTeamWorkoutsInRange(normalizedSourceWeekStartISO, sourceWeekEndISO);
+      console.log("[coach-calendar] copy week range", {
         currentWeekStartISO,
-        previousWeekStartISO,
-        previousWeekEndISO,
+        sourceWeekStartISO: normalizedSourceWeekStartISO,
+        sourceWeekEndISO,
       });
 
-      if (!Array.isArray(previousWeekRows) || previousWeekRows.length === 0) {
-        Alert.alert("Copy Previous Week", "No workouts found in the previous week.");
+      if (!Array.isArray(sourceWeekRows) || sourceWeekRows.length === 0) {
+        Alert.alert("Copy Week", "No workouts found in the selected source week.");
         return;
       }
+
+      const sourceWeekDateISOs = Array.from(
+        new Set(sourceWeekRows.map((row) => String(row.date_iso ?? "").trim()).filter(Boolean))
+      );
+      const sourceHeaderRowsByDate = await Promise.all(
+        sourceWeekDateISOs.map((dateISO) => listTeamWorkoutBatchHeadersForDate(dateISO).catch(() => []))
+      );
+      const sourceMainNotesByBatchId = new Map<string, string>();
+      const sourceMainNotesByBatchAndDate = new Map<string, string>();
+      sourceHeaderRowsByDate.forEach((headerRows) => {
+        (Array.isArray(headerRows) ? headerRows : []).forEach((headerRow) => {
+          const batchId = String(headerRow.batch_id ?? "").trim();
+          const dateISO = String(headerRow.date_iso ?? "").trim();
+          const notes = String(headerRow.header_notes ?? "").trim();
+          if (!batchId || !dateISO || !notes || notes.toLowerCase() === "no notes") return;
+          const byDateKey = `${batchId}::${dateISO}`;
+          const prevByDate = String(sourceMainNotesByBatchAndDate.get(byDateKey) ?? "").trim();
+          if (!prevByDate || notes.length > prevByDate.length) sourceMainNotesByBatchAndDate.set(byDateKey, notes);
+          const prevByBatch = String(sourceMainNotesByBatchId.get(batchId) ?? "").trim();
+          if (!prevByBatch || notes.length > prevByBatch.length) sourceMainNotesByBatchId.set(batchId, notes);
+        });
+      });
       console.log(
-        "[coach-calendar] copy previous week source dates",
-        previousWeekRows.slice(0, 6).map((row) => String(row.date_iso ?? ""))
+        "[coach-calendar] copy week source dates",
+        sourceWeekRows.slice(0, 6).map((row) => String(row.date_iso ?? ""))
       );
 
       const copiedBatchIdBySourceBatchId = new Map<string, string>();
+      const copiedHeaderNotesByBatchDateKey = new Map<string, { batchId: string; dateISO: string; notes: string }>();
       const mappedDateSamples: Array<{ source: string; dest: string; offsetDays: number }> = [];
-      const insertRows = previousWeekRows.map((row) => {
+      const insertRows = sourceWeekRows.map((row) => {
         const sourceBatchId = String(row.batch_id ?? "").trim();
         let nextBatchId: string | null = null;
         if (sourceBatchId) {
@@ -1887,8 +2991,24 @@ export default function CoachCalendarMonth() {
           nextBatchId = mapped;
         }
         const sourceDateISO = String(row.date_iso ?? "");
-        const offsetDays = diffISODateDays(previousWeekStartISO, sourceDateISO);
+        const offsetDays = diffISODateDays(normalizedSourceWeekStartISO, sourceDateISO);
         const nextDateISO = shiftISODateByDays(currentWeekStartISO, offsetDays);
+        if (sourceBatchId && nextBatchId) {
+          const notesByDateKey = `${sourceBatchId}::${sourceDateISO}`;
+          const fromHeaderByDate = String(sourceMainNotesByBatchAndDate.get(notesByDateKey) ?? "").trim();
+          const fromHeaderByBatch = String(sourceMainNotesByBatchId.get(sourceBatchId) ?? "").trim();
+          const fromRowDetails = String(row.details ?? "").trim();
+          const sourceMainNotes = [fromHeaderByDate, fromHeaderByBatch, fromRowDetails]
+            .map((value) => String(value ?? "").trim())
+            .find((value) => value.length > 0 && value.toLowerCase() !== "no notes");
+          if (sourceMainNotes) {
+            copiedHeaderNotesByBatchDateKey.set(`${nextBatchId}::${nextDateISO}`, {
+              batchId: nextBatchId,
+              dateISO: nextDateISO,
+              notes: sourceMainNotes,
+            });
+          }
+        }
         if (mappedDateSamples.length < 6) {
           mappedDateSamples.push({ source: sourceDateISO, dest: nextDateISO, offsetDays });
         }
@@ -1913,42 +3033,94 @@ export default function CoachCalendarMonth() {
             row.planned_distance_unit === "mi" || row.planned_distance_unit === "km" ? row.planned_distance_unit : null,
         };
       });
-      console.log("[coach-calendar] copy previous week mapped dates", mappedDateSamples);
-      console.log("[coach-calendar] copy previous week insert count", { count: insertRows.length });
+      console.log("[coach-calendar] copy week mapped dates", mappedDateSamples);
+      console.log("[coach-calendar] copy week insert count", { count: insertRows.length });
+      console.log("[coach-calendar] copy week notes save keys", {
+        count: copiedHeaderNotesByBatchDateKey.size,
+        sample: Array.from(copiedHeaderNotesByBatchDateKey.values())
+          .slice(0, 8)
+          .map((item) => ({ batchId: item.batchId, dateISO: item.dateISO, notes: item.notes })),
+      });
 
       await createTeamWorkoutBatch(insertRows);
+      const copiedBatchMainNotesWrites = Array.from(copiedHeaderNotesByBatchDateKey.values()).map((item) =>
+        Promise.all([
+          saveTeamWorkoutBatchHeaderNotes({
+            batch_id: item.batchId,
+            date_iso: item.dateISO,
+            session: "AM",
+            header_notes: item.notes,
+          }),
+          saveTeamWorkoutBatchHeaderNotes({
+            batch_id: item.batchId,
+            date_iso: item.dateISO,
+            session: "PM",
+            header_notes: item.notes,
+          }),
+        ])
+      );
+      if (copiedBatchMainNotesWrites.length > 0) {
+        await Promise.all(copiedBatchMainNotesWrites);
+      }
       await loadCalendarData({ force: true });
       Alert.alert(
-        "Copy Previous Week",
+        "Copy Week",
         `Copied ${insertRows.length} workout${insertRows.length === 1 ? "" : "s"} into week of ${currentWeekStartISO}.`
       );
     } catch (error: any) {
-      Alert.alert("Copy failed", String(error?.message ?? "Could not copy previous week."));
+      Alert.alert("Copy failed", String(error?.message ?? "Could not copy week."));
     } finally {
       setCopyingWeek(false);
     }
   }, [anchorWeekStart, clearingWeek, copyingWeek, loadCalendarData]);
 
-  const handleCopyPreviousWeek = useCallback(() => {
+  const openCopyWeekModal = useCallback(() => {
     if (calendarMode !== "week" || copyingWeek || clearingWeek) return;
+    setCopySourceDateInput(toISODate(addDays(anchorWeekStart, -7)));
+    setCopyWeekError(null);
+    setCopyWeekModalOpen(true);
+  }, [anchorWeekStart, calendarMode, clearingWeek, copyingWeek]);
+
+  const shiftCopySourceWeek = useCallback((deltaWeeks: number) => {
+    const baseISO =
+      copySourceWeekStartISO && isValidISODate(copySourceWeekStartISO)
+        ? copySourceWeekStartISO
+        : toISODate(addDays(anchorWeekStart, -7));
+    const nextISO = toISODate(addDays(parseISODate(baseISO), deltaWeeks * 7));
+    setCopySourceDateInput(nextISO);
+    setCopyWeekError(null);
+  }, [anchorWeekStart, copySourceWeekStartISO]);
+
+  const confirmCopyWeek = useCallback(() => {
+    if (!copySourceWeekStartISO || !isValidISODate(copySourceWeekStartISO)) {
+      setCopyWeekError("Choose a valid source week date (YYYY-MM-DD).");
+      return;
+    }
+    if (copySourceWeekStartISO === currentWeekStartISO) {
+      setCopyWeekError("Source week and target week cannot be the same.");
+      return;
+    }
+    setCopyWeekError(null);
+    const message = `Copy all workouts from ${copySourceWeekLabel} into ${copyTargetWeekLabel}? This will add workouts to the target week. Existing workouts will not be removed.`;
     if (Platform.OS === "web") {
-      const confirmed = window.confirm(
-        "Copy all workouts from the previous week into this week? This appends workouts and may create many rows."
-      );
+      const confirmed = window.confirm(message);
       if (confirmed) {
-        void runCopyPreviousWeek();
+        setCopyWeekModalOpen(false);
+        void runCopyWeekFromSource(copySourceWeekStartISO);
       }
       return;
     }
-    Alert.alert(
-      "Copy Previous Week",
-      "Copy all workouts from the previous week into this week? This appends workouts and may create many rows.",
-      [
-        { text: "Cancel", style: "cancel" },
-        { text: "Copy", onPress: () => void runCopyPreviousWeek() },
-      ]
-    );
-  }, [calendarMode, clearingWeek, copyingWeek, runCopyPreviousWeek]);
+    Alert.alert("Copy Week", message, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Copy Week",
+        onPress: () => {
+          setCopyWeekModalOpen(false);
+          void runCopyWeekFromSource(copySourceWeekStartISO);
+        },
+      },
+    ]);
+  }, [copySourceWeekLabel, copySourceWeekStartISO, copyTargetWeekLabel, currentWeekStartISO, runCopyWeekFromSource]);
 
   const runClearThisWeek = useCallback(async () => {
     if (copyingWeek || clearingWeek) return;
@@ -2154,14 +3326,17 @@ export default function CoachCalendarMonth() {
 
         {calendarMode === "week" ? (
           <View style={styles.weekActionsRow}>
-            <Pressable onPress={handleCopyPreviousWeek} style={styles.todayBtn} disabled={copyingWeek || clearingWeek}>
-              <Text style={styles.todayBtnText}>{copyingWeek ? "Copying..." : "Copy Previous Week"}</Text>
+            <Pressable onPress={openCopyWeekModal} style={styles.todayBtn} disabled={copyingWeek || clearingWeek}>
+              <Text style={styles.todayBtnText}>{copyingWeek ? "Copying..." : "Copy Week..."}</Text>
             </Pressable>
             <Pressable onPress={handleClearThisWeek} style={styles.todayBtn} disabled={copyingWeek || clearingWeek}>
               <Text style={styles.todayBtnText}>{clearingWeek ? "Clearing..." : "Clear This Week"}</Text>
             </Pressable>
             <Pressable onPress={() => void handleExportWeekPdf()} style={styles.todayBtn} disabled={exportingPdf || copyingWeek || clearingWeek}>
               <Text style={styles.todayBtnText}>{exportingPdf ? "Exporting..." : "Export PDF"}</Text>
+            </Pressable>
+            <Pressable onPress={openTrainingPlanExport} style={styles.todayBtn} disabled={exportingTrainingPlanPdf || copyingWeek || clearingWeek}>
+              <Text style={styles.todayBtnText}>{exportingTrainingPlanPdf ? "Exporting..." : "Export Training Plan"}</Text>
             </Pressable>
           </View>
         ) : null}
@@ -2180,6 +3355,178 @@ export default function CoachCalendarMonth() {
         >
           <Text style={[styles.modePillText, calendarMode === "week" && styles.modePillTextActive]}>Weekly</Text>
         </Pressable>
+        <View style={styles.athleteFilterWrap}>
+          <Text style={styles.athleteFilterLabel}>Athletes</Text>
+          <Pressable
+            onPress={() => setAthleteFilterOpen((prev) => !prev)}
+            style={styles.athleteFilterTrigger}
+          >
+            <Text numberOfLines={1} style={styles.athleteFilterTriggerText}>
+              {selectedAthleteLabel}
+            </Text>
+            <Text style={styles.athleteFilterChevron}>{athleteFilterOpen ? "▴" : "▾"}</Text>
+          </Pressable>
+          {athleteFilterOpen ? (
+            <View style={styles.athleteFilterMenu}>
+              <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 230 }}>
+                <Pressable
+                  onPress={() => {
+                    setSelectedAthleteIds([]);
+                    setAthleteFilterOpen(false);
+                  }}
+                  style={[
+                    styles.athleteFilterItem,
+                    selectedAthleteIds.length === 0 && styles.athleteFilterItemSelected,
+                  ]}
+                >
+                  <Text style={styles.athleteFilterItemText}>All athletes (clear)</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    setSelectedAthleteIds(athleteFilterOptions.map((option) => option.id));
+                    setAthleteFilterOpen(false);
+                  }}
+                  style={styles.athleteFilterItem}
+                >
+                  <Text style={styles.athleteFilterItemText}>Select all</Text>
+                </Pressable>
+                {athleteFilterOptions.map((option) => (
+                  <Pressable
+                    key={`calendar-filter-${option.id}`}
+                    onPress={() => {
+                      setSelectedAthleteIds((prev) =>
+                        prev.includes(option.id)
+                          ? prev.filter((id) => id !== option.id)
+                          : [...prev, option.id]
+                      );
+                    }}
+                    style={[
+                      styles.athleteFilterItem,
+                      selectedAthleteIds.includes(option.id) && styles.athleteFilterItemSelected,
+                    ]}
+                  >
+                    <Text style={styles.athleteFilterItemText}>
+                      {selectedAthleteIds.includes(option.id) ? "☑ " : "☐ "}
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+        </View>
+        <View style={styles.groupFilterWrap}>
+          <Text style={styles.groupFilterLabel}>Groups</Text>
+          <Pressable
+            onPress={() => setTrainingGroupFilterOpen((prev) => !prev)}
+            style={styles.groupFilterTrigger}
+          >
+            <Text numberOfLines={1} style={styles.groupFilterTriggerText}>
+              {selectedTrainingGroupLabel}
+            </Text>
+            <Text style={styles.groupFilterChevron}>{trainingGroupFilterOpen ? "▴" : "▾"}</Text>
+          </Pressable>
+          {trainingGroupFilterOpen ? (
+            <View style={styles.groupFilterMenu}>
+              <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 230 }}>
+                <Pressable
+                  onPress={() => {
+                    void teamDataStore.actions.setSharedSelectedTrainingGroupIds([]);
+                    setTrainingGroupFilterOpen(false);
+                  }}
+                  style={[
+                    styles.groupFilterItem,
+                    selectedTrainingGroupIds.length === 0 && styles.groupFilterItemSelected,
+                  ]}
+                >
+                  <Text style={styles.groupFilterItemText}>All groups (clear)</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    void teamDataStore.actions.setSharedSelectedTrainingGroupIds(
+                      trainingGroupFilterOptions.map((option) => option.id)
+                    );
+                    setTrainingGroupFilterOpen(false);
+                  }}
+                  style={styles.groupFilterItem}
+                >
+                  <Text style={styles.groupFilterItemText}>Select all</Text>
+                </Pressable>
+                {trainingGroupFilterOptions.map((option) => (
+                  <Pressable
+                    key={`calendar-group-filter-${option.id}`}
+                    onPress={() => {
+                      const next = selectedTrainingGroupIds.includes(option.id)
+                        ? selectedTrainingGroupIds.filter((id) => id !== option.id)
+                        : [...selectedTrainingGroupIds, option.id];
+                      void teamDataStore.actions.setSharedSelectedTrainingGroupIds(next);
+                    }}
+                    style={[
+                      styles.groupFilterItem,
+                      selectedTrainingGroupIds.includes(option.id) && styles.groupFilterItemSelected,
+                    ]}
+                  >
+                    <Text style={styles.groupFilterItemText}>
+                      {selectedTrainingGroupIds.includes(option.id) ? "☑ " : "☐ "}
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+        </View>
+        <View style={styles.groupFilterWrap}>
+          <Text style={styles.groupFilterLabel}>Season</Text>
+          <Pressable
+            onPress={() => setSeasonFilterOpen((prev) => !prev)}
+            style={styles.groupFilterTrigger}
+          >
+            <Text numberOfLines={1} style={styles.groupFilterTriggerText}>
+              {selectedSeasonLabel}
+            </Text>
+            <Text style={styles.groupFilterChevron}>{seasonFilterOpen ? "▴" : "▾"}</Text>
+          </Pressable>
+          {seasonFilterOpen ? (
+            <View style={styles.groupFilterMenu}>
+              <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 230 }}>
+                <Pressable
+                  onPress={() => {
+                    void teamDataStore.actions.setSharedSelectedSeasonId(null);
+                    setSeasonFilterOpen(false);
+                  }}
+                  style={[
+                    styles.groupFilterItem,
+                    !selectedSeasonId && styles.groupFilterItemSelected,
+                  ]}
+                >
+                  <Text style={styles.groupFilterItemText}>All seasons (clear)</Text>
+                </Pressable>
+                {seasonFilterOptions.map((option) => (
+                  <Pressable
+                    key={`calendar-season-filter-${option.id}`}
+                    onPress={() => {
+                      void teamDataStore.actions.setSharedSelectedSeasonId(option.id);
+                      setSeasonFilterOpen(false);
+                    }}
+                    style={[
+                      styles.groupFilterItem,
+                      selectedSeasonId === option.id && styles.groupFilterItemSelected,
+                    ]}
+                  >
+                    <Text style={styles.groupFilterItemText}>
+                      {selectedSeasonId === option.id ? "◉ " : "○ "}
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+          <Text style={{ fontSize: 10, fontWeight: "700", color: "#64748b", marginTop: 4, marginLeft: 4 }}>
+            Uses athlete-specific dates where set.
+          </Text>
+        </View>
       </View>
 
       {calendarMode === "month" ? (
@@ -2491,7 +3838,7 @@ export default function CoachCalendarMonth() {
                                         <Text style={styles.weekGroupLabel}>{group.label}</Text>
                                         {group.lines.map((line, idx) => (
                                           <Text key={`${group.key}-${idx}`} style={styles.weekGroupLineText}>
-                                            {line.athleteNames.join(", ")} — {line.details || "No notes"}
+                                            {line.athleteNames.join(", ")}{line.individualNotes ? ` — ${line.individualNotes}` : ""}
                                           </Text>
                                         ))}
                                       </View>
@@ -2607,7 +3954,7 @@ export default function CoachCalendarMonth() {
                                         <Text style={styles.weekGroupLabel}>{group.label}</Text>
                                         {group.lines.map((line, idx) => (
                                           <Text key={`${group.key}-${idx}`} style={styles.weekGroupLineText}>
-                                            {line.athleteNames.join(", ")} — {line.details || "No notes"}
+                                            {line.athleteNames.join(", ")}{line.individualNotes ? ` — ${line.individualNotes}` : ""}
                                           </Text>
                                         ))}
                                       </View>
@@ -2633,6 +3980,157 @@ export default function CoachCalendarMonth() {
           <Text style={styles.savedBannerText}>Training session saved</Text>
         </View>
       ) : null}
+
+      <Modal
+        visible={trainingPlanExportOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setTrainingPlanExportOpen(false)}
+      >
+        <Pressable style={styles.exportModalBackdrop} onPress={() => setTrainingPlanExportOpen(false)}>
+          <Pressable style={styles.exportModalCard} onPress={() => {}}>
+            <Text style={styles.exportModalTitle}>Export Training Plan</Text>
+            <Text style={styles.exportModalHint}>Pick a date range (max {MAX_TRAINING_PLAN_EXPORT_RANGE_DAYS} days).</Text>
+            <View style={styles.exportModalField}>
+              <Text style={styles.exportModalLabel}>Season quick-pick</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+                <Pressable
+                  onPress={() => setTrainingPlanExportSeasonId(null)}
+                  style={[styles.todayBtn, !trainingPlanExportSeasonId ? { backgroundColor: "rgba(37,99,235,0.12)" } : null]}
+                >
+                  <Text style={styles.todayBtnText}>Custom range</Text>
+                </Pressable>
+                {trainingPlanExportSeasonOptions.map((option) => (
+                  <Pressable
+                    key={`training-plan-export-season-${option.id}`}
+                    onPress={() => applyTrainingPlanSeasonRange(option.id)}
+                    style={[styles.todayBtn, trainingPlanExportSeasonId === option.id ? { backgroundColor: "rgba(37,99,235,0.12)" } : null]}
+                  >
+                    <Text style={styles.todayBtnText}>{option.label}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+            <View style={styles.exportModalField}>
+              <Text style={styles.exportModalLabel}>Start date</Text>
+              <Text style={[styles.exportModalInput, { paddingTop: 10 }]}>{exportStartDateISO}</Text>
+              <View style={styles.exportModalActions}>
+                <Pressable style={styles.todayBtn} onPress={() => shiftTrainingPlanExportDate("start", -7)}>
+                  <Text style={styles.todayBtnText}>-1w</Text>
+                </Pressable>
+                <Pressable style={styles.todayBtn} onPress={() => shiftTrainingPlanExportDate("start", -1)}>
+                  <Text style={styles.todayBtnText}>-1d</Text>
+                </Pressable>
+                <Pressable style={styles.todayBtn} onPress={() => {
+                  setExportStartDateISO(toISODate(new Date()));
+                  if (trainingPlanExportSeasonId) setTrainingPlanExportSeasonId(null);
+                }}>
+                  <Text style={styles.todayBtnText}>Today</Text>
+                </Pressable>
+                <Pressable style={styles.todayBtn} onPress={() => shiftTrainingPlanExportDate("start", 1)}>
+                  <Text style={styles.todayBtnText}>+1d</Text>
+                </Pressable>
+                <Pressable style={styles.todayBtn} onPress={() => shiftTrainingPlanExportDate("start", 7)}>
+                  <Text style={styles.todayBtnText}>+1w</Text>
+                </Pressable>
+              </View>
+            </View>
+            <View style={styles.exportModalField}>
+              <Text style={styles.exportModalLabel}>End date</Text>
+              <Text style={[styles.exportModalInput, { paddingTop: 10 }]}>{exportEndDateISO}</Text>
+              <View style={styles.exportModalActions}>
+                <Pressable style={styles.todayBtn} onPress={() => shiftTrainingPlanExportDate("end", -7)}>
+                  <Text style={styles.todayBtnText}>-1w</Text>
+                </Pressable>
+                <Pressable style={styles.todayBtn} onPress={() => shiftTrainingPlanExportDate("end", -1)}>
+                  <Text style={styles.todayBtnText}>-1d</Text>
+                </Pressable>
+                <Pressable style={styles.todayBtn} onPress={() => {
+                  setExportEndDateISO(toISODate(new Date()));
+                  if (trainingPlanExportSeasonId) setTrainingPlanExportSeasonId(null);
+                }}>
+                  <Text style={styles.todayBtnText}>Today</Text>
+                </Pressable>
+                <Pressable style={styles.todayBtn} onPress={() => shiftTrainingPlanExportDate("end", 1)}>
+                  <Text style={styles.todayBtnText}>+1d</Text>
+                </Pressable>
+                <Pressable style={styles.todayBtn} onPress={() => shiftTrainingPlanExportDate("end", 7)}>
+                  <Text style={styles.todayBtnText}>+1w</Text>
+                </Pressable>
+              </View>
+            </View>
+            {trainingPlanExportError ? (
+              <Text style={styles.exportModalError}>{trainingPlanExportError}</Text>
+            ) : null}
+            <View style={styles.exportModalActions}>
+              <Pressable style={styles.todayBtn} onPress={() => setTrainingPlanExportOpen(false)} disabled={exportingTrainingPlanPdf}>
+                <Text style={styles.todayBtnText}>Cancel</Text>
+              </Pressable>
+              <Pressable style={styles.todayBtn} onPress={() => void handleExportTrainingPlanPdf()} disabled={exportingTrainingPlanPdf}>
+                <Text style={styles.todayBtnText}>{exportingTrainingPlanPdf ? "Exporting..." : "Export PDF"}</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={copyWeekModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCopyWeekModalOpen(false)}
+      >
+        <Pressable style={styles.exportModalBackdrop} onPress={() => setCopyWeekModalOpen(false)}>
+          <Pressable style={styles.exportModalCard} onPress={() => {}}>
+            <Text style={styles.exportModalTitle}>Copy workouts from week</Text>
+            <Text style={styles.exportModalHint}>Copy into {copyTargetWeekLabel}</Text>
+            <View style={styles.exportModalField}>
+              <Text style={styles.exportModalLabel}>Source date (snaps to week)</Text>
+              <TextInput
+                value={copySourceDateInput}
+                onChangeText={(text) => {
+                  setCopySourceDateInput(text);
+                  setCopyWeekError(null);
+                }}
+                autoCapitalize="none"
+                autoCorrect={false}
+                placeholder="YYYY-MM-DD"
+                style={styles.exportModalInput}
+              />
+              <Text style={styles.exportModalHint}>Source week: {copySourceWeekLabel}</Text>
+            </View>
+            <View style={styles.exportModalActions}>
+              <Pressable style={styles.todayBtn} onPress={() => shiftCopySourceWeek(-1)} disabled={copyingWeek}>
+                <Text style={styles.todayBtnText}>Prev Source Week</Text>
+              </Pressable>
+              <Pressable style={styles.todayBtn} onPress={() => shiftCopySourceWeek(1)} disabled={copyingWeek}>
+                <Text style={styles.todayBtnText}>Next Source Week</Text>
+              </Pressable>
+              <Pressable
+                style={styles.todayBtn}
+                onPress={() => {
+                  setCopySourceDateInput(toISODate(addDays(anchorWeekStart, -7)));
+                  setCopyWeekError(null);
+                }}
+                disabled={copyingWeek}
+              >
+                <Text style={styles.todayBtnText}>Use Previous Week</Text>
+              </Pressable>
+            </View>
+            {copyWeekError ? (
+              <Text style={styles.exportModalError}>{copyWeekError}</Text>
+            ) : null}
+            <View style={styles.exportModalActions}>
+              <Pressable style={styles.todayBtn} onPress={() => setCopyWeekModalOpen(false)} disabled={copyingWeek}>
+                <Text style={styles.todayBtnText}>Cancel</Text>
+              </Pressable>
+              <Pressable style={styles.todayBtn} onPress={confirmCopyWeek} disabled={copyingWeek || clearingWeek}>
+                <Text style={styles.todayBtnText}>{copyingWeek ? "Copying..." : "Copy Week"}</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -2726,7 +4224,15 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
 
-  modeRow: { flexDirection: "row", gap: 8, marginBottom: 8 },
+  modeRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 8,
+    position: "relative",
+    zIndex: 400,
+    overflow: "visible",
+  },
   modePill: {
     paddingHorizontal: 12,
     paddingVertical: 8,
@@ -2738,6 +4244,124 @@ const styles = StyleSheet.create({
   modePillActive: { borderColor: "#111", backgroundColor: "#111" },
   modePillText: { fontWeight: "800", color: "#555" },
   modePillTextActive: { color: "#fff" },
+  athleteFilterWrap: {
+    position: "relative",
+    minWidth: 210,
+    zIndex: 600,
+    marginLeft: 4,
+  },
+  athleteFilterLabel: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#64748b",
+    marginBottom: 2,
+    marginLeft: 4,
+  },
+  athleteFilterTrigger: {
+    height: 34,
+    borderWidth: 1,
+    borderColor: "#d7d7d7",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  athleteFilterTriggerText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#1f2937",
+  },
+  athleteFilterChevron: { fontSize: 11, fontWeight: "900", color: "#64748b" },
+  athleteFilterMenu: {
+    position: "absolute",
+    top: 40,
+    left: 0,
+    right: 0,
+    borderWidth: 1,
+    borderColor: "#dbe2ee",
+    borderRadius: 8,
+    backgroundColor: "#fff",
+    zIndex: 700,
+    ...(Platform.OS === "web"
+      ? ({
+          boxShadow: "0 10px 28px rgba(15, 23, 42, 0.18)",
+        } as any)
+      : null),
+    ...(Platform.OS === "android" ? { elevation: 8 } : null),
+  },
+  athleteFilterItem: {
+    borderBottomWidth: 1,
+    borderBottomColor: "#edf2f7",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  athleteFilterItemSelected: {
+    backgroundColor: "#eff6ff",
+  },
+  athleteFilterItemText: { fontSize: 12, fontWeight: "700", color: "#334155" },
+  groupFilterWrap: {
+    position: "relative",
+    minWidth: 210,
+    zIndex: 590,
+    marginLeft: 4,
+  },
+  groupFilterLabel: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#64748b",
+    marginBottom: 2,
+    marginLeft: 4,
+  },
+  groupFilterTrigger: {
+    height: 34,
+    borderWidth: 1,
+    borderColor: "#d7d7d7",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  groupFilterTriggerText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#1f2937",
+  },
+  groupFilterChevron: { fontSize: 11, fontWeight: "900", color: "#64748b" },
+  groupFilterMenu: {
+    position: "absolute",
+    top: 40,
+    left: 0,
+    right: 0,
+    borderWidth: 1,
+    borderColor: "#dbe2ee",
+    borderRadius: 8,
+    backgroundColor: "#fff",
+    zIndex: 700,
+    ...(Platform.OS === "web"
+      ? ({
+          boxShadow: "0 10px 28px rgba(15, 23, 42, 0.18)",
+        } as any)
+      : null),
+    ...(Platform.OS === "android" ? { elevation: 8 } : null),
+  },
+  groupFilterItem: {
+    borderBottomWidth: 1,
+    borderBottomColor: "#edf2f7",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  groupFilterItemSelected: {
+    backgroundColor: "#eff6ff",
+  },
+  groupFilterItemText: { fontSize: 12, fontWeight: "700", color: "#334155" },
   monthDesktopInset: {
     marginLeft: 22,
   },
@@ -3420,4 +5044,61 @@ const styles = StyleSheet.create({
     backgroundColor: "#0f172a",
   },
   createSessionTopBtnText: { fontSize: 12, fontWeight: "900", color: "#fff" },
+  exportModalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(15,23,42,0.28)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 16,
+  },
+  exportModalCard: {
+    width: "100%",
+    maxWidth: 430,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#dbe3ee",
+    backgroundColor: "#fff",
+    padding: 12,
+    gap: 8,
+  },
+  exportModalTitle: {
+    fontSize: 16,
+    fontWeight: "900",
+    color: "#0f172a",
+  },
+  exportModalHint: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#64748b",
+  },
+  exportModalField: {
+    gap: 4,
+  },
+  exportModalLabel: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#475569",
+  },
+  exportModalInput: {
+    height: 36,
+    borderWidth: 1,
+    borderColor: "#d7dfea",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    backgroundColor: "#fff",
+    color: "#111827",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  exportModalError: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#b00020",
+  },
+  exportModalActions: {
+    marginTop: 4,
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 8,
+  },
 });
