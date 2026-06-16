@@ -6,8 +6,16 @@ import { Platform } from "react-native";
 
 const extra = Constants.expoConfig?.extra as any;
 
-const supabaseUrl = extra?.EXPO_PUBLIC_SUPABASE_URL as string;
-const supabaseAnonKey = extra?.EXPO_PUBLIC_SUPABASE_ANON_KEY as string;
+const supabaseUrl =
+  process.env.EXPO_PUBLIC_SUPABASE_URL ?? (extra?.EXPO_PUBLIC_SUPABASE_URL as string | undefined);
+const supabaseAnonKey =
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? (extra?.EXPO_PUBLIC_SUPABASE_ANON_KEY as string | undefined);
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error(
+    "Missing Supabase configuration. Set EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY."
+  );
+}
 
 // SecureStore for native; web can use default storage
 const ExpoSecureStoreAdapter = {

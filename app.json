@@ -1,11 +1,8 @@
 {
   "expo": {
-    "name": "training-app",
+    "name": "Training App",
     "slug": "training-app",
-    "extra": {
-      "EXPO_PUBLIC_SUPABASE_URL": "https://vhiasfztnhzpbckcydes.supabase.co",
-      "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZoaWFzZnp0bmh6cGJja2N5ZGVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI1ODY2ODMsImV4cCI6MjA4ODE2MjY4M30.TftO3NmlP77xDOucOn2cag_A7gAmwBbxlivRRqnse2w"
-    },
+    "extra": {},
     "scheme": "trainingapp",
     "version": "1.0.0",
     "orientation": "portrait",
