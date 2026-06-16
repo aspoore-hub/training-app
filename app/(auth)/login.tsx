@@ -174,6 +174,10 @@ export default function Login() {
         style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 12, padding: 12, fontSize: 16 }}
       />
 
+      <Pressable onPress={() => router.push("/(auth)/forgot-password")} style={{ alignSelf: "flex-start" }}>
+        <Text style={{ color: "#2563eb", fontSize: 14, fontWeight: "600" }}>Forgot password?</Text>
+      </Pressable>
+
       <Pressable
         onPress={signIn}
         disabled={!canSubmit}

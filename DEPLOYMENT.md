@@ -20,14 +20,22 @@ Do not put service-role keys or database passwords in Vercel public environment 
 
 In Supabase, open Authentication > URL Configuration.
 
-Replace `https://training.example.com` with the production custom domain.
+Use the current production app root as the Site URL. When you move to a custom domain, replace `https://training.example.com` with that domain.
 
-- Site URL: `https://training.example.com`
+- Site URL: `https://training-app-kappa.vercel.app`
 - Additional Redirect URLs:
+  - `https://training-app-kappa.vercel.app`
+  - `https://training-app-kappa.vercel.app/*`
+  - `https://training-app-kappa.vercel.app/update-password`
+  - `https://training-app-kappa.vercel.app/update-password/*`
   - `https://training.example.com`
   - `https://training.example.com/*`
+  - `https://training.example.com/update-password`
+  - `https://training.example.com/update-password/*`
   - `http://localhost:8081`
   - `http://localhost:8081/*`
+
+Keep the Site URL pointed at the production app root, not the reset screen. Password reset emails use the `/update-password` redirect URL above.
 
 If you use Vercel preview deployments for auth testing, add your preview URL pattern too, for example:
 
