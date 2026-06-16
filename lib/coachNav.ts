@@ -24,6 +24,7 @@ export function resolveCoachTitle(pathname: string): string {
   if (path.includes("/workout/")) return "Edit Workout";
   if (path.includes("/workouts")) return "Athlete Workouts";
   if (path.includes("/training-logs")) return "Training Logs";
+  if (path.includes("/plan-builder")) return "Workout Plan Builder";
   if (path.includes("/planner")) return "Create Session";
   if (path.includes("/mileage")) return "Mileage";
   if (path.includes("/roster")) return "Roster";

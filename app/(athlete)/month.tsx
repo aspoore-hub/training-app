@@ -27,8 +27,8 @@ import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../
 import { getWeekStartISO, getWeekIndex, parseMileageInput, parseISODate, toISODate, formatMileage, sumMileage } from "../../lib/mileagePlan";
 import { loadMileageFeedback, type MileageSessionFeedback } from "../../lib/mileageFeedback";
 import { loadFeedbackFlagSettings, type FeedbackWarningMode } from "../../lib/feedbackFlags";
-import { listAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
-import { teamDataStore } from "../../lib/teamDataStore";
+import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
+import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import { loadWeekStartSetting } from "../../lib/settings";
 import { SegmentedViewToggle } from "../../components/shared/SegmentedViewToggle";
 
@@ -323,12 +323,12 @@ export default function AthleteMonthCalendar() {
       const grid = buildMonthGrid(anchorMonth, ws);
       const weekStarts = Array.from(new Set(grid.map((cell) => getWeekStartISO(cell.dateISO, ws))));
       const mileageLoadPromise = Promise.all(
-        weekStarts.map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO))
+        weekStarts.map((weekStartISO) => teamDataStore.actions.loadVisibleMileageWeekForAthlete(selectedId, weekStartISO))
       );
 
       const startISO = grid[0]?.dateISO ?? toISODate(monthStart(anchorMonth));
       const endISO = grid[grid.length - 1]?.dateISO ?? startISO;
-      const rowsPromise = listAthleteWorkoutsInRange(selectedId, startISO, endISO);
+      const rowsPromise = listVisibleAthleteWorkoutsInRange(selectedId, startISO, endISO);
       const [rows] = await Promise.all([rowsPromise, mileageLoadPromise]);
       const resolvedAthleteName = selectedName ?? athleteName ?? "Athlete";
       setAllWorkouts(rows.map((row) => toAthleteWorkout(row, resolvedAthleteName)));
@@ -473,8 +473,9 @@ export default function AthleteMonthCalendar() {
       const weekStartISO = getWeekStartISO(cell.dateISO, weekStartsOn);
       const idx = getWeekIndex(cell.dateISO, weekStartISO);
       if (idx < 0 || idx > 6) continue;
-      const rows = store.mileageCellsByWeek[weekStartISO] ?? [];
-      const flags = store.mileageFlagsByWeek[weekStartISO] ?? [];
+      const visibleMileageKey = visibleMileageAthleteWeekKey(selectedAthleteId, weekStartISO);
+      const rows = store.visibleMileageCellsByAthleteWeek[visibleMileageKey] ?? [];
+      const flags = store.visibleMileageFlagsByAthleteWeek[visibleMileageKey] ?? [];
       const am = toMileageValue(
         rows.find(
           (row) =>
@@ -501,7 +502,7 @@ export default function AthleteMonthCalendar() {
     }
 
     return map;
-  }, [monthCells, selectedAthleteId, store.mileageCellsByWeek, store.mileageFlagsByWeek, weekStartsOn]);
+  }, [monthCells, selectedAthleteId, store.visibleMileageCellsByAthleteWeek, store.visibleMileageFlagsByAthleteWeek, weekStartsOn]);
 
   const effectivePaceSecPerMile = useMemo(
     () => resolveAthletePaceSeconds(selectedAthleteId, athletePaceOverrides, paceSecPerMile),
@@ -708,7 +709,7 @@ export default function AthleteMonthCalendar() {
         <View style={{ padding: 16, borderRadius: 14, backgroundColor: "#fff6e6", marginBottom: 12 }}>
           <Text style={{ fontWeight: "800", marginBottom: 6 }}>No athlete selected</Text>
           <Text style={{ opacity: 0.75, marginBottom: 10 }}>
-            Pick an athlete to view the calendar and submit feedback.
+            Pick an athlete to view the calendar and submit logs.
           </Text>
           <Pressable
             onPress={() => router.push("/(athlete)")}

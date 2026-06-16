@@ -15,9 +15,10 @@ type MileageFeedbackFields = {
 export function parseNumericLike(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
-    const normalized = value.trim();
+    const normalized = value.trim().replace(",", ".");
     if (!normalized) return undefined;
-    const parsed = Number(normalized);
+    const numericMatch = normalized.match(/^(\d+(?:\.\d+)?)\s*(?:mi|mile|miles|km|kilometer|kilometers)?$/i);
+    const parsed = numericMatch ? Number(numericMatch[1]) : Number(normalized);
     if (Number.isFinite(parsed)) return parsed;
   }
   return undefined;

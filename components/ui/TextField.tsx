@@ -11,6 +11,7 @@ export function TextField({
   keyboardType,
   autoCapitalize = "none",
   style,
+  editable = true,
 }: {
   label?: string;
   value: string;
@@ -19,6 +20,7 @@ export function TextField({
   keyboardType?: "default" | "email-address" | "numeric";
   autoCapitalize?: "none" | "sentences" | "words" | "characters";
   style?: ViewStyle;
+  editable?: boolean;
 }) {
   const { theme, colors } = useAppTheme();
 
@@ -31,6 +33,7 @@ export function TextField({
         placeholder={placeholder}
         keyboardType={keyboardType}
         autoCapitalize={autoCapitalize}
+        editable={editable}
         placeholderTextColor={colors.mutedText}
         style={{
           height: 44,

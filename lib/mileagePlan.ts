@@ -2,6 +2,8 @@ import type { DailyMileageTarget, MileageValue, WeekStartDay, WeeklyMileagePlan 
 import {
   parseWorkoutEntryValue,
   type ParsedWorkoutEntry,
+  workoutEntryMilesRange,
+  workoutEntryXTRange,
 } from "./workoutEntryParser";
 import { DEFAULT_PACE_SEC } from "./pace";
 
@@ -257,4 +259,103 @@ export function formatSum(sum: { min: number; max: number }) {
   if (sum.min === 0 && sum.max === 0) return "";
   if (Math.abs(sum.min - sum.max) < 1e-9) return String(Math.round(sum.min * 10) / 10);
   return `${Math.round(sum.min * 10) / 10}-${Math.round(sum.max * 10) / 10}`;
+}
+
+export type WeeklyPlannedMileageCell = {
+  athlete_profile_id: string;
+  week_start_iso?: string;
+  day_idx: number;
+  session: "AM" | "PM";
+  value: unknown;
+};
+
+export type MileageRangeTotal = {
+  min: number;
+  max: number;
+};
+
+function addMileageRange(a: MileageRangeTotal, b: MileageRangeTotal): MileageRangeTotal {
+  return { min: a.min + b.min, max: a.max + b.max };
+}
+
+function addSecondsRange(a: MileageRangeTotal, b: MileageRangeTotal): MileageRangeTotal {
+  return { min: a.min + b.min, max: a.max + b.max };
+}
+
+function hasMileageRangeTotal(total: MileageRangeTotal) {
+  return Number.isFinite(total.min) && Number.isFinite(total.max) && (total.min > 0 || total.max > 0);
+}
+
+function formatCoachWeekMileageTotal(total: MileageRangeTotal) {
+  if (!hasMileageRangeTotal(total)) return "—";
+  const min = Math.round(total.min);
+  const max = Math.round(total.max);
+  if (min === max) return `${min} mi`;
+  return `${min}–${max} mi`;
+}
+
+function formatCoachWeekXTTotal(total: MileageRangeTotal) {
+  if (!hasMileageRangeTotal(total)) return "—";
+  const min = Math.round(total.min / 60);
+  const max = Math.round(total.max / 60);
+  if (min === max) return `${min} min`;
+  return `${min}–${max} min`;
+}
+
+function addDaysISOInternal(iso: string, days: number) {
+  const d = parseISODate(iso);
+  d.setDate(d.getDate() + days);
+  return toISODate(d);
+}
+
+export function computeWeeklyPlannedMileageAndXtTotals(input: {
+  cells: WeeklyPlannedMileageCell[];
+  athleteId: string;
+  weekStartISO: string;
+  paceSecPerMile?: number;
+}): {
+  mileageRange: MileageRangeTotal;
+  xtSecondsRange: MileageRangeTotal;
+  goalMileageText: string;
+  goalXTText: string;
+  xtSecondsBySessionKey: Map<string, MileageRangeTotal>;
+} {
+  const athleteId = String(input.athleteId ?? "").trim();
+  const weekStartISO = String(input.weekStartISO ?? "").trim();
+  const pace = input.paceSecPerMile ?? DEFAULT_PACE_SEC;
+  let mileageRange: MileageRangeTotal = { min: 0, max: 0 };
+  let xtSecondsRange: MileageRangeTotal = { min: 0, max: 0 };
+  const xtSecondsBySessionKey = new Map<string, MileageRangeTotal>();
+
+  for (const row of input.cells ?? []) {
+    if (String(row?.athlete_profile_id ?? "").trim() !== athleteId) continue;
+    if (String((row as any)?.week_start_iso ?? "").trim() && String((row as any).week_start_iso).trim() !== weekStartISO) {
+      continue;
+    }
+    const dayIdx = Number(row?.day_idx);
+    if (!Number.isInteger(dayIdx) || dayIdx < 0 || dayIdx > 6) continue;
+    const session = String(row?.session ?? "").toUpperCase() === "AM" ? "AM" : "PM";
+    const parsed = parseWorkoutEntryValue(row.value);
+    if (!parsed) continue;
+
+    const miles = workoutEntryMilesRange(parsed, pace);
+    const xt = workoutEntryXTRange(parsed);
+    mileageRange = addMileageRange(mileageRange, miles);
+    xtSecondsRange = addSecondsRange(xtSecondsRange, xt);
+
+    if (hasMileageRangeTotal(xt)) {
+      xtSecondsBySessionKey.set(`${addDaysISOInternal(weekStartISO, dayIdx)}|${session}`, xt);
+    }
+  }
+
+  const round1 = (n: number) => Math.round(n * 10) / 10;
+  mileageRange = { min: round1(mileageRange.min), max: round1(mileageRange.max) };
+
+  return {
+    mileageRange,
+    xtSecondsRange,
+    goalMileageText: formatCoachWeekMileageTotal(mileageRange),
+    goalXTText: formatCoachWeekXTTotal(xtSecondsRange),
+    xtSecondsBySessionKey,
+  };
 }

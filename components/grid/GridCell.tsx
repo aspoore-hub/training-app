@@ -1,21 +1,8 @@
 import { Platform, Pressable, Text, TextInput, View } from "react-native";
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import type { GridCellBinding } from "./GridTypes";
 
-export function GridCell({
-  binding,
-  value,
-  onChangeText,
-  placeholder,
-  style,
-  numberOfLines = 1,
-  editable = true,
-  gridEditing,
-  editIntent,
-  onEnterEditMode,
-  consumeEditIntent,
-  ...rest
-}: {
+type GridCellProps = {
   binding?: GridCellBinding;
   value?: string;
   onChangeText?: (v: string) => void;
@@ -28,7 +15,55 @@ export function GridCell({
   onEnterEditMode?: () => void;
   consumeEditIntent?: () => void;
   [key: string]: any;
-}) {
+};
+
+function shallowEqualObject(a: any, b: any): boolean {
+  if (Object.is(a, b)) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+    if (!Object.is(a[key], b[key])) return false;
+  }
+  return true;
+}
+
+function sameEditIntent(
+  a?: GridCellProps["editIntent"],
+  b?: GridCellProps["editIntent"]
+): boolean {
+  if (a === b) return true;
+  return a?.mode === b?.mode && String(a?.text ?? "") === String(b?.text ?? "");
+}
+
+function areGridCellPropsEqual(prev: GridCellProps, next: GridCellProps): boolean {
+  const { binding: prevBinding, style: prevStyle, editIntent: prevEditIntent, ...prevRest } = prev;
+  const { binding: nextBinding, style: nextStyle, editIntent: nextEditIntent, ...nextRest } = next;
+  return (
+    String(prevBinding?.cellId ?? "") === String(nextBinding?.cellId ?? "") &&
+    String(prevBinding?.version ?? "") === String(nextBinding?.version ?? "") &&
+    shallowEqualObject(prevStyle, nextStyle) &&
+    sameEditIntent(prevEditIntent, nextEditIntent) &&
+    shallowEqualObject(prevRest, nextRest)
+  );
+}
+
+function GridCellComponent({
+  binding,
+  value,
+  onChangeText,
+  placeholder,
+  style,
+  numberOfLines = 1,
+  editable = true,
+  gridEditing,
+  editIntent,
+  onEnterEditMode,
+  consumeEditIntent,
+  ...rest
+}: GridCellProps) {
   const inputRef = useRef<any>(null);
   const appliedEditIntentRef = useRef<string>("");
   const isWeb = (Platform as any).OS === "web";
@@ -78,6 +113,27 @@ export function GridCell({
   const displayValue = String(value ?? "");
   const resolvedStyle = style ?? {};
   const singleLineEditor = numberOfLines <= 1;
+  const webInputHandlers = isWeb
+    ? {
+        onKeyDown: (e: any) => {
+          const key = String(e?.key ?? e?.nativeEvent?.key ?? "");
+          const shift = !!(e?.shiftKey ?? e?.nativeEvent?.shiftKey);
+          if (key === "Enter") {
+            if (shift && !singleLineEditor) return;
+            e?.preventDefault?.();
+            (e as any).__gridEditorMultiline = !singleLineEditor;
+            (binding?.handlers as any)?.onKeyDown?.(e);
+            return;
+          }
+          if (key === "Tab" || key === "Escape") {
+            e?.preventDefault?.();
+            (binding?.handlers as any)?.onKeyDown?.(e);
+          }
+        },
+        onFocus: (binding?.handlers as any)?.onFocus,
+        onBlur: (binding?.handlers as any)?.onBlur,
+      }
+    : null;
   if (!gridEditing) {
     return (
       <Pressable
@@ -140,14 +196,17 @@ export function GridCell({
       numberOfLines={numberOfLines}
       blurOnSubmit={singleLineEditor}
       onKeyPress={(e: any) => {
-        if (!(isWeb && singleLineEditor)) return;
+        if (!isWeb) return;
         const key = String(e?.nativeEvent?.key ?? "");
         if (key !== "Enter") return;
+        if (!singleLineEditor && (e?.nativeEvent?.shiftKey || e?.shiftKey)) return;
         // Spreadsheet cells are strict single-line inputs on web.
         e?.preventDefault?.();
       }}
       {...rest}
-      {...(Platform.OS === "web" ? (binding?.handlers as any) : null)}
+      {...(Platform.OS === "web" ? (webInputHandlers as any) : null)}
     />
   );
 }
+
+export const GridCell = memo(GridCellComponent, areGridCellPropsEqual);

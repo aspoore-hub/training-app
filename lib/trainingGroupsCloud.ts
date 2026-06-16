@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
+import { requireTeamPermission } from "./teamPermissions";
 
 export type TeamTrainingGroupRow = {
   id: string;
@@ -68,6 +69,7 @@ export async function listTrainingGroupMemberships(): Promise<TeamTrainingGroupM
 
 export async function createTrainingGroup(name: string): Promise<TeamTrainingGroupRow> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("roster.edit", teamId);
   const { data, error } = await supabase
     .from("team_training_groups")
     .insert({ team_id: teamId, name: String(name ?? "").trim() })
@@ -79,6 +81,7 @@ export async function createTrainingGroup(name: string): Promise<TeamTrainingGro
 
 export async function updateTrainingGroupName(groupId: string, name: string): Promise<TeamTrainingGroupRow> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("roster.edit", teamId);
   const { data, error } = await supabase
     .from("team_training_groups")
     .update({ name: String(name ?? "").trim() })
@@ -92,6 +95,7 @@ export async function updateTrainingGroupName(groupId: string, name: string): Pr
 
 export async function setTrainingGroupArchived(groupId: string, archived: boolean): Promise<TeamTrainingGroupRow> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("roster.edit", teamId);
   const { data, error } = await supabase
     .from("team_training_groups")
     .update({ archived_at: archived ? new Date().toISOString() : null })
@@ -108,6 +112,7 @@ export async function replaceTrainingGroupActiveMemberships(
   athleteProfileIds: string[]
 ): Promise<void> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("roster.edit", teamId);
   const cleanAthleteIds = Array.from(
     new Set((athleteProfileIds ?? []).map((id) => String(id ?? "").trim()).filter(Boolean))
   );

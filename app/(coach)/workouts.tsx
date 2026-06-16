@@ -22,7 +22,7 @@ import {
   type PracticeTimeDefaults,
 } from "../../lib/practiceDefaults";
 import { getCurrentTeamId } from "../../lib/team";
-import { fetchMileageCellsForWeek, type TeamMileageCellRow } from "../../lib/mileageCloud";
+import type { TeamMileageCellRow } from "../../lib/mileageCloud";
 import { formatMileageForSheet, getWeekIndex, getWeekStartISO, parseMileageInput } from "../../lib/mileagePlan";
 import {
   listTeamWorkoutBatchHeadersForDate,
@@ -30,6 +30,7 @@ import {
 } from "../../lib/teamWorkoutBatchHeadersCloud";
 import {
   compareAthleteDisplayNamesByLastName,
+  isAthleteEligibleForPlanningDate,
   loadTeamRoster,
   resolveAthleteDisplayName,
   toRosterMapById,
@@ -47,10 +48,15 @@ import {
   updateTeamWorkoutById,
 } from "../../lib/teamWorkoutsCloud";
 import { useAppRuntime } from "../../lib/appState";
-import { isActiveTrainingGroupMembership, teamDataStore } from "../../lib/teamDataStore";
+import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../lib/teamDataStore";
 import type { WorkoutCategory } from "../../lib/types";
+import { canEditTraining, getCurrentTeamRole, type TeamRole } from "../../lib/teamPermissions";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
+const DEBUG_WORKOUTS = false;
+function debugWorkouts(...args: unknown[]) {
+  if (DEBUG_WORKOUTS) console.log(...args);
+}
 
 type SaveState = {
   status: SaveStatus;
@@ -422,6 +428,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
   onRegisterGridApi,
   onOpenFeedbackDetail,
   batchHeaderActiveRef,
+  readOnly,
 }: {
   groupKey: string;
   batchRowKey: string;
@@ -450,6 +457,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
   onRegisterGridApi: (groupKey: string, api: GroupGridApi | null) => void;
   onOpenFeedbackDetail: (row: TeamWorkoutRow, athleteName: string) => void;
   batchHeaderActiveRef: MutableRefObject<boolean>;
+  readOnly: boolean;
 }) {
   const gridId = groupKey;
   const rowIds = useMemo(() => group.rows.map((r) => String(r.id)), [group.rows]);
@@ -508,7 +516,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
   }, [athleteDrafts, group.rows, rowIds]);
 
   const groupGrid = useGridEngine<string, AthleteEditableField>({
-    enabled: Platform.OS === "web",
+    enabled: Platform.OS === "web" && !readOnly,
     rowIds,
     colKeys: ATHLETE_EDIT_FIELDS,
     isEditorHandlingKeys: () => false,
@@ -523,6 +531,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
       return "";
     },
     setValue: (workoutId, field, value) => {
+      if (readOnly) return;
       onEditAthleteField(workoutId, field, value);
     },
     onActivate: () => setActiveGridId(gridId),
@@ -571,7 +580,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
   }, [buildFillSelectedChanges, groupGrid]);
 
   useEffect(() => {
-    onRegisterGridApi(groupKey, {
+      onRegisterGridApi(groupKey, readOnly ? null : {
       copy: async () => {
         await groupGrid.copySelectionToClipboard();
       },
@@ -585,12 +594,12 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
       fillAll: fillAllForGroup,
     });
     return () => onRegisterGridApi(groupKey, null);
-  }, [fillAllForGroup, fillSelectedForGroup, groupGrid, groupKey, onRegisterGridApi]);
+  }, [fillAllForGroup, fillSelectedForGroup, groupGrid, groupKey, onRegisterGridApi, readOnly]);
 
   useEffect(() => {
     if (Platform.OS !== "web") return;
     const handler = (e: any) => {
-      if (batchHeaderActiveRef.current) return;
+      if (readOnly || batchHeaderActiveRef.current) return;
       if (activeGridId !== gridId) return;
       const handled = groupGrid.handleKeyDown(e);
       if (!handled) return;
@@ -601,7 +610,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
     return () => {
       window.removeEventListener("keydown", handler, true);
     };
-  }, [activeGridId, batchHeaderActiveRef, fillSelectedForGroup, gridId, groupGrid]);
+  }, [activeGridId, batchHeaderActiveRef, fillSelectedForGroup, gridId, groupGrid, readOnly]);
 
   return (
     <View style={{ position: "relative", overflow: "visible", zIndex: 1 }}>
@@ -678,6 +687,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
               {Platform.OS === "web" ? (
                 <div
                   onMouseDown={(e: any) => {
+                    if (readOnly) return;
                     e.preventDefault?.();
                     setActiveGridId(gridId);
                     groupGrid.selectRow(workoutId, !!e?.shiftKey);
@@ -689,7 +699,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
                   </Text>
                 </div>
               ) : (
-                <Pressable onPress={() => groupGrid.selectRow(workoutId)} style={{ padding: 4 }}>
+                <Pressable disabled={readOnly} onPress={() => groupGrid.selectRow(workoutId)} style={{ padding: 4 }}>
                   <Text style={{ fontSize: 11, fontWeight: "900", color: rowSelected ? "#1d4ed8" : "#94a3b8" }}>
                     {rowSelected ? "◼" : "◻"}
                   </Text>
@@ -708,7 +718,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
                 overflow: "hidden",
               }}
             >
-              {Platform.OS === "web" && batchId ? (
+              {Platform.OS === "web" && batchId && !readOnly ? (
                 <div
                   draggable
                   onDragStart={(e: any) => {
@@ -900,6 +910,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
               <GridCell
                 value={athleteDraft.location}
                 onChangeText={(v) => groupGrid.applyCellValue(workoutId, "location", v)}
+                editable={!readOnly}
                 style={{ fontSize: 12, fontWeight: "600", color: "#334155", paddingVertical: 3 }}
                 placeholder="Location"
                 numberOfLines={2}
@@ -934,6 +945,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
               <GridCell
                 value={athleteDraft.time_text}
                 onChangeText={(v) => groupGrid.applyCellValue(workoutId, "time_text", v)}
+                editable={!readOnly}
                 style={{ fontSize: 12, fontWeight: "600", color: "#334155", paddingVertical: 3 }}
                 placeholder="Time"
                 numberOfLines={1}
@@ -966,6 +978,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
               <TextInput
                 value={String(prescribedDistanceByWorkoutId[workoutId] ?? "")}
                 onChangeText={(v) => onEditDistanceField(workoutId, v)}
+                editable={!readOnly}
                 placeholder="-"
                 placeholderTextColor="#94a3b8"
                 autoCapitalize="none"
@@ -1004,6 +1017,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
               <GridCell
                 value={athleteDraft.details}
                 onChangeText={(v) => groupGrid.applyCellValue(workoutId, "details", v)}
+                editable={!readOnly}
                 style={{ fontSize: 12, fontWeight: "600", color: "#334155", paddingVertical: 3 }}
                 placeholder="Notes"
                 numberOfLines={2}
@@ -1052,7 +1066,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
                 overflow: "hidden",
               }}
             >
-              {Platform.OS === "web" && batchId ? (
+              {Platform.OS === "web" && batchId && !readOnly ? (
                 <Pressable
                   onPress={() =>
                     setMoveMode({
@@ -1068,15 +1082,17 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
                 </Pressable>
               ) : null}
 
-              <Pressable
-                onPress={() => void onDeleteSingleWorkout(workoutId)}
-                disabled={deletingKey === workoutId}
-                style={{ borderWidth: 1, borderColor: "#f2c4c4", backgroundColor: "#fff0f0", borderRadius: 7, paddingHorizontal: 8, paddingVertical: 4, opacity: deletingKey === workoutId ? 0.6 : 1 }}
-              >
-                <Text style={{ fontSize: 12, fontWeight: "800", color: "#9f1239" }}>
-                  {deletingKey === workoutId ? "Deleting..." : "Delete"}
-                </Text>
-              </Pressable>
+              {!readOnly ? (
+                <Pressable
+                  onPress={() => void onDeleteSingleWorkout(workoutId)}
+                  disabled={deletingKey === workoutId}
+                  style={{ borderWidth: 1, borderColor: "#f2c4c4", backgroundColor: "#fff0f0", borderRadius: 7, paddingHorizontal: 8, paddingVertical: 4, opacity: deletingKey === workoutId ? 0.6 : 1 }}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: "800", color: "#9f1239" }}>
+                    {deletingKey === workoutId ? "Deleting..." : "Delete"}
+                  </Text>
+                </Pressable>
+              ) : null}
 
               <View style={{ alignItems: "flex-end", flexShrink: 1 }}>
                 <InlineSaveStatus status={athleteState?.status ?? "idle"} message={athleteState?.message} size="sm" align="right" />
@@ -1110,7 +1126,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
           <Pressable
             key={`${batchRowKey}-athlete-${workoutId}`}
             onLongPress={() => {
-              if (!batchId) return;
+              if (!batchId || readOnly) return;
               setMoveMode({
                 workoutId,
                 batchKey: batchRowKey,
@@ -1422,6 +1438,7 @@ export default function CoachWorkoutsDay() {
   const flushPendingEditsRef = useRef<() => Promise<void>>(async () => {});
 
   const [loading, setLoading] = useState(true);
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
   const [rowsRaw, setRowsRaw] = useState<TeamWorkoutRow[]>([]);
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
   const [rosterOptions, setRosterOptions] = useState<RosterOption[]>([]);
@@ -1493,6 +1510,7 @@ export default function CoachWorkoutsDay() {
   const [activeGridId, setActiveGridId] = useState<string | null>(null);
   const [highlightBatchKey, setHighlightBatchKey] = useState<string | null>(null);
   const [openAthletePickerBatchKey, setOpenAthletePickerBatchKey] = useState<string | null>(null);
+  const [batchAthletePickerDraftIds, setBatchAthletePickerDraftIds] = useState<string[]>([]);
   const [openGroupCategoryPickerKey, setOpenGroupCategoryPickerKey] = useState<string | null>(null);
   const [removingAthleteId, setRemovingAthleteId] = useState<string | null>(null);
   const [pendingRemovedAthleteKeys, setPendingRemovedAthleteKeys] = useState<Set<string>>(new Set());
@@ -1506,6 +1524,7 @@ export default function CoachWorkoutsDay() {
   const [creatingBatch, setCreatingBatch] = useState(false);
   const [saveSignalTick, setSaveSignalTick] = useState(0);
   const [lastSavedAtMs, setLastSavedAtMs] = useState<number | null>(null);
+  const readOnlyTraining = !canEditTraining(currentTeamRole);
   const justMovedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchHeaderInputRefs = useRef<Record<string, any>>({});
   const batchHeaderRegionRefs = useRef<Record<string, any>>({});
@@ -1521,6 +1540,21 @@ export default function CoachWorkoutsDay() {
 
   const bumpSaveSignal = useCallback(() => {
     setSaveSignalTick((prev) => prev + 1);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    getCurrentTeamRole()
+      .then((role) => {
+        if (active) setCurrentTeamRole(role);
+      })
+      .catch((error) => {
+        console.warn("[coach-workouts] role load failed", error);
+        if (active) setCurrentTeamRole(null);
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   const markSavedNow = useCallback(() => {
@@ -1636,10 +1670,67 @@ export default function CoachWorkoutsDay() {
     []
   );
 
-  const refreshMileageDistanceIndex = useCallback(async () => {
+  const mileageLookupEntries = useMemo(() => {
+    const entries: Array<{
+      workoutId: string;
+      athleteId: string;
+      effectiveDate: string;
+      effectiveSession: "AM" | "PM";
+      weekStartISO: string;
+      dayIdx: number;
+      lookupKey: string;
+    }> = [];
+
+    rowsRaw.forEach((row) => {
+      const workoutId = String(row.id ?? "");
+      if (!workoutId) return;
+      const rowDraft = athleteDrafts[workoutId];
+      const batchKey = row.batch_id ? getBatchKey(row) : null;
+      const batchDraft = batchKey ? batchDrafts[batchKey] : undefined;
+      const meta = resolveMileageLookupMeta(row, rowDraft, batchDraft);
+      if (!meta) return;
+      const session = meta.effectiveSession === "AM" ? "AM" : "PM";
+      entries.push({
+        workoutId,
+        athleteId: meta.athleteId,
+        effectiveDate: meta.effectiveDate,
+        effectiveSession: session,
+        weekStartISO: meta.weekStartISO,
+        dayIdx: meta.dayIdx,
+        lookupKey: buildMileageLookupKey(meta.athleteId, meta.weekStartISO, meta.dayIdx, session),
+      });
+    });
+
+    entries.sort((a, b) => {
+      const byWorkout = a.workoutId.localeCompare(b.workoutId);
+      if (byWorkout !== 0) return byWorkout;
+      return a.lookupKey.localeCompare(b.lookupKey);
+    });
+
+    return entries;
+  }, [athleteDrafts, batchDrafts, resolveMileageLookupMeta, rowsRaw]);
+
+  const mileageLookupSignature = useMemo(
+    () =>
+      mileageLookupEntries
+        .map((entry) =>
+          [
+            entry.workoutId,
+            entry.athleteId,
+            entry.effectiveDate,
+            entry.effectiveSession,
+            entry.weekStartISO,
+            entry.dayIdx,
+          ].join("|")
+        )
+        .join("::"),
+    [mileageLookupEntries]
+  );
+
+  const refreshMileageDistanceIndex = useCallback(async (lookupEntries: typeof mileageLookupEntries) => {
     const requestId = ++mileageDistanceRequestRef.current;
 
-    if (rowsRaw.length === 0) {
+    if (lookupEntries.length === 0) {
       if (requestId !== mileageDistanceRequestRef.current) return;
       setMileageDistanceIndex(new Map());
       return;
@@ -1653,16 +1744,7 @@ export default function CoachWorkoutsDay() {
     }
 
     const requiredWeeks = new Set<string>();
-
-    rowsRaw.forEach((row) => {
-      const workoutId = String(row.id);
-      const rowDraft = athleteDrafts[workoutId];
-      const batchKey = row.batch_id ? getBatchKey(row) : null;
-      const batchDraft = batchKey ? batchDrafts[batchKey] : undefined;
-      const meta = resolveMileageLookupMeta(row, rowDraft, batchDraft);
-      if (!meta) return;
-      requiredWeeks.add(meta.weekStartISO);
-    });
+    lookupEntries.forEach((entry) => requiredWeeks.add(entry.weekStartISO));
 
     if (requiredWeeks.size === 0) {
       if (requestId !== mileageDistanceRequestRef.current) return;
@@ -1672,7 +1754,9 @@ export default function CoachWorkoutsDay() {
 
     const loadByWeek = await Promise.all(
       Array.from(requiredWeeks).map(async (weekStartISO) => {
-        const cells: TeamMileageCellRow[] = await fetchMileageCellsForWeek(weekStartISO);
+        await teamDataStore.actions.loadMileageWeek(weekStartISO);
+        const mileageState = teamDataStore.getState();
+        const cells = (mileageState.mileageCellsByWeek[weekStartISO] ?? []) as TeamMileageCellRow[];
         return { weekStartISO, cells };
       })
     );
@@ -1691,40 +1775,36 @@ export default function CoachWorkoutsDay() {
 
     if (requestId !== mileageDistanceRequestRef.current) return;
     setMileageDistanceIndex(nextIndex);
-  }, [athleteDrafts, batchDrafts, ensureTeamId, rowsRaw, resolveMileageLookupMeta]);
+  }, [ensureTeamId]);
 
   const workoutMileageMetaByWorkoutId = useMemo(() => {
     const next: Record<
       string,
       { athleteId: string; weekStartISO: string; dayIdx: number; session: "AM" | "PM"; lookupKey: string } | null
     > = {};
-    rowsRaw.forEach((row) => {
-      const workoutId = String(row.id ?? "");
-      if (!workoutId) return;
-      const rowDraft = athleteDrafts[workoutId];
-      const batchKey = row.batch_id ? getBatchKey(row) : null;
-      const batchDraft = batchKey ? batchDrafts[batchKey] : undefined;
-      const meta = resolveMileageLookupMeta(row, rowDraft, batchDraft);
-      if (!meta) {
-        next[workoutId] = null;
-        return;
-      }
-      const session = meta.effectiveSession === "AM" ? "AM" : "PM";
-      next[workoutId] = {
+    const seenWorkoutIds = new Set<string>();
+    mileageLookupEntries.forEach((meta) => {
+      seenWorkoutIds.add(meta.workoutId);
+      next[meta.workoutId] = {
         athleteId: meta.athleteId,
         weekStartISO: meta.weekStartISO,
         dayIdx: meta.dayIdx,
-        session,
-        lookupKey: buildMileageLookupKey(meta.athleteId, meta.weekStartISO, meta.dayIdx, session),
+        session: meta.effectiveSession,
+        lookupKey: meta.lookupKey,
       };
     });
+    rowsRaw.forEach((row) => {
+      const workoutId = String(row.id ?? "");
+      if (!workoutId) return;
+      if (!seenWorkoutIds.has(workoutId)) next[workoutId] = null;
+    });
     return next;
-  }, [athleteDrafts, batchDrafts, resolveMileageLookupMeta, rowsRaw]);
+  }, [mileageLookupEntries, rowsRaw]);
 
   const loadDay = useCallback(
     async (targetDateISO: string, requestVersion?: number) => {
       const isLatestRequest = () => requestVersion == null || requestVersion === loadVersionRef.current;
-      console.log("[workouts] loadDay:start", { targetDateISO });
+      debugWorkouts("[workouts] loadDay:start", { targetDateISO });
       if (!targetDateISO) {
         if (!isLatestRequest()) return false;
         setRowsRaw([]);
@@ -1745,13 +1825,13 @@ export default function CoachWorkoutsDay() {
         listTeamWorkoutBatchHeadersForDate(targetDateISO),
       ]);
       if (!isLatestRequest()) {
-        console.log("[workouts] loadDay:staleSkipped", { targetDateISO, requestVersion });
+        debugWorkouts("[workouts] loadDay:staleSkipped", { targetDateISO, requestVersion });
         return false;
       }
 
       const persistedForDay = persistedDraftCache[targetDateISO];
       let nextRows = workoutRows;
-      console.log("[workouts] loadDay:rows", { count: nextRows.length });
+      debugWorkouts("[workouts] loadDay:rows", { count: nextRows.length });
       const batchHeaderNotesByLookup = new Map<string, { notes: string; updatedAt: number }>();
       (Array.isArray(batchHeaderRows) ? batchHeaderRows : []).forEach((row) => {
         const batchId = String(row.batch_id ?? "").trim();
@@ -1900,7 +1980,7 @@ export default function CoachWorkoutsDay() {
       setBatchSaveState({});
       setAthleteDrafts(nextAthleteDrafts);
       athleteDraftsRef.current = nextAthleteDrafts;
-      console.log("[workouts] loadDay:stateApplied", {
+      debugWorkouts("[workouts] loadDay:stateApplied", {
         batchDraftCount: Object.keys(nextBatchDrafts).length,
         athleteDraftCount: Object.keys(nextAthleteDrafts).length,
       });
@@ -1936,7 +2016,7 @@ export default function CoachWorkoutsDay() {
       const workoutId = String(row.id);
       const meta = resolveMileageLookupMeta(row, rowDraft, batchDraft);
       if (!meta) {
-        console.log("[workouts-distance]", {
+        debugWorkouts("[workouts-distance]", {
           workoutId,
           athleteId: String(row.athlete_profile_id ?? "").trim(),
           effectiveDate: null,
@@ -1959,7 +2039,7 @@ export default function CoachWorkoutsDay() {
       const matchedValue = mileageDistanceIndex.get(key);
       const display = hasMatch ? formatMileageForSheet(matchedValue as any) || "" : "";
 
-      console.log("[workouts-distance]", {
+      debugWorkouts("[workouts-distance]", {
         athleteId,
         effectiveDate,
         effectiveSession,
@@ -1975,8 +2055,8 @@ export default function CoachWorkoutsDay() {
   );
 
   useEffect(() => {
-    void refreshMileageDistanceIndex();
-  }, [athleteDrafts, batchDrafts, rowsRaw, refreshMileageDistanceIndex]);
+    void refreshMileageDistanceIndex(mileageLookupEntries);
+  }, [mileageLookupSignature, refreshMileageDistanceIndex]);
 
   const prescribedDistanceByWorkoutId = useMemo(() => {
     const next: Record<string, string> = {};
@@ -2115,7 +2195,7 @@ export default function CoachWorkoutsDay() {
   useEffect(() => {
     const dirtyBatchCount = Object.values(batchDirtyFields).filter((dirty) => Object.keys(dirty ?? {}).length > 0).length;
     if (dirtyBatchCount === 0) return;
-    console.log("[workouts] rowsRaw changed while batch dirty", {
+    debugWorkouts("[workouts] rowsRaw changed while batch dirty", {
       dirtyBatchCount,
       rowCount: rowsRaw.length,
     });
@@ -2124,7 +2204,7 @@ export default function CoachWorkoutsDay() {
   useEffect(() => {
     const dirtyBatchCount = Object.values(batchDirtyFields).filter((dirty) => Object.keys(dirty ?? {}).length > 0).length;
     if (dirtyBatchCount === 0) return;
-    console.log("[workouts] athleteDrafts changed while batch dirty", {
+    debugWorkouts("[workouts] athleteDrafts changed while batch dirty", {
       dirtyBatchCount,
       athleteDraftCount: Object.keys(athleteDrafts).length,
     });
@@ -2429,11 +2509,51 @@ export default function CoachWorkoutsDay() {
     return map;
   }, [teamStore.athleteSeasonOverrides]);
 
+  const selectedSeasonForPlanning = useMemo(() => {
+    const selectedId = String(selectedSeasonId ?? "").trim();
+    if (!selectedId) return null;
+    return (Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []).find(
+      (season) => String(season?.id ?? "").trim() === selectedId
+    ) ?? null;
+  }, [selectedSeasonId, teamStore.teamSeasons]);
+
+  const getEligibleRosterOptionsForDate = useCallback(
+    (dateISO: string) => {
+      const normalizedDate = String(dateISO ?? "").trim();
+      return activeRosterOptions.filter((athlete) => {
+        const athleteId = String((athlete as any)?.id ?? "").trim();
+        return isAthleteEligibleForPlanningDate({
+          athlete,
+          dateISO: normalizedDate,
+          selectedSeason: selectedSeasonForPlanning,
+          athleteSeasonOverride:
+            athleteSeasonOverridesBySeasonAndAthlete.get(
+              `${String(selectedSeasonForPlanning?.id ?? "").trim()}:${athleteId}`
+            ) ?? null,
+          selectedTrainingGroupIds,
+          trainingGroupMemberships: teamStore.trainingGroupMemberships,
+          isAthleteExcludedFromSeason: (candidateAthleteId, seasonId) =>
+            isAthleteExcludedFromSeason(
+              candidateAthleteId,
+              seasonId,
+              teamStore.athleteSeasonOverrides
+            ),
+        });
+      });
+    },
+    [
+      activeRosterOptions,
+      athleteSeasonOverridesBySeasonAndAthlete,
+      selectedSeasonForPlanning,
+      selectedTrainingGroupIds,
+      teamStore.athleteSeasonOverrides,
+      teamStore.trainingGroupMemberships,
+    ]
+  );
+
   const filteredRowsRaw = useMemo(() => {
     const selectedAthleteSet = new Set(selectedAthleteIds);
-    const selectedSeason = selectedSeasonId
-      ? (teamStore.teamSeasons ?? []).find((season) => String(season?.id ?? "").trim() === String(selectedSeasonId ?? "").trim()) ?? null
-      : null;
+    const selectedSeason = selectedSeasonForPlanning;
     return rowsRaw.filter((row) => {
       const athleteId = String(row.athlete_profile_id ?? "").trim();
       const athletePass = selectedAthleteIds.length === 0 ? true : selectedAthleteSet.has(athleteId);
@@ -2457,10 +2577,9 @@ export default function CoachWorkoutsDay() {
     athleteSeasonOverridesBySeasonAndAthlete,
     rowsRaw,
     selectedAthleteIds,
-    selectedSeasonId,
+    selectedSeasonForPlanning,
     selectedTrainingGroupAthleteIds,
     selectedTrainingGroupIds.length,
-    teamStore.teamSeasons,
   ]);
 
   const hasActiveDisplayFilters =
@@ -2923,7 +3042,7 @@ export default function CoachWorkoutsDay() {
 
       if (Object.keys(payload).length === 0) return;
 
-      console.log("[workouts] commitBatchEdit:start", {
+      debugWorkouts("[workouts] commitBatchEdit:start", {
         batchKey,
         dirtyKeys,
         payload,
@@ -2966,7 +3085,7 @@ export default function CoachWorkoutsDay() {
         const currentGeneration = batchDraftGenerationRef.current[batchKey] ?? 0;
         const isLatest = expectedGeneration == null || currentGeneration === expectedGeneration;
         if (!isLatest) {
-          console.log("[workouts] commitBatchEdit:staleResultIgnored", {
+          debugWorkouts("[workouts] commitBatchEdit:staleResultIgnored", {
             batchKey,
             expectedGeneration,
             currentGeneration,
@@ -2981,7 +3100,7 @@ export default function CoachWorkoutsDay() {
           setBatchSavedSoonIdle(batchKey);
           markSavedNow();
         }
-        console.log("[workouts] commitBatchEdit:success", { batchKey, dirtyKeys });
+        debugWorkouts("[workouts] commitBatchEdit:success", { batchKey, dirtyKeys });
         const nextDateISO = String(draft.date_iso ?? "").trim();
         if (!isUnmountingRef.current && isISODateOnly(nextDateISO) && nextDateISO !== dayISO) {
           router.replace({
@@ -2990,7 +3109,7 @@ export default function CoachWorkoutsDay() {
           });
         }
       } catch (e: any) {
-        console.log("[workouts] commitBatchEdit:error", {
+        debugWorkouts("[workouts] commitBatchEdit:error", {
           batchKey,
           message: String(e?.message ?? e ?? "Save failed"),
         });
@@ -3072,7 +3191,7 @@ export default function CoachWorkoutsDay() {
         const currentGeneration = athleteDraftGenerationRef.current[workoutId] ?? 0;
         const isLatest = expectedGeneration == null || currentGeneration === expectedGeneration;
         if (!isLatest) {
-          console.log("[workouts] commitAthleteEdit:staleResultIgnored", {
+          debugWorkouts("[workouts] commitAthleteEdit:staleResultIgnored", {
             workoutId,
             expectedGeneration,
             currentGeneration,
@@ -3185,7 +3304,7 @@ export default function CoachWorkoutsDay() {
     const batchKeysToFlush = Array.from(new Set([...timedBatchKeys, ...dirtyBatchKeys]));
     if (batchKeysToFlush.length === 0) return;
 
-    console.log("[workouts] flushAllPendingBatchSaves", {
+    debugWorkouts("[workouts] flushAllPendingBatchSaves", {
       count: batchKeysToFlush.length,
       keys: batchKeysToFlush,
     });
@@ -3216,7 +3335,7 @@ export default function CoachWorkoutsDay() {
     const workoutIds = Array.from(new Set([...timedWorkoutIds, ...changedWorkoutIds]));
     if (workoutIds.length === 0) return;
 
-    console.log("[workouts] flushAllPendingAthleteSaves", { count: workoutIds.length });
+    debugWorkouts("[workouts] flushAllPendingAthleteSaves", { count: workoutIds.length });
     for (const workoutId of workoutIds) {
       const expectedGeneration = athleteDraftGenerationRef.current[workoutId] ?? 0;
       await commitAthleteEdit(workoutId, expectedGeneration);
@@ -3393,7 +3512,7 @@ export default function CoachWorkoutsDay() {
   useEffect(() => {
     return () => {
       isUnmountingRef.current = true;
-      console.log("[workouts] unmount:flushing pending saves");
+      debugWorkouts("[workouts] unmount:flushing pending saves");
       void (async () => {
         await flushAllPendingBatchSaves();
         await flushAllPendingBatchRoutineSaves();
@@ -3407,7 +3526,7 @@ export default function CoachWorkoutsDay() {
   }, [flushAllPendingAthleteSaves, flushAllPendingBatchRoutineSaves, flushAllPendingBatchSaves]);
 
   const onEditBatchField = (batchKey: string, field: BatchEditableField, value: string | string[]) => {
-    console.log("[workouts] onEditBatchField", { batchKey, field, value });
+    debugWorkouts("[workouts] onEditBatchField", { batchKey, field, value });
     const parsed = parseBatchKey(batchKey);
     const matchingRows = rowsRaw.filter((w) =>
       parsed.isBatch
@@ -3592,7 +3711,7 @@ export default function CoachWorkoutsDay() {
     bumpBatchDraftGeneration(batchKey);
     matchingWorkoutIds.forEach((workoutId) => bumpAthleteDraftGeneration(workoutId));
 
-    console.log("[workouts] onEditBatchField:applied", {
+    debugWorkouts("[workouts] onEditBatchField:applied", {
       batchKey,
       field,
       updatedRows: matchingWorkoutIds.length,
@@ -3833,7 +3952,7 @@ export default function CoachWorkoutsDay() {
         sourceBatchHeaderNotes = normalizedHeaderNotes || null;
       }
 
-      console.log("[workouts] duplicateBatchOrSingle", {
+      debugWorkouts("[workouts] duplicateBatchOrSingle", {
         sourceBatchId: row.batchId ?? null,
         newBatchId,
         sourceTitle: String(row.sample.title ?? "").trim(),
@@ -3994,7 +4113,11 @@ export default function CoachWorkoutsDay() {
   const openAthletePickerOptions = useMemo(() => {
     if (!openAthletePickerBatch) return [];
     const rosterById = new Map<string, TeamRosterAthlete>();
-    activeRosterOptions.forEach((athlete) => {
+    const effectiveBatchDateISO = String(
+      (batchDrafts[openAthletePickerBatch.key]?.date_iso ?? openAthletePickerBatch.sample.date_iso ?? dayISO) ?? ""
+    ).trim();
+    const eligibleRosterOptions = getEligibleRosterOptionsForDate(effectiveBatchDateISO);
+    eligibleRosterOptions.forEach((athlete) => {
       const athleteId = String((athlete as any)?.id ?? "").trim();
       if (!athleteId) return;
       rosterById.set(athleteId, athlete);
@@ -4025,9 +4148,23 @@ export default function CoachWorkoutsDay() {
     athletePickerQuery,
     openAthletePickerBatch,
     openAthletePickerSelectedAthleteIds,
-    activeRosterOptions,
+    batchDrafts,
+    dayISO,
+    getEligibleRosterOptionsForDate,
     rosterNameById,
   ]);
+
+  useEffect(() => {
+    if (!openAthletePickerBatch) return;
+    const selectedIds = Array.from(
+      new Set(
+        (openAthletePickerBatch.workouts ?? [])
+          .map((w) => String(w.athlete_profile_id ?? "").trim())
+          .filter(Boolean)
+      )
+    );
+    setBatchAthletePickerDraftIds(selectedIds);
+  }, [openAthletePickerBatch]);
 
   useEffect(() => {
     if (!openAthletePickerBatchKey) return;
@@ -4048,7 +4185,8 @@ export default function CoachWorkoutsDay() {
         return;
       }
 
-      if (activeRosterOptions.length === 0) {
+      const eligibleRosterOptions = getEligibleRosterOptionsForDate(dayISO);
+      if (eligibleRosterOptions.length === 0) {
         Alert.alert("Create failed", "No athletes found on roster.");
         return;
       }
@@ -4057,7 +4195,7 @@ export default function CoachWorkoutsDay() {
       setPracticeDefaults(freshDefaults);
       const newBatchId = createBatchId(dayISO);
       const defaultsForDay = resolveDefaultSessionSlotAndTimeForDate(dayISO, freshDefaults, "AM", "");
-      const payload = activeRosterOptions
+      const payload = eligibleRosterOptions
         .map((athlete) => String((athlete as any)?.id ?? "").trim())
         .filter(Boolean)
         .map((athleteId) => ({
@@ -4099,7 +4237,7 @@ export default function CoachWorkoutsDay() {
     } finally {
       setCreatingBatch(false);
     }
-  }, [activeRosterOptions, creatingBatch, dayISO, ensureTeamId, practiceDefaults, refreshDayGuarded]);
+  }, [creatingBatch, dayISO, ensureTeamId, getEligibleRosterOptionsForDate, practiceDefaults, refreshDayGuarded]);
 
   const handleRemoveAthleteFromBatch = useCallback(
     async (batchRow: WorksheetBatchRow, athleteId: string) => {
@@ -4426,12 +4564,47 @@ export default function CoachWorkoutsDay() {
     [batchDrafts, dayISO, replaceBatchRows]
   );
 
+  const applyBatchAthletePickerSelection = useCallback(async () => {
+    if (!openAthletePickerBatch) return;
+    const targetAthleteIds = Array.from(
+      new Set(batchAthletePickerDraftIds.map((id) => String(id ?? "").trim()).filter(Boolean))
+    );
+    if (targetAthleteIds.length === 0) {
+      Alert.alert("Selection required", "A batch must contain at least one athlete.");
+      return;
+    }
+    const previousRowsSnapshot = rowsRaw;
+    applyBatchAthleteSelectionOptimistic(openAthletePickerBatch, targetAthleteIds);
+    setAthleteSelectionSyncByBatchKey((prev) => ({ ...prev, [openAthletePickerBatch.key]: true }));
+    try {
+      await syncBatchAthleteSelection(openAthletePickerBatch, targetAthleteIds, previousRowsSnapshot);
+      setOpenAthletePickerBatchKey(null);
+      setAthletePickerQuery("");
+    } catch (e: any) {
+      setRowsRaw(previousRowsSnapshot);
+      patchAppRuntime({ lastSaveError: String(e?.message ?? e ?? "Could not update batch athletes.") });
+      Alert.alert("Update failed", e?.message ?? "Could not update batch athletes.");
+    } finally {
+      setAthleteSelectionSyncByBatchKey((prev) => ({ ...prev, [openAthletePickerBatch.key]: false }));
+    }
+  }, [
+    applyBatchAthleteSelectionOptimistic,
+    batchAthletePickerDraftIds,
+    openAthletePickerBatch,
+    patchAppRuntime,
+    rowsRaw,
+    syncBatchAthleteSelection,
+  ]);
+
   const selectAllAthletesForBatch = useCallback(
     async (batchRow: WorksheetBatchRow) => {
       const batchId = String(batchRow.batchId ?? "").trim();
       if (!batchId) return;
       if (athleteSelectionSyncByBatchKey[batchRow.key]) return;
-      const allRosterIds = activeRosterOptions
+      const effectiveBatchDateISO = String(
+        (batchDrafts[batchRow.key]?.date_iso ?? batchRow.sample.date_iso ?? dayISO) ?? ""
+      ).trim();
+      const allRosterIds = getEligibleRosterOptionsForDate(effectiveBatchDateISO)
         .map((r) => String((r as any)?.id ?? "").trim())
         .filter(Boolean);
       if (allRosterIds.length === 0) return;
@@ -4450,7 +4623,16 @@ export default function CoachWorkoutsDay() {
         setAthleteSelectionSyncByBatchKey((prev) => ({ ...prev, [batchRow.key]: false }));
       }
     },
-    [activeRosterOptions, applyBatchAthleteSelectionOptimistic, athleteSelectionSyncByBatchKey, patchAppRuntime, rowsRaw, syncBatchAthleteSelection]
+    [
+      applyBatchAthleteSelectionOptimistic,
+      athleteSelectionSyncByBatchKey,
+      batchDrafts,
+      dayISO,
+      getEligibleRosterOptionsForDate,
+      patchAppRuntime,
+      rowsRaw,
+      syncBatchAthleteSelection,
+    ]
   );
 
   const clearAthletesForBatch = useCallback(
@@ -4596,7 +4778,7 @@ export default function CoachWorkoutsDay() {
               Athlete
             </Text>
             <Pressable
-              onPress={() => setAthleteFilterOpen((prev) => !prev)}
+              onPress={() => setAthleteFilterOpen(true)}
               style={{
                 height: 32,
                 borderWidth: 1,
@@ -4617,79 +4799,6 @@ export default function CoachWorkoutsDay() {
                 {athleteFilterOpen ? "▴" : "▾"}
               </Text>
             </Pressable>
-            {athleteFilterOpen ? (
-              <View
-                style={{
-                  position: "absolute",
-                  top: 40,
-                  left: 0,
-                  right: 0,
-                  borderWidth: 1,
-                  borderColor: "#dbe2ee",
-                  borderRadius: 8,
-                  backgroundColor: "#fff",
-                  zIndex: 140,
-                  ...(Platform.OS === "android" ? { elevation: 8 } : null),
-                }}
-              >
-                <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
-                  <Pressable
-                    onPress={() => {
-                      setSelectedAthleteIds([]);
-                      setAthleteFilterOpen(false);
-                    }}
-                    style={{
-                      borderBottomWidth: 1,
-                      borderBottomColor: "#edf2f7",
-                      paddingHorizontal: 10,
-                      paddingVertical: 8,
-                      backgroundColor: selectedAthleteIds.length === 0 ? "#eff6ff" : "#fff",
-                    }}
-                  >
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>All athletes (clear)</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => {
-                      setSelectedAthleteIds(athleteFilterOptions.map((option) => option.id));
-                      setAthleteFilterOpen(false);
-                    }}
-                    style={{
-                      borderBottomWidth: 1,
-                      borderBottomColor: "#edf2f7",
-                      paddingHorizontal: 10,
-                      paddingVertical: 8,
-                      backgroundColor: "#fff",
-                    }}
-                  >
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>Select all</Text>
-                  </Pressable>
-                  {athleteFilterOptions.map((option) => (
-                    <Pressable
-                      key={`workouts-athlete-filter-${option.id}`}
-                      onPress={() => {
-                        setSelectedAthleteIds((prev) =>
-                          prev.includes(option.id)
-                            ? prev.filter((id) => id !== option.id)
-                            : [...prev, option.id]
-                        );
-                      }}
-                      style={{
-                        borderBottomWidth: 1,
-                        borderBottomColor: "#edf2f7",
-                        paddingHorizontal: 10,
-                        paddingVertical: 8,
-                        backgroundColor: selectedAthleteIds.includes(option.id) ? "#eff6ff" : "#fff",
-                      }}
-                    >
-                      <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
-                        {selectedAthleteIds.includes(option.id) ? "☑ " : "☐ "}
-                        {option.label}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </ScrollView>
-              </View>
-            ) : null}
           </View>
 
           <View style={{ minWidth: 210, position: "relative", zIndex: 115 }}>
@@ -4725,7 +4834,7 @@ export default function CoachWorkoutsDay() {
               Season
             </Text>
             <Pressable
-              onPress={() => setSeasonFilterOpen((prev) => !prev)}
+              onPress={() => setSeasonFilterOpen(true)}
               style={{
                 height: 32,
                 borderWidth: 1,
@@ -4746,61 +4855,6 @@ export default function CoachWorkoutsDay() {
                 {seasonFilterOpen ? "▴" : "▾"}
               </Text>
             </Pressable>
-            {seasonFilterOpen ? (
-              <View
-                style={{
-                  position: "absolute",
-                  top: 40,
-                  left: 0,
-                  right: 0,
-                  borderWidth: 1,
-                  borderColor: "#dbe2ee",
-                  borderRadius: 8,
-                  backgroundColor: "#fff",
-                  zIndex: 140,
-                  ...(Platform.OS === "android" ? { elevation: 8 } : null),
-                }}
-              >
-                <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
-                  <Pressable
-                    onPress={() => {
-                      void teamDataStore.actions.setSharedSelectedSeasonId(null);
-                      setSeasonFilterOpen(false);
-                    }}
-                    style={{
-                      borderBottomWidth: 1,
-                      borderBottomColor: "#edf2f7",
-                      paddingHorizontal: 10,
-                      paddingVertical: 8,
-                      backgroundColor: !selectedSeasonId ? "#eff6ff" : "#fff",
-                    }}
-                  >
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>All seasons (clear)</Text>
-                  </Pressable>
-                  {seasonFilterOptions.map((option) => (
-                    <Pressable
-                      key={`workouts-season-filter-${option.id}`}
-                      onPress={() => {
-                        void teamDataStore.actions.setSharedSelectedSeasonId(option.id);
-                        setSeasonFilterOpen(false);
-                      }}
-                      style={{
-                        borderBottomWidth: 1,
-                        borderBottomColor: "#edf2f7",
-                        paddingHorizontal: 10,
-                        paddingVertical: 8,
-                        backgroundColor: selectedSeasonId === option.id ? "#eff6ff" : "#fff",
-                      }}
-                    >
-                      <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
-                        {selectedSeasonId === option.id ? "◉ " : "○ "}
-                        {option.label}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </ScrollView>
-              </View>
-            ) : null}
             <Text style={{ fontSize: 10, fontWeight: "700", color: "#64748b", marginTop: 4, marginLeft: 4 }}>
               Uses athlete-specific dates where set.
             </Text>
@@ -4838,25 +4892,33 @@ export default function CoachWorkoutsDay() {
             <Text style={{ fontSize: 12, fontWeight: "800", color: "#24334f" }}>Reload Day</Text>
           </Pressable>
 
-          <Pressable
-            onPress={() => void handleQuickCreateBatch()}
-            disabled={creatingBatch}
-            style={{
-              borderWidth: 1,
-              borderColor: "#0f172a",
-              backgroundColor: "#0f172a",
-              borderRadius: 8,
-              paddingHorizontal: 12,
-              paddingVertical: 6,
-              opacity: creatingBatch ? 0.65 : 1,
-            }}
-          >
-            <Text style={{ fontSize: 12, fontWeight: "900", color: "#fff" }}>
-              {creatingBatch ? "Creating..." : "Create Session"}
-            </Text>
-          </Pressable>
+          {!readOnlyTraining ? (
+            <Pressable
+              onPress={() => void handleQuickCreateBatch()}
+              disabled={creatingBatch}
+              style={{
+                borderWidth: 1,
+                borderColor: "#0f172a",
+                backgroundColor: "#0f172a",
+                borderRadius: 8,
+                paddingHorizontal: 12,
+                paddingVertical: 6,
+                opacity: creatingBatch ? 0.65 : 1,
+              }}
+            >
+              <Text style={{ fontSize: 12, fontWeight: "900", color: "#fff" }}>
+                {creatingBatch ? "Creating..." : "Create Session"}
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       </View>
+
+      {readOnlyTraining ? (
+        <View style={{ marginHorizontal: 10, marginTop: 8, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 10, backgroundColor: "#f8fafc", paddingHorizontal: 10, paddingVertical: 8 }}>
+          <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Viewer access: editing is disabled.</Text>
+        </View>
+      ) : null}
 
       <ScrollView
         ref={workoutsScrollRef}
@@ -4965,6 +5027,13 @@ export default function CoachWorkoutsDay() {
               const batchOverlayZIndex = groupCategoryPickerOpenForBatch ? 50000 : batchHasOpenOverlay ? 200 : 1;
               const isFirstBatch = index === 0;
               const isLastBatch = index === worksheetBatchesForDisplay.length - 1;
+              const visibleCount = batchRow.workouts.filter((row) => row.athlete_visible !== false).length;
+              const visibilityLabel =
+                visibleCount === batchRow.workouts.length
+                  ? "Published"
+                  : visibleCount === 0
+                    ? "Hidden"
+                    : "Mixed";
               return (
                 <View
                   key={batchRow.key}
@@ -5025,8 +5094,17 @@ export default function CoachWorkoutsDay() {
                         backgroundColor: BATCH_HEADER_CAPTION_BG,
                       }}
                     >
-                      <View style={{ flex: 1, paddingHorizontal: 8, paddingVertical: 3 }}>
+                      <View style={{ flex: 1, paddingHorizontal: 8, paddingVertical: 3, flexDirection: "row", alignItems: "center", gap: 6 }}>
                         <Text style={{ fontSize: 9, fontWeight: "800", color: BATCH_GROUP_CAPTION, letterSpacing: 0.2 }}>Core</Text>
+                        <Text
+                          style={{
+                            fontSize: 9,
+                            fontWeight: "900",
+                            color: visibilityLabel === "Published" ? "#166534" : visibilityLabel === "Hidden" ? "#991b1b" : "#92400e",
+                          }}
+                        >
+                          {visibilityLabel}
+                        </Text>
                       </View>
                       <View style={{ width: (COL.category + 46) * 3, paddingHorizontal: 8, paddingVertical: 3, borderLeftWidth: 2, borderLeftColor: BATCH_GROUP_DIVIDER }}>
                         <Text style={{ fontSize: 9, fontWeight: "800", color: BATCH_GROUP_CAPTION, letterSpacing: 0.2 }}>Routines</Text>
@@ -5070,6 +5148,7 @@ export default function CoachWorkoutsDay() {
                                 if (s === "AM") batchHeaderInputRefs.current[`${batchRow.key}:session`] = el;
                               }}
                               onPress={() => onEditBatchField(batchRow.key, "session", s)}
+                              disabled={readOnlyTraining}
                               {...(Platform.OS === "web"
                                 ? ({
                                     tabIndex: 0,
@@ -5100,6 +5179,7 @@ export default function CoachWorkoutsDay() {
                         <TextCellEditor
                           value={batchDraft.time_text}
                           onChangeText={(v) => onEditBatchField(batchRow.key, "time_text", v)}
+                          editable={!readOnlyTraining}
                           inputRef={(el: any) => {
                             batchHeaderInputRefs.current[`${batchRow.key}:time`] = el;
                           }}
@@ -5119,7 +5199,11 @@ export default function CoachWorkoutsDay() {
                           ref={(el) => {
                             batchHeaderInputRefs.current[`${batchRow.key}:date`] = el;
                           }}
-                          onPress={() => openBatchDatePicker(batchRow.key, batchDraft.date_iso)}
+                          onPress={() => {
+                            if (readOnlyTraining) return;
+                            openBatchDatePicker(batchRow.key, batchDraft.date_iso);
+                          }}
+                          disabled={readOnlyTraining}
                           style={{
                             minHeight: 28,
                             borderWidth: 1,
@@ -5158,6 +5242,7 @@ export default function CoachWorkoutsDay() {
                         <TextCellEditor
                           value={batchDraft.location}
                           onChangeText={(v) => onEditBatchField(batchRow.key, "location", v)}
+                          editable={!readOnlyTraining}
                           inputRef={(el: any) => {
                             batchHeaderInputRefs.current[`${batchRow.key}:location`] = el;
                           }}
@@ -5176,6 +5261,7 @@ export default function CoachWorkoutsDay() {
                         <TextCellEditor
                           value={batchDraft.title}
                           onChangeText={(v) => onEditBatchField(batchRow.key, "title", v)}
+                          editable={!readOnlyTraining}
                           inputRef={(el: any) => {
                             batchHeaderInputRefs.current[`${batchRow.key}:title`] = el;
                           }}
@@ -5207,16 +5293,22 @@ export default function CoachWorkoutsDay() {
                             batchHeaderInputRefs.current[`${batchRow.key}:athletes`] = el;
                           }}
                           onPress={() => {
+                            if (readOnlyTraining) return;
                             if (!batchRow.batchId) return;
-                            const nextOpen = athletePickerOpen ? null : batchRow.key;
-                            if (!nextOpen && openBatchPicker?.batchKey === batchRow.key) {
-                              setOpenBatchPicker(null);
-                            }
-                            setOpenAthletePickerBatchKey(nextOpen);
+                            setOpenAthletePickerBatchKey(batchRow.key);
+                            setBatchAthletePickerDraftIds(
+                              Array.from(
+                                new Set(
+                                  (batchRow.workouts ?? [])
+                                    .map((w) => String(w.athlete_profile_id ?? "").trim())
+                                    .filter(Boolean)
+                                )
+                              )
+                            );
                             setAthletePickerQuery("");
                           }}
                           style={{ paddingVertical: 1 }}
-                          disabled={!batchRow.batchId}
+                          disabled={!batchRow.batchId || readOnlyTraining}
                           {...(Platform.OS === "web"
                             ? ({
                                 tabIndex: 0,
@@ -5230,94 +5322,6 @@ export default function CoachWorkoutsDay() {
                             {`Athletes: ${batchRow.athleteCount} ${athletePickerOpen ? "▴" : "▾"}`}
                           </Text>
                         </Pressable>
-                        {athletePickerOpen ? (
-                          <View
-                            style={{
-                              position: "absolute",
-                              top: 44,
-                              left: 0,
-                              width: 320,
-                              maxHeight: 360,
-                              borderWidth: 1,
-                              borderColor: "#dbe2ee",
-                              borderRadius: 8,
-                              backgroundColor: "#fff",
-                              padding: 8,
-                              gap: 8,
-                              zIndex: 95,
-                              ...(Platform.OS === "android" ? { elevation: 7 } : null),
-                            }}
-                          >
-                            <TextInput
-                              value={athletePickerQuery}
-                              onChangeText={setAthletePickerQuery}
-                              placeholder="Search athletes..."
-                              style={{
-                                borderWidth: 1,
-                                borderColor: "#d1d9e6",
-                                borderRadius: 8,
-                                paddingHorizontal: 10,
-                                paddingVertical: 6,
-                                fontSize: 12,
-                                fontWeight: "600",
-                                color: "#0f172a",
-                              }}
-                            />
-                            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                              <Pressable
-                                onPress={() => void selectAllAthletesForBatch(fullBatchRow)}
-                                disabled={athleteSelectionSyncing}
-                                style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: "#fff" }}
-                              >
-                                <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>
-                                  {athleteSelectionSyncing ? "Working..." : "Select all"}
-                                </Text>
-                              </Pressable>
-                              <Pressable
-                                onPress={() => void clearAthletesForBatch(fullBatchRow)}
-                                disabled={athleteSelectionSyncing}
-                                style={{ borderWidth: 1, borderColor: "#f2c4c4", backgroundColor: "#fff0f0", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 }}
-                              >
-                                <Text style={{ fontSize: 11, fontWeight: "800", color: "#9f1239" }}>
-                                  {athleteSelectionSyncing ? "Working..." : "Clear"}
-                                </Text>
-                              </Pressable>
-                            </View>
-                            <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 250 }}>
-                              {openAthletePickerOptions.map((item) => {
-                                const busy = athleteSelectionSyncing || addingAthleteId === item.athleteId || removingAthleteId === item.athleteId;
-                                return (
-                                  <Pressable
-                                    key={`athlete-toggle-${batchRow.key}-${item.athleteId}`}
-                                    onPress={() => void toggleAthleteInBatch(fullBatchRow, item.athleteId, item.selected)}
-                                    disabled={busy}
-                                    style={{
-                                      borderWidth: 1,
-                                      borderColor: item.selected ? "#bfdbfe" : "#e2e8f0",
-                                      backgroundColor: item.selected ? "#eff6ff" : "#fff",
-                                      borderRadius: 8,
-                                      paddingHorizontal: 8,
-                                      paddingVertical: 7,
-                                      marginBottom: 6,
-                                      opacity: busy ? 0.7 : 1,
-                                      flexDirection: "row",
-                                      alignItems: "center",
-                                      justifyContent: "space-between",
-                                      gap: 8,
-                                    }}
-                                  >
-                                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155", flex: 1 }}>
-                                      {item.displayName}
-                                    </Text>
-                                    <Text style={{ fontSize: 11, fontWeight: "900", color: item.selected ? "#1d4ed8" : "#64748b" }}>
-                                      {busy ? (item.selected ? "Removing..." : "Adding...") : item.selected ? "Selected" : "Add"}
-                                    </Text>
-                                  </Pressable>
-                                );
-                              })}
-                            </ScrollView>
-                          </View>
-                        ) : null}
                       </View>
 
                       <View style={{ ...batchSheetCellBase, width: 88, alignItems: "flex-start", backgroundColor: BATCH_GROUP_UTILITY_BG }}>
@@ -5327,6 +5331,7 @@ export default function CoachWorkoutsDay() {
                         </Text>
                       </View>
 
+                      {!readOnlyTraining ? (
                       <View style={{ ...batchSheetCellBase, minWidth: 230, flexDirection: "row", alignItems: "center", gap: 6, borderRightWidth: 0, backgroundColor: BATCH_GROUP_UTILITY_BG }}>
                         <Pressable
                           onPress={() => void duplicateBatchOrSingle(batchRow)}
@@ -5349,6 +5354,11 @@ export default function CoachWorkoutsDay() {
                         </Pressable>
 
                       </View>
+                      ) : (
+                        <View style={{ ...batchSheetCellBase, minWidth: 230, flexDirection: "row", alignItems: "center", gap: 6, borderRightWidth: 0, backgroundColor: BATCH_GROUP_UTILITY_BG }}>
+                          <Text style={{ fontSize: 11, fontWeight: "800", color: "#64748b" }}>Read-only</Text>
+                        </View>
+                      )}
                     </View>
 
                     <View style={{ flexDirection: "row", alignItems: "stretch", gap: 0, backgroundColor: SHEET_CELL_BG }}>
@@ -5364,6 +5374,7 @@ export default function CoachWorkoutsDay() {
                         <NotesCellEditor
                           value={batchDraft.details}
                           onChangeText={(v) => onEditBatchField(batchRow.key, "details", v)}
+                          editable={!readOnlyTraining}
                           inputRef={(el: any) => {
                             batchHeaderInputRefs.current[`${batchRow.key}:notes`] = el;
                           }}
@@ -5683,14 +5694,10 @@ export default function CoachWorkoutsDay() {
                       </View>
                     </View>
 
-                    {openBatchPicker?.batchKey === batchRow.key || athletePickerOpen ? (
+                    {openBatchPicker?.batchKey === batchRow.key ? (
                       <Pressable
                         onPress={() => {
                           if (openBatchPicker?.batchKey === batchRow.key) setOpenBatchPicker(null);
-                          if (athletePickerOpen) {
-                            setOpenAthletePickerBatchKey(null);
-                            setAthletePickerQuery("");
-                          }
                         }}
                         style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 50 }}
                       />
@@ -5762,10 +5769,12 @@ export default function CoachWorkoutsDay() {
                                       <Pressable
                                         key={`${groupKey}-session-${sessionValue}`}
                                         onPress={() => {
+                                          if (readOnlyTraining) return;
                                           group.rows.forEach((row) => {
                                             onEditAthleteSession(String(row.id), sessionValue);
                                           });
                                         }}
+                                        disabled={readOnlyTraining}
                                         style={{
                                           borderWidth: 1,
                                           borderColor: groupSessionValue === sessionValue ? "#0f172a" : "#cbd5e1",
@@ -5785,6 +5794,7 @@ export default function CoachWorkoutsDay() {
                                     <TextInput
                                       value={sharedGroupLocation ?? ""}
                                       onChangeText={(next) => applyGroupFieldValue(group.rows, "location", next)}
+                                      editable={!readOnlyTraining}
                                       placeholder={sharedGroupLocation == null ? "Mixed location" : "Location"}
                                       placeholderTextColor="#94a3b8"
                                       style={{
@@ -5804,6 +5814,7 @@ export default function CoachWorkoutsDay() {
                                     <TextInput
                                       value={sharedGroupTime ?? ""}
                                       onChangeText={(next) => applyGroupFieldValue(group.rows, "time_text", next)}
+                                      editable={!readOnlyTraining}
                                       placeholder={sharedGroupTime == null ? "Mixed time" : "Time"}
                                       placeholderTextColor="#94a3b8"
                                       style={{
@@ -5823,6 +5834,7 @@ export default function CoachWorkoutsDay() {
                                   </View>
                                 </View>
                               </View>
+                              {!readOnlyTraining ? (
                               <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginLeft: "auto", flexShrink: 0 }}>
                                 <Text style={{ fontSize: 11, fontWeight: "800", color: "#475569" }}>
                                   Selected: {selectedRowIds.length}
@@ -6010,6 +6022,11 @@ export default function CoachWorkoutsDay() {
                                   </Text>
                                 </Pressable>
                               </View>
+                              ) : (
+                                <Text style={{ marginLeft: "auto", fontSize: 11, fontWeight: "800", color: "#64748b" }}>
+                                  Read-only
+                                </Text>
+                              )}
                             </View>
 
                             <View
@@ -6098,6 +6115,7 @@ export default function CoachWorkoutsDay() {
                               onRegisterGridApi={handleRegisterGroupGridApi}
                               onOpenFeedbackDetail={openFeedbackDetail}
                               batchHeaderActiveRef={batchHeaderActiveRef}
+                              readOnly={readOnlyTraining}
                             />
                           </View>
                         );
@@ -6107,6 +6125,7 @@ export default function CoachWorkoutsDay() {
                             <div
                               key={`${batchRow.key}-${group.groupLabel}`}
                               onDragOver={(e: any) => {
+                                if (readOnlyTraining) return;
                                 if (!webDragMove || webDragMove.batchKey !== batchRow.key) return;
                                 e.preventDefault?.();
                                 e.dataTransfer!.dropEffect = "move";
@@ -6116,6 +6135,7 @@ export default function CoachWorkoutsDay() {
                                 if (dragOverGroupKey === groupKey) setDragOverGroupKey(null);
                               }}
                               onDrop={(e: any) => {
+                                if (readOnlyTraining) return;
                                 if (!webDragMove || webDragMove.batchKey !== batchRow.key) return;
                                 e.preventDefault?.();
                                 setDragOverGroupKey(null);
@@ -6436,6 +6456,377 @@ export default function CoachWorkoutsDay() {
                 </View>
               ) : null}
             </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={athleteFilterOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAthleteFilterOpen(false)}
+      >
+        <Pressable
+          onPress={() => setAthleteFilterOpen(false)}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(2,6,23,0.28)",
+            alignItems: "center",
+            justifyContent: Platform.OS === "web" ? "flex-start" : "center",
+            paddingTop: Platform.OS === "web" ? 84 : 24,
+            paddingHorizontal: 16,
+          }}
+        >
+          <Pressable
+            onPress={() => {}}
+            style={{
+              width: "100%",
+              maxWidth: 520,
+              maxHeight: Platform.OS === "web" ? 520 : 460,
+              borderWidth: 1,
+              borderColor: "#dbe2ee",
+              borderRadius: 12,
+              backgroundColor: "#fff",
+              overflow: "hidden",
+              shadowColor: "#000",
+              shadowOpacity: 0.22,
+              shadowRadius: 14,
+              shadowOffset: { width: 0, height: 6 },
+              elevation: 16,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                borderBottomWidth: 1,
+                borderBottomColor: "#dbe2ee",
+              }}
+            >
+              <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a" }}>Athletes</Text>
+              <Pressable
+                onPress={() => setAthleteFilterOpen(false)}
+                style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Done</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={{ maxHeight: Platform.OS === "web" ? 440 : 360 }} keyboardShouldPersistTaps="handled">
+              <Pressable
+                onPress={() => {
+                  setSelectedAthleteIds([]);
+                  setAthleteFilterOpen(false);
+                }}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#edf2f7",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  backgroundColor: selectedAthleteIds.length === 0 ? "#eff6ff" : "#fff",
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>All athletes (clear)</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setSelectedAthleteIds(athleteFilterOptions.map((option) => option.id))}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#edf2f7",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  backgroundColor: "#fff",
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>Select all</Text>
+              </Pressable>
+              {athleteFilterOptions.map((option) => (
+                <Pressable
+                  key={`workouts-athlete-filter-modal-${option.id}`}
+                  onPress={() =>
+                    setSelectedAthleteIds((prev) =>
+                      prev.includes(option.id) ? prev.filter((id) => id !== option.id) : [...prev, option.id]
+                    )
+                  }
+                  style={{
+                    borderBottomWidth: 1,
+                    borderBottomColor: "#edf2f7",
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    backgroundColor: selectedAthleteIds.includes(option.id) ? "#eff6ff" : "#fff",
+                  }}
+                >
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>
+                    {selectedAthleteIds.includes(option.id) ? "☑ " : "☐ "}
+                    {option.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={seasonFilterOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSeasonFilterOpen(false)}
+      >
+        <Pressable
+          onPress={() => setSeasonFilterOpen(false)}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(2,6,23,0.28)",
+            alignItems: "center",
+            justifyContent: Platform.OS === "web" ? "flex-start" : "center",
+            paddingTop: Platform.OS === "web" ? 84 : 24,
+            paddingHorizontal: 16,
+          }}
+        >
+          <Pressable
+            onPress={() => {}}
+            style={{
+              width: "100%",
+              maxWidth: 520,
+              maxHeight: Platform.OS === "web" ? 520 : 460,
+              borderWidth: 1,
+              borderColor: "#dbe2ee",
+              borderRadius: 12,
+              backgroundColor: "#fff",
+              overflow: "hidden",
+              shadowColor: "#000",
+              shadowOpacity: 0.22,
+              shadowRadius: 14,
+              shadowOffset: { width: 0, height: 6 },
+              elevation: 16,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                borderBottomWidth: 1,
+                borderBottomColor: "#dbe2ee",
+              }}
+            >
+              <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a" }}>Season</Text>
+              <Pressable
+                onPress={() => setSeasonFilterOpen(false)}
+                style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Done</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={{ maxHeight: Platform.OS === "web" ? 440 : 360 }} keyboardShouldPersistTaps="handled">
+              <Pressable
+                onPress={() => {
+                  void teamDataStore.actions.setSharedSelectedSeasonId(null);
+                  setSeasonFilterOpen(false);
+                }}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#edf2f7",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  backgroundColor: !selectedSeasonId ? "#eff6ff" : "#fff",
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>All seasons (clear)</Text>
+              </Pressable>
+              {seasonFilterOptions.map((option) => (
+                <Pressable
+                  key={`workouts-season-filter-modal-${option.id}`}
+                  onPress={() => {
+                    void teamDataStore.actions.setSharedSelectedSeasonId(option.id);
+                    setSeasonFilterOpen(false);
+                  }}
+                  style={{
+                    borderBottomWidth: 1,
+                    borderBottomColor: "#edf2f7",
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    backgroundColor: selectedSeasonId === option.id ? "#eff6ff" : "#fff",
+                  }}
+                >
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>
+                    {selectedSeasonId === option.id ? "☑ " : "☐ "}
+                    {option.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={!!openAthletePickerBatch}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setOpenAthletePickerBatchKey(null);
+          setAthletePickerQuery("");
+        }}
+      >
+        <Pressable
+          onPress={() => {
+            setOpenAthletePickerBatchKey(null);
+            setAthletePickerQuery("");
+          }}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(2,6,23,0.28)",
+            alignItems: "center",
+            justifyContent: Platform.OS === "web" ? "flex-start" : "center",
+            paddingTop: Platform.OS === "web" ? 84 : 24,
+            paddingHorizontal: 16,
+          }}
+        >
+          <Pressable
+            onPress={() => {}}
+            style={{
+              width: "100%",
+              maxWidth: 560,
+              maxHeight: Platform.OS === "web" ? 620 : 520,
+              borderWidth: 1,
+              borderColor: "#dbe2ee",
+              borderRadius: 12,
+              backgroundColor: "#fff",
+              overflow: "hidden",
+              shadowColor: "#000",
+              shadowOpacity: 0.22,
+              shadowRadius: 14,
+              shadowOffset: { width: 0, height: 6 },
+              elevation: 16,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                borderBottomWidth: 1,
+                borderBottomColor: "#dbe2ee",
+              }}
+            >
+              <View>
+                <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a" }}>Batch Athletes</Text>
+                <Text style={{ fontSize: 11, fontWeight: "700", color: "#64748b" }}>
+                  {openAthletePickerBatch?.sample?.title || "Workout"} • {openAthletePickerBatch?.sample?.date_iso || dayISO}
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => {
+                  setOpenAthletePickerBatchKey(null);
+                  setAthletePickerQuery("");
+                }}
+                style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Cancel</Text>
+              </Pressable>
+            </View>
+            <View style={{ padding: 10, gap: 8 }}>
+              <TextInput
+                value={athletePickerQuery}
+                onChangeText={setAthletePickerQuery}
+                placeholder="Search athletes..."
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#d1d9e6",
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                  fontSize: 12,
+                  fontWeight: "600",
+                  color: "#0f172a",
+                }}
+              />
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <Pressable
+                  onPress={() =>
+                    setBatchAthletePickerDraftIds(
+                      Array.from(new Set(openAthletePickerOptions.map((item) => String(item.athleteId ?? "").trim()).filter(Boolean)))
+                    )
+                  }
+                  style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: "#fff" }}
+                >
+                  <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>Select all</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setBatchAthletePickerDraftIds([])}
+                  style={{ borderWidth: 1, borderColor: "#f2c4c4", backgroundColor: "#fff0f0", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 }}
+                >
+                  <Text style={{ fontSize: 11, fontWeight: "800", color: "#9f1239" }}>Clear</Text>
+                </Pressable>
+              </View>
+            </View>
+            <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: Platform.OS === "web" ? 390 : 320, paddingHorizontal: 10 }}>
+              {openAthletePickerOptions.map((item) => {
+                const selected = batchAthletePickerDraftIds.includes(item.athleteId);
+                return (
+                  <Pressable
+                    key={`athlete-toggle-modal-${openAthletePickerBatch?.key}-${item.athleteId}`}
+                    onPress={() =>
+                      setBatchAthletePickerDraftIds((prev) =>
+                        prev.includes(item.athleteId)
+                          ? prev.filter((id) => id !== item.athleteId)
+                          : [...prev, item.athleteId]
+                      )
+                    }
+                    style={{
+                      borderWidth: 1,
+                      borderColor: selected ? "#bfdbfe" : "#e2e8f0",
+                      backgroundColor: selected ? "#eff6ff" : "#fff",
+                      borderRadius: 8,
+                      paddingHorizontal: 8,
+                      paddingVertical: 7,
+                      marginBottom: 6,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 8,
+                    }}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155", flex: 1 }} numberOfLines={1}>
+                      {item.displayName}
+                    </Text>
+                    <Text style={{ fontSize: 11, fontWeight: "900", color: selected ? "#1d4ed8" : "#64748b" }}>
+                      {selected ? "Selected" : "Add"}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+              {openAthletePickerOptions.length === 0 ? (
+                <Text style={{ fontSize: 12, fontWeight: "700", color: "#64748b", paddingVertical: 6 }}>
+                  No athletes match this search.
+                </Text>
+              ) : null}
+            </ScrollView>
+            <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8, padding: 10, borderTopWidth: 1, borderTopColor: "#e2e8f0" }}>
+              <Pressable
+                onPress={() => {
+                  setOpenAthletePickerBatchKey(null);
+                  setAthletePickerQuery("");
+                }}
+                style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8 }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => void applyBatchAthletePickerSelection()}
+                style={{ borderWidth: 1, borderColor: "#0f172a", backgroundColor: "#0f172a", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8 }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "800", color: "#fff" }}>Apply</Text>
+              </Pressable>
+            </View>
           </Pressable>
         </Pressable>
       </Modal>

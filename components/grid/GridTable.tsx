@@ -1,8 +1,8 @@
 import { ScrollView, View } from "react-native";
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import { Platform } from "react-native";
 
-export function GridTable({
+function GridTableComponent({
   minWidth,
   children,
   webUseParentScroll = false,
@@ -39,3 +39,5 @@ export function GridTable({
     </ScrollView>
   );
 }
+
+export const GridTable = memo(GridTableComponent);

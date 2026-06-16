@@ -25,8 +25,8 @@ import {
   parseISODate,
   toISODate,
 } from "../../lib/mileagePlan";
-import { listAthleteWorkoutsInRange, listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
-import { teamDataStore } from "../../lib/teamDataStore";
+import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
+import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import { loadCoachWeekLabels, loadWeekStartSetting, type CoachWeekLabels } from "../../lib/settings";
 import { getWeekLabelTone } from "../../lib/weekLabelStyle";
 import { SegmentedViewToggle } from "../../components/shared/SegmentedViewToggle";
@@ -399,7 +399,7 @@ export default function AthleteWeekView() {
       setWeekLabelsByStart(weekLabels ?? {});
 
       const weekStartForFetch = getWeekStartISO(weekAnchorISO, ws);
-      void teamDataStore.actions.loadMileageWeek(weekStartForFetch);
+      if (selectedId) void teamDataStore.actions.loadVisibleMileageWeekForAthlete(selectedId, weekStartForFetch);
 
       if (!selectedId) {
         setAllWorkouts([]);
@@ -408,19 +408,14 @@ export default function AthleteWeekView() {
       }
 
       const weekEndForFetch = addDaysISO(weekStartForFetch, 6);
-      const rows = await listAthleteWorkoutsInRange(selectedId, weekStartForFetch, weekEndForFetch);
+      const rows = await listVisibleAthleteWorkoutsInRange(selectedId, weekStartForFetch, weekEndForFetch);
       if (activeLoadKeyRef.current !== loadKey) return;
       const athleteName = selectedName ?? "Athlete";
       setAllWorkouts(rows.map((row) => toAthleteWorkout(row, athleteName)));
       setTeamWeekRows([]);
       lastLoadRef.current = { key: loadKey, ts: Date.now() };
 
-      // Load full-team rows in background for group-mate context and extra metadata.
-      void (async () => {
-        const allRowsForWeek = await listTeamWorkoutsInRange(weekStartForFetch, weekEndForFetch);
-        if (activeLoadKeyRef.current !== loadKey) return;
-        setTeamWeekRows(allRowsForWeek);
-      })();
+      // Team-wide rows are not loaded in athlete views so hidden workouts stay private.
     } finally {
       inFlightRef.current = false;
     }
@@ -491,25 +486,25 @@ export default function AthleteWeekView() {
   const mileageByDaySession = useMemo(() => {
     const map = new Map<string, MileageValue | undefined>();
     if (!selectedAthleteId) return map;
-    const rows = store.mileageCellsByWeek[weekStartISO] ?? [];
+    const rows = store.visibleMileageCellsByAthleteWeek[visibleMileageAthleteWeekKey(selectedAthleteId, weekStartISO)] ?? [];
     for (const row of rows) {
       if (String(row.athlete_profile_id) !== String(selectedAthleteId)) continue;
       const session = row.session === "AM" ? "AM" : "PM";
       map.set(`${row.day_idx}:${session}`, toMileageValue((row as any).value));
     }
     return map;
-  }, [selectedAthleteId, store.mileageCellsByWeek, weekStartISO]);
+  }, [selectedAthleteId, store.visibleMileageCellsByAthleteWeek, weekStartISO]);
 
   const ncaaOffByDay = useMemo(() => {
     const map = new Map<number, boolean>();
     if (!selectedAthleteId) return map;
-    const rows = store.mileageFlagsByWeek[weekStartISO] ?? [];
+    const rows = store.visibleMileageFlagsByAthleteWeek[visibleMileageAthleteWeekKey(selectedAthleteId, weekStartISO)] ?? [];
     for (const row of rows) {
       if (String(row.athlete_profile_id) !== String(selectedAthleteId)) continue;
       map.set(row.day_idx, !!row.ncaa_off);
     }
     return map;
-  }, [selectedAthleteId, store.mileageFlagsByWeek, weekStartISO]);
+  }, [selectedAthleteId, store.visibleMileageFlagsByAthleteWeek, weekStartISO]);
 
   const effectivePaceSecPerMile = useMemo(
     () => resolveAthletePaceSeconds(selectedAthleteId, athletePaceOverrides, paceSecPerMile),

@@ -9,6 +9,7 @@ type Props = {
   inputRef?: any;
   binding?: GridCellBinding;
   webProps?: any;
+  editable?: boolean;
 };
 
 export function NotesCellEditor(props: Props) {

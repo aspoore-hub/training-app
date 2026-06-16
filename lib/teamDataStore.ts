@@ -4,6 +4,8 @@ import { supabase } from "./supabase";
 import {
   fetchMileageCellsForWeek,
   fetchMileageDayFlagsForWeek,
+  fetchVisibleMileageCellsForAthleteWeek,
+  fetchVisibleMileageDayFlagsForAthleteWeek,
   upsertMileageCell,
   upsertMileageDayFlag,
 } from "./mileageCloud";
@@ -114,12 +116,31 @@ const LEGACY_COACH_SEASON_FILTER_KEYS = [
   "coach_training_logs_selected_season_filter_v1",
 ] as const;
 const TEAM_ID_VERIFY_TTL_MS = 30_000;
+const ROSTER_REFRESH_TTL_MS = 60_000;
 let pendingPersistTimer: ReturnType<typeof setTimeout> | null = null;
 let lastVerifiedTeamContext: { userId: string | null; teamId: string | null; atMs: number } = {
   userId: null,
   teamId: null,
   atMs: 0,
 };
+let lastRosterRefreshByTeamKey: Record<string, number> = {};
+const inFlightRosterRefreshByKey = new Map<string, Promise<void>>();
+type MileageWeekLoadResult = {
+  weekStartISO: string;
+  cells: TeamMileageCellRow[];
+  flags: MileageDayFlagRow[];
+};
+
+const inFlightMileageWeekByKey = new Map<string, Promise<MileageWeekLoadResult>>();
+const inFlightVisibleMileageWeekByKey = new Map<string, Promise<MileageWeekLoadResult>>();
+const inFlightTrainingGroupsByKey = new Map<string, Promise<void>>();
+const inFlightTeamSeasonsByKey = new Map<string, Promise<void>>();
+const inFlightAthleteSeasonOverridesByKey = new Map<string, Promise<void>>();
+const inFlightSharedCoachFiltersByKey = new Map<string, Promise<void>>();
+
+function teamScopedLoadKey(suffix = "") {
+  return `${String(state.userId ?? "unknown")}:${String(state.teamId ?? "unknown")}${suffix ? `:${suffix}` : ""}`;
+}
 
 type StoreState = {
   ready: boolean;
@@ -137,6 +158,9 @@ type StoreState = {
   mileagePendingCellsByWeek: MileageCellPendingByWeek;
   mileagePendingFlagsByWeek: MileageFlagPendingByWeek;
   mileagePendingLoadedForTeamId: string | null;
+  visibleMileageCellsByAthleteWeek: Record<string, TeamMileageCellRow[]>;
+  visibleMileageFlagsByAthleteWeek: Record<string, MileageDayFlagRow[]>;
+  visibleMileageLoadedByAthleteWeek: Record<string, boolean>;
 
   // workouts cache (by day)
   workoutsByDay: Record<DayKey, TeamWorkoutRow[]>;
@@ -154,6 +178,7 @@ type StoreState = {
   athleteSeasonOverridesLoaded: boolean;
   sharedSelectedTrainingGroupIds: string[];
   sharedSelectedSeasonId: string | null;
+  sharedSelectedSeasonInitialized: boolean;
   sharedCoachFiltersLoaded: boolean;
 
   loadingCount: number;
@@ -174,6 +199,9 @@ let state: StoreState = {
   mileagePendingCellsByWeek: {},
   mileagePendingFlagsByWeek: {},
   mileagePendingLoadedForTeamId: null,
+  visibleMileageCellsByAthleteWeek: {},
+  visibleMileageFlagsByAthleteWeek: {},
+  visibleMileageLoadedByAthleteWeek: {},
 
   workoutsByDay: {},
   workoutsLoadedDays: {},
@@ -188,6 +216,7 @@ let state: StoreState = {
   athleteSeasonOverridesLoaded: false,
   sharedSelectedTrainingGroupIds: [],
   sharedSelectedSeasonId: null,
+  sharedSelectedSeasonInitialized: false,
   sharedCoachFiltersLoaded: false,
 
   loadingCount: 0,
@@ -223,6 +252,10 @@ function mileageCellIdentity(row: TeamMileageCellRow): string {
 
 function mileageFlagIdentity(row: MileageDayFlagRow): string {
   return `${row.athlete_profile_id}__${row.week_start_iso}__${row.day_idx}`;
+}
+
+export function visibleMileageAthleteWeekKey(athleteId: string, weekStartISO: string): string {
+  return `${String(athleteId ?? "").trim()}|${String(weekStartISO ?? "").trim()}`;
 }
 
 function upsertByIdentity<T>(
@@ -346,6 +379,44 @@ function isAthleteActive(athlete: TeamAthlete | null | undefined): boolean {
   return status === "active";
 }
 
+function toDateOnlyISO(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function resolveDefaultCurrentSeasonId(todayISO: string, seasons: TeamSeason[]): string | null {
+  const candidates = (Array.isArray(seasons) ? seasons : []).filter((season) => !season?.archived_at);
+  if (candidates.length === 0) return null;
+  const normalizedToday = String(todayISO ?? "").trim();
+
+  const containing = candidates.filter((season) => {
+    const start = String(season?.start_date ?? "").trim();
+    const end = String(season?.end_date ?? "").trim();
+    return !!start && !!end && normalizedToday >= start && normalizedToday <= end;
+  });
+  if (containing.length > 0) return String(containing[0]?.id ?? "").trim() || null;
+
+  const upcoming = candidates
+    .filter((season) => {
+      const start = String(season?.start_date ?? "").trim();
+      return !!start && start > normalizedToday;
+    })
+    .sort((a, b) => String(a.start_date ?? "").localeCompare(String(b.start_date ?? "")));
+  if (upcoming.length > 0) return String(upcoming[0]?.id ?? "").trim() || null;
+
+  const past = candidates
+    .filter((season) => {
+      const end = String(season?.end_date ?? "").trim();
+      return !!end && end < normalizedToday;
+    })
+    .sort((a, b) => String(b.end_date ?? "").localeCompare(String(a.end_date ?? "")));
+  if (past.length > 0) return String(past[0]?.id ?? "").trim() || null;
+
+  return String(candidates[0]?.id ?? "").trim() || null;
+}
+
 export function useTeamDataStore() {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
@@ -369,6 +440,9 @@ async function ensureSessionAndTeam() {
       mileagePendingCellsByWeek: {},
       mileagePendingFlagsByWeek: {},
       mileagePendingLoadedForTeamId: null,
+      visibleMileageCellsByAthleteWeek: {},
+      visibleMileageFlagsByAthleteWeek: {},
+      visibleMileageLoadedByAthleteWeek: {},
       workoutsByDay: {},
       workoutsLoadedDays: {},
       trainingGroups: [],
@@ -458,6 +532,10 @@ function sanitizeStringArray(input: unknown): string[] {
 
 async function loadSharedCoachFilters(force = false) {
   if (!force && state.sharedCoachFiltersLoaded) return;
+  const inFlightKey = teamScopedLoadKey(force ? "shared-filters:force" : "shared-filters");
+  const existing = inFlightSharedCoachFiltersByKey.get(inFlightKey);
+  if (existing) return existing;
+  const promise = (async () => {
   try {
     const [sharedGroupsRaw, sharedSeasonRaw] = await AsyncStorage.multiGet([
       SHARED_COACH_SELECTED_TRAINING_GROUP_IDS_KEY,
@@ -466,6 +544,7 @@ async function loadSharedCoachFilters(force = false) {
 
     let selectedTrainingGroupIds: string[] | null = null;
     let selectedSeasonId: string | null | undefined = undefined;
+    let selectedSeasonInitialized = false;
 
     if (sharedGroupsRaw?.[1] != null) {
       try {
@@ -477,10 +556,24 @@ async function loadSharedCoachFilters(force = false) {
     if (sharedSeasonRaw?.[1] != null) {
       try {
         const parsed = JSON.parse(sharedSeasonRaw[1]);
-        const next = typeof parsed === "string" ? String(parsed ?? "").trim() : "";
-        selectedSeasonId = next || null;
+        if (parsed && typeof parsed === "object" && "initialized" in (parsed as Record<string, unknown>)) {
+          const initialized = (parsed as { initialized?: unknown }).initialized === true;
+          selectedSeasonInitialized = initialized;
+          if ("selectedSeasonId" in (parsed as Record<string, unknown>)) {
+            const rawId = (parsed as { selectedSeasonId?: unknown }).selectedSeasonId;
+            const next = typeof rawId === "string" ? String(rawId ?? "").trim() : "";
+            selectedSeasonId = next || null;
+          } else {
+            selectedSeasonId = null;
+          }
+        } else {
+          const next = typeof parsed === "string" ? String(parsed ?? "").trim() : "";
+          selectedSeasonId = next || null;
+          selectedSeasonInitialized = true;
+        }
       } catch {
         selectedSeasonId = null;
+        selectedSeasonInitialized = true;
       }
     }
 
@@ -509,29 +602,51 @@ async function loadSharedCoachFilters(force = false) {
           const next = typeof parsed === "string" ? String(parsed ?? "").trim() : "";
           if (next) {
             selectedSeasonId = next;
+            selectedSeasonInitialized = true;
             break;
           }
         } catch {}
       }
     }
 
+    if (!selectedSeasonInitialized && selectedSeasonId == null && state.teamSeasonsLoaded) {
+      const defaultSeasonId = resolveDefaultCurrentSeasonId(
+        toDateOnlyISO(new Date()),
+        sortTeamSeasons(Array.isArray(state.teamSeasons) ? state.teamSeasons : [])
+      );
+      selectedSeasonId = defaultSeasonId;
+      selectedSeasonInitialized = true;
+    }
+
     setState({
       sharedSelectedTrainingGroupIds: selectedTrainingGroupIds,
       sharedSelectedSeasonId: selectedSeasonId ?? null,
+      sharedSelectedSeasonInitialized: selectedSeasonInitialized,
       sharedCoachFiltersLoaded: true,
     });
 
     await AsyncStorage.multiSet([
       [SHARED_COACH_SELECTED_TRAINING_GROUP_IDS_KEY, JSON.stringify(selectedTrainingGroupIds)],
-      [SHARED_COACH_SELECTED_SEASON_ID_KEY, JSON.stringify(selectedSeasonId ?? null)],
+      [
+        SHARED_COACH_SELECTED_SEASON_ID_KEY,
+        JSON.stringify({ selectedSeasonId: selectedSeasonId ?? null, initialized: selectedSeasonInitialized }),
+      ],
     ]);
   } catch (e) {
     setError(e);
     setState({
       sharedSelectedTrainingGroupIds: [],
       sharedSelectedSeasonId: null,
+      sharedSelectedSeasonInitialized: true,
       sharedCoachFiltersLoaded: true,
     });
+  }
+  })();
+  inFlightSharedCoachFiltersByKey.set(inFlightKey, promise);
+  try {
+    await promise;
+  } finally {
+    inFlightSharedCoachFiltersByKey.delete(inFlightKey);
   }
 }
 
@@ -548,11 +663,15 @@ async function setSharedSelectedTrainingGroupIds(ids: string[]) {
 
 async function setSharedSelectedSeasonId(id: string | null) {
   const next = String(id ?? "").trim() || null;
-  setState({ sharedSelectedSeasonId: next, sharedCoachFiltersLoaded: true });
+  setState({
+    sharedSelectedSeasonId: next,
+    sharedSelectedSeasonInitialized: true,
+    sharedCoachFiltersLoaded: true,
+  });
   try {
     await AsyncStorage.setItem(
       SHARED_COACH_SELECTED_SEASON_ID_KEY,
-      JSON.stringify(next)
+      JSON.stringify({ selectedSeasonId: next, initialized: true })
     );
   } catch {}
 }
@@ -561,12 +680,13 @@ async function clearSharedCoachFilters() {
   setState({
     sharedSelectedTrainingGroupIds: [],
     sharedSelectedSeasonId: null,
+    sharedSelectedSeasonInitialized: true,
     sharedCoachFiltersLoaded: true,
   });
   try {
     await AsyncStorage.multiSet([
       [SHARED_COACH_SELECTED_TRAINING_GROUP_IDS_KEY, JSON.stringify([])],
-      [SHARED_COACH_SELECTED_SEASON_ID_KEY, JSON.stringify(null)],
+      [SHARED_COACH_SELECTED_SEASON_ID_KEY, JSON.stringify({ selectedSeasonId: null, initialized: true })],
     ]);
   } catch {}
 }
@@ -575,8 +695,14 @@ async function clearSharedCoachFilters() {
 async function refreshRoster(opts?: { force?: boolean; throwOnError?: boolean }) {
   const force = !!opts?.force;
   const throwOnError = !!opts?.throwOnError;
-  // force is accepted for compatibility with teamStore callers.
-  void force;
+  const preflightKey = teamScopedLoadKey("roster");
+  if (!force && state.rosterLoaded && Date.now() - (lastRosterRefreshByTeamKey[preflightKey] ?? 0) < ROSTER_REFRESH_TTL_MS) {
+    return;
+  }
+  const inFlightKey = teamScopedLoadKey(force ? "roster:force" : "roster");
+  const existing = inFlightRosterRefreshByKey.get(inFlightKey);
+  if (existing) return existing;
+  const promise = (async () => {
   incLoading();
   try {
     const { teamId } = await ensureSessionAndTeam();
@@ -599,11 +725,19 @@ async function refreshRoster(opts?: { force?: boolean; throwOnError?: boolean })
     if (teamId) {
       void persistRosterCacheForTeam(teamId, nextRoster);
     }
+    lastRosterRefreshByTeamKey[teamScopedLoadKey("roster")] = Date.now();
   } catch (e) {
     setError(e);
     if (throwOnError) throw e;
   } finally {
     decLoading();
+  }
+  })();
+  inFlightRosterRefreshByKey.set(inFlightKey, promise);
+  try {
+    await promise;
+  } finally {
+    inFlightRosterRefreshByKey.delete(inFlightKey);
   }
 }
 
@@ -802,6 +936,60 @@ function clearMileageFlagPending(weekStartISO: string, row: MileageDayFlagRow) {
   }
 }
 
+async function resetForContextSwitch(nextTeamId: string | null) {
+  const { data } = await supabase.auth.getSession();
+  const userId = data.session?.user?.id ?? state.userId ?? null;
+  if (pendingPersistTimer) {
+    clearTimeout(pendingPersistTimer);
+    pendingPersistTimer = null;
+  }
+  lastVerifiedTeamContext = { userId, teamId: nextTeamId, atMs: 0 };
+  lastRosterRefreshByTeamKey = {};
+  inFlightRosterRefreshByKey.clear();
+  inFlightMileageWeekByKey.clear();
+  inFlightVisibleMileageWeekByKey.clear();
+  inFlightTrainingGroupsByKey.clear();
+  inFlightTeamSeasonsByKey.clear();
+  inFlightAthleteSeasonOverridesByKey.clear();
+  inFlightSharedCoachFiltersByKey.clear();
+
+  setState({
+    ready: true,
+    userId,
+    teamId: nextTeamId,
+    roster: [],
+    rosterLoaded: false,
+    mileageCellsByWeek: {},
+    mileageFlagsByWeek: {},
+    mileageLoadedWeeks: {},
+    mileagePendingCellsByWeek: {},
+    mileagePendingFlagsByWeek: {},
+    mileagePendingLoadedForTeamId: null,
+    visibleMileageCellsByAthleteWeek: {},
+    visibleMileageFlagsByAthleteWeek: {},
+    visibleMileageLoadedByAthleteWeek: {},
+    workoutsByDay: {},
+    workoutsLoadedDays: {},
+    trainingGroups: [],
+    trainingGroupMemberships: [],
+    trainingGroupsLoaded: false,
+    teamSeasons: [],
+    teamSeasonsLoaded: false,
+    athleteSeasonOverrides: [],
+    athleteSeasonOverridesLoaded: false,
+    sharedSelectedTrainingGroupIds: [],
+    sharedSelectedSeasonId: null,
+    sharedSelectedSeasonInitialized: false,
+    sharedCoachFiltersLoaded: false,
+    loadingCount: 0,
+    lastError: null,
+  });
+
+  if (userId) {
+    await persistCachedTeamIdForUser(userId, nextTeamId);
+  }
+}
+
 async function flushPendingMileageWeek(weekStartISO: string): Promise<void> {
   const pendingCellsSnapshot = [...getPendingCellsForWeek(weekStartISO)];
   const pendingFlagsSnapshot = [...getPendingFlagsForWeek(weekStartISO)];
@@ -876,82 +1064,214 @@ async function flushPendingMileageWeek(weekStartISO: string): Promise<void> {
   }
 }
 
-async function loadMileageWeek(weekStartISO: string, force = false) {
-  incLoading();
-  try {
+function buildMileageWeekStateResult(weekStartISO: string): MileageWeekLoadResult {
+  return {
+    weekStartISO,
+    cells: mergeRowsByIdentity(
+      state.mileageCellsByWeek[weekStartISO] ?? [],
+      getPendingCellsForWeek(weekStartISO),
+      mileageCellIdentity
+    ) as TeamMileageCellRow[],
+    flags: mergeRowsByIdentity(
+      state.mileageFlagsByWeek[weekStartISO] ?? [],
+      getPendingFlagsForWeek(weekStartISO),
+      mileageFlagIdentity
+    ) as MileageDayFlagRow[],
+  };
+}
+
+async function loadMileageWeekSnapshot(weekStartISO: string, force = false): Promise<MileageWeekLoadResult> {
+  const cleanWeekStartISO = String(weekStartISO ?? "").trim();
+  if (!cleanWeekStartISO) return { weekStartISO: cleanWeekStartISO, cells: [], flags: [] };
+  const inFlightKey = teamScopedLoadKey(`mileage-week:${cleanWeekStartISO}:${force ? "force" : "normal"}`);
+  const existing = inFlightMileageWeekByKey.get(inFlightKey);
+  if (existing) return existing;
+  const promise = (async () => {
     const { teamId } = await ensureSessionAndTeam();
     if (!teamId) {
-      setState({
-        mileageCellsByWeek: { ...state.mileageCellsByWeek, [weekStartISO]: [] },
-        mileageFlagsByWeek: { ...state.mileageFlagsByWeek, [weekStartISO]: [] },
-        mileageLoadedWeeks: { ...state.mileageLoadedWeeks, [weekStartISO]: true },
-      });
-      return;
+      return { weekStartISO: cleanWeekStartISO, cells: [], flags: [] };
     }
 
-    void flushPendingMileageWeek(weekStartISO);
+    void flushPendingMileageWeek(cleanWeekStartISO);
 
-    if (!force && state.mileageLoadedWeeks[weekStartISO]) {
-      const mergedCells = mergeRowsByIdentity(
-        state.mileageCellsByWeek[weekStartISO] ?? [],
-        getPendingCellsForWeek(weekStartISO),
-        mileageCellIdentity
-      );
-      const mergedFlags = mergeRowsByIdentity(
-        state.mileageFlagsByWeek[weekStartISO] ?? [],
-        getPendingFlagsForWeek(weekStartISO),
-        mileageFlagIdentity
-      );
-      setState({
-        mileageCellsByWeek: { ...state.mileageCellsByWeek, [weekStartISO]: mergedCells },
-        mileageFlagsByWeek: { ...state.mileageFlagsByWeek, [weekStartISO]: mergedFlags },
-      });
-      return;
+    if (!force && state.mileageLoadedWeeks[cleanWeekStartISO]) {
+      return buildMileageWeekStateResult(cleanWeekStartISO);
     }
 
     const [cells, flags] = await Promise.all([
-      fetchMileageCellsForWeek(weekStartISO),
-      fetchMileageDayFlagsForWeek(weekStartISO),
+      fetchMileageCellsForWeek(cleanWeekStartISO),
+      fetchMileageDayFlagsForWeek(cleanWeekStartISO),
     ]);
 
     const mergedCells = mergeRowsByIdentity(
       (cells ?? []) as TeamMileageCellRow[],
-      getPendingCellsForWeek(weekStartISO),
+      getPendingCellsForWeek(cleanWeekStartISO),
       mileageCellIdentity
     );
     const mergedFlags = mergeRowsByIdentity(
       (flags ?? []) as MileageDayFlagRow[],
-      getPendingFlagsForWeek(weekStartISO),
+      getPendingFlagsForWeek(cleanWeekStartISO),
       mileageFlagIdentity
     );
 
+    return {
+      weekStartISO: cleanWeekStartISO,
+      cells: mergedCells as TeamMileageCellRow[],
+      flags: mergedFlags as MileageDayFlagRow[],
+    };
+  })();
+  inFlightMileageWeekByKey.set(inFlightKey, promise);
+  try {
+    return await promise;
+  } finally {
+    if (inFlightMileageWeekByKey.get(inFlightKey) === promise) {
+      inFlightMileageWeekByKey.delete(inFlightKey);
+    }
+  }
+}
+
+async function loadMileageWeek(weekStartISO: string, force = false) {
+  const cleanWeekStartISO = String(weekStartISO ?? "").trim();
+  if (!cleanWeekStartISO) return;
+  incLoading();
+  try {
+    const result = await loadMileageWeekSnapshot(cleanWeekStartISO, force);
     setState({
-      mileageCellsByWeek: { ...state.mileageCellsByWeek, [weekStartISO]: mergedCells as any },
-      mileageFlagsByWeek: { ...state.mileageFlagsByWeek, [weekStartISO]: mergedFlags as any },
-      mileageLoadedWeeks: { ...state.mileageLoadedWeeks, [weekStartISO]: true },
+      mileageCellsByWeek: { ...state.mileageCellsByWeek, [cleanWeekStartISO]: result.cells },
+      mileageFlagsByWeek: { ...state.mileageFlagsByWeek, [cleanWeekStartISO]: result.flags },
+      mileageLoadedWeeks: { ...state.mileageLoadedWeeks, [cleanWeekStartISO]: true },
       lastError: null,
     });
   } catch (e) {
     setError(e);
-    const pendingCells = getPendingCellsForWeek(weekStartISO);
-    const pendingFlags = getPendingFlagsForWeek(weekStartISO);
+    const pendingCells = getPendingCellsForWeek(cleanWeekStartISO);
+    const pendingFlags = getPendingFlagsForWeek(cleanWeekStartISO);
     if (pendingCells.length > 0 || pendingFlags.length > 0) {
-      const mergedCells = mergeRowsByIdentity(
-        state.mileageCellsByWeek[weekStartISO] ?? [],
-        pendingCells,
-        mileageCellIdentity
-      );
-      const mergedFlags = mergeRowsByIdentity(
-        state.mileageFlagsByWeek[weekStartISO] ?? [],
-        pendingFlags,
-        mileageFlagIdentity
-      );
+      const fallback = buildMileageWeekStateResult(cleanWeekStartISO);
       setState({
-        mileageCellsByWeek: { ...state.mileageCellsByWeek, [weekStartISO]: mergedCells },
-        mileageFlagsByWeek: { ...state.mileageFlagsByWeek, [weekStartISO]: mergedFlags },
-        mileageLoadedWeeks: { ...state.mileageLoadedWeeks, [weekStartISO]: true },
+        mileageCellsByWeek: { ...state.mileageCellsByWeek, [cleanWeekStartISO]: fallback.cells },
+        mileageFlagsByWeek: { ...state.mileageFlagsByWeek, [cleanWeekStartISO]: fallback.flags },
+        mileageLoadedWeeks: { ...state.mileageLoadedWeeks, [cleanWeekStartISO]: true },
       });
     }
+  } finally {
+    decLoading();
+  }
+}
+
+async function loadVisibleMileageWeekForAthlete(athleteProfileId: string, weekStartISO: string, force = false) {
+  const cleanAthleteId = String(athleteProfileId ?? "").trim();
+  const cleanWeekStartISO = String(weekStartISO ?? "").trim();
+  if (!cleanAthleteId || !cleanWeekStartISO) return;
+  const cacheKey = visibleMileageAthleteWeekKey(cleanAthleteId, cleanWeekStartISO);
+  const inFlightKey = teamScopedLoadKey(`visible-mileage-week:${cacheKey}:${force ? "force" : "normal"}`);
+  const existing = inFlightVisibleMileageWeekByKey.get(inFlightKey);
+  if (existing) {
+    const result = await existing;
+    setState({
+      visibleMileageCellsByAthleteWeek: { ...state.visibleMileageCellsByAthleteWeek, [cacheKey]: result.cells },
+      visibleMileageFlagsByAthleteWeek: { ...state.visibleMileageFlagsByAthleteWeek, [cacheKey]: result.flags },
+      visibleMileageLoadedByAthleteWeek: { ...state.visibleMileageLoadedByAthleteWeek, [cacheKey]: true },
+      lastError: null,
+    });
+    return;
+  }
+
+  incLoading();
+  const promise = (async (): Promise<MileageWeekLoadResult> => {
+    const { teamId } = await ensureSessionAndTeam();
+    if (!teamId) return { weekStartISO: cleanWeekStartISO, cells: [], flags: [] };
+    if (!force && state.visibleMileageLoadedByAthleteWeek[cacheKey]) {
+      return {
+        weekStartISO: cleanWeekStartISO,
+        cells: state.visibleMileageCellsByAthleteWeek[cacheKey] ?? [],
+        flags: state.visibleMileageFlagsByAthleteWeek[cacheKey] ?? [],
+      };
+    }
+
+    const [cells, flags] = await Promise.all([
+      fetchVisibleMileageCellsForAthleteWeek(teamId, cleanAthleteId, cleanWeekStartISO),
+      fetchVisibleMileageDayFlagsForAthleteWeek(teamId, cleanAthleteId, cleanWeekStartISO),
+    ]);
+
+    return {
+      weekStartISO: cleanWeekStartISO,
+      cells: (cells ?? []) as TeamMileageCellRow[],
+      flags: (flags ?? []) as MileageDayFlagRow[],
+    };
+  })();
+
+  inFlightVisibleMileageWeekByKey.set(inFlightKey, promise);
+  try {
+    const result = await promise;
+    setState({
+      visibleMileageCellsByAthleteWeek: { ...state.visibleMileageCellsByAthleteWeek, [cacheKey]: result.cells },
+      visibleMileageFlagsByAthleteWeek: { ...state.visibleMileageFlagsByAthleteWeek, [cacheKey]: result.flags },
+      visibleMileageLoadedByAthleteWeek: { ...state.visibleMileageLoadedByAthleteWeek, [cacheKey]: true },
+      lastError: null,
+    });
+  } catch (e) {
+    setError(e);
+  } finally {
+    if (inFlightVisibleMileageWeekByKey.get(inFlightKey) === promise) {
+      inFlightVisibleMileageWeekByKey.delete(inFlightKey);
+    }
+    decLoading();
+  }
+}
+
+async function loadMileageWeeks(weekStartISOs: string[], force = false) {
+  const cleanWeekStartISOs = Array.from(
+    new Set((Array.isArray(weekStartISOs) ? weekStartISOs : []).map((week) => String(week ?? "").trim()).filter(Boolean))
+  );
+  if (cleanWeekStartISOs.length === 0) return;
+  incLoading();
+  try {
+    const results = await Promise.all(
+      cleanWeekStartISOs.map(async (weekStartISO) => {
+        try {
+          return { ok: true as const, result: await loadMileageWeekSnapshot(weekStartISO, force) };
+        } catch (error) {
+          return { ok: false as const, weekStartISO, error };
+        }
+      })
+    );
+
+    const nextCellsByWeek = { ...state.mileageCellsByWeek };
+    const nextFlagsByWeek = { ...state.mileageFlagsByWeek };
+    const nextLoadedWeeks = { ...state.mileageLoadedWeeks };
+    let firstError: unknown = null;
+
+    for (const item of results) {
+      if (item.ok) {
+        nextCellsByWeek[item.result.weekStartISO] = item.result.cells;
+        nextFlagsByWeek[item.result.weekStartISO] = item.result.flags;
+        nextLoadedWeeks[item.result.weekStartISO] = true;
+      } else {
+        if (!firstError) firstError = item.error;
+        const pendingCells = getPendingCellsForWeek(item.weekStartISO);
+        const pendingFlags = getPendingFlagsForWeek(item.weekStartISO);
+        if (pendingCells.length > 0 || pendingFlags.length > 0) {
+          const fallback = buildMileageWeekStateResult(item.weekStartISO);
+          nextCellsByWeek[item.weekStartISO] = fallback.cells;
+          nextFlagsByWeek[item.weekStartISO] = fallback.flags;
+          nextLoadedWeeks[item.weekStartISO] = true;
+        }
+      }
+    }
+
+    const lastError =
+      firstError && typeof firstError === "object" && "message" in firstError
+        ? String((firstError as any).message)
+        : firstError
+          ? "Unknown error"
+          : null;
+    setState({
+      mileageCellsByWeek: nextCellsByWeek,
+      mileageFlagsByWeek: nextFlagsByWeek,
+      mileageLoadedWeeks: nextLoadedWeeks,
+      lastError,
+    });
   } finally {
     decLoading();
   }
@@ -1071,6 +1391,10 @@ async function loadWorkoutsForDay(dateISO: string, force = false) {
 
 // ---------- training groups ----------
 async function loadTrainingGroups(force = false) {
+  const inFlightKey = teamScopedLoadKey(force ? "training-groups:force" : "training-groups");
+  const existing = inFlightTrainingGroupsByKey.get(inFlightKey);
+  if (existing) return existing;
+  const promise = (async () => {
   incLoading();
   try {
     const { teamId } = await ensureSessionAndTeam();
@@ -1094,6 +1418,13 @@ async function loadTrainingGroups(force = false) {
   } finally {
     decLoading();
   }
+  })();
+  inFlightTrainingGroupsByKey.set(inFlightKey, promise);
+  try {
+    await promise;
+  } finally {
+    inFlightTrainingGroupsByKey.delete(inFlightKey);
+  }
 }
 
 // ---------- seasons ----------
@@ -1109,6 +1440,10 @@ function sortTeamSeasons(rows: TeamSeason[]): TeamSeason[] {
 }
 
 async function loadTeamSeasons(force = false) {
+  const inFlightKey = teamScopedLoadKey(force ? "team-seasons:force" : "team-seasons");
+  const existing = inFlightTeamSeasonsByKey.get(inFlightKey);
+  if (existing) return existing;
+  const promise = (async () => {
   incLoading();
   try {
     const { teamId } = await ensureSessionAndTeam();
@@ -1118,15 +1453,39 @@ async function loadTeamSeasons(force = false) {
     }
     if (!force && state.teamSeasonsLoaded) return;
     const rows = await listTeamSeasons();
+    const sortedSeasons = sortTeamSeasons(Array.isArray(rows) ? rows : []);
     setState({
-      teamSeasons: sortTeamSeasons(Array.isArray(rows) ? rows : []),
+      teamSeasons: sortedSeasons,
       teamSeasonsLoaded: true,
       lastError: null,
     });
+
+    const selectedSeasonId = String(state.sharedSelectedSeasonId ?? "").trim();
+    const hasSelectedSeason = !!selectedSeasonId;
+    const selectedStillExists = hasSelectedSeason
+      ? sortedSeasons.some((season) => String(season?.id ?? "").trim() === selectedSeasonId)
+      : true;
+
+    if (!state.sharedSelectedSeasonInitialized) {
+      const defaultSeasonId = resolveDefaultCurrentSeasonId(toDateOnlyISO(new Date()), sortedSeasons);
+      if (defaultSeasonId || state.sharedSelectedSeasonId !== defaultSeasonId) {
+        await setSharedSelectedSeasonId(defaultSeasonId);
+      }
+    } else if (hasSelectedSeason && !selectedStillExists) {
+      const defaultSeasonId = resolveDefaultCurrentSeasonId(toDateOnlyISO(new Date()), sortedSeasons);
+      await setSharedSelectedSeasonId(defaultSeasonId);
+    }
   } catch (e) {
     setError(e);
   } finally {
     decLoading();
+  }
+  })();
+  inFlightTeamSeasonsByKey.set(inFlightKey, promise);
+  try {
+    await promise;
+  } finally {
+    inFlightTeamSeasonsByKey.delete(inFlightKey);
   }
 }
 
@@ -1141,6 +1500,10 @@ function resolveAthleteSeasonWindow(
 }
 
 async function loadAthleteSeasonOverrides(force = false) {
+  const inFlightKey = teamScopedLoadKey(force ? "athlete-season-overrides:force" : "athlete-season-overrides");
+  const existing = inFlightAthleteSeasonOverridesByKey.get(inFlightKey);
+  if (existing) return existing;
+  const promise = (async () => {
   incLoading();
   try {
     const { teamId } = await ensureSessionAndTeam();
@@ -1159,6 +1522,13 @@ async function loadAthleteSeasonOverrides(force = false) {
     setError(e);
   } finally {
     decLoading();
+  }
+  })();
+  inFlightAthleteSeasonOverridesByKey.set(inFlightKey, promise);
+  try {
+    await promise;
+  } finally {
+    inFlightAthleteSeasonOverridesByKey.delete(inFlightKey);
   }
 }
 
@@ -1391,6 +1761,8 @@ export const teamDataStore = {
     updateAthlete,
 
     loadMileageWeek,
+    loadMileageWeeks,
+    loadVisibleMileageWeekForAthlete,
     setMileageCell,
     setMileageOffFlag,
 
@@ -1399,6 +1771,7 @@ export const teamDataStore = {
     loadTeamSeasons,
     loadAthleteSeasonOverrides,
     loadSharedCoachFilters,
+    resetForContextSwitch,
     setSharedSelectedTrainingGroupIds,
     setSharedSelectedSeasonId,
     clearSharedCoachFilters,

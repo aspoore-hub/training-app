@@ -12,6 +12,7 @@ export type GridBindHandlers = {
 
 export type GridCellBinding = {
   cellId: GridCellId;
+  version?: string | number;
   ref: (el: any) => void;
   handlers: GridBindHandlers;
 };

@@ -1,6 +1,8 @@
 import { Ionicons } from "@expo/vector-icons";
+import { useEffect, useMemo, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { COACH_NAV_ITEMS, isCoachNavItemActive } from "../../lib/coachNav";
+import { canEditTraining, getCurrentTeamRole, type TeamRole } from "../../lib/teamPermissions";
 
 type CoachNavListProps = {
   pathname: string;
@@ -9,9 +11,30 @@ type CoachNavListProps = {
 };
 
 export function CoachNavList({ pathname, onNavigate, onItemPressDone }: CoachNavListProps) {
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const canCreateTraining = canEditTraining(currentTeamRole);
+  const visibleItems = useMemo(
+    () => COACH_NAV_ITEMS.filter((item) => item.key !== "planner" || canCreateTraining),
+    [canCreateTraining]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    getCurrentTeamRole()
+      .then((role) => {
+        if (!cancelled) setCurrentTeamRole(role);
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentTeamRole(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <View style={{ gap: 4 }}>
-      {COACH_NAV_ITEMS.map((item) => {
+      {visibleItems.map((item) => {
         const active = isCoachNavItemActive(pathname, item.href);
         return (
           <Pressable

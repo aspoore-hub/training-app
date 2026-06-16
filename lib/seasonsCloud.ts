@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
+import { requireTeamPermission } from "./teamPermissions";
 
 export type TeamSeasonRow = {
   id: string;
@@ -54,6 +55,7 @@ export async function createTeamSeason(input: {
   sort_order?: number | null;
 }): Promise<TeamSeasonRow> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("roster.edit", teamId);
   const payload = {
     team_id: teamId,
     name: String(input.name ?? "").trim(),
@@ -82,6 +84,7 @@ export async function updateTeamSeason(
   }
 ): Promise<TeamSeasonRow> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("roster.edit", teamId);
   const update: Record<string, unknown> = {};
   if (typeof patch.name === "string") update.name = patch.name.trim();
   if (typeof patch.start_date === "string") update.start_date = patch.start_date.trim();
@@ -103,6 +106,7 @@ export async function updateTeamSeason(
 
 export async function setTeamSeasonArchived(seasonId: string, archived: boolean): Promise<TeamSeasonRow> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("roster.edit", teamId);
   const { data, error } = await supabase
     .from("team_seasons")
     .update({ archived_at: archived ? new Date().toISOString() : null })
@@ -133,6 +137,7 @@ export async function upsertAthleteSeasonOverride(input: {
   excluded_at?: string | null;
 }): Promise<TeamAthleteSeasonOverrideRow> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("roster.edit", teamId);
   const payload = {
     team_id: teamId,
     season_id: String(input.season_id ?? "").trim(),
@@ -158,6 +163,7 @@ export async function upsertAthleteSeasonOverride(input: {
 
 export async function clearAthleteSeasonOverride(seasonId: string, athleteProfileId: string): Promise<void> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("roster.edit", teamId);
   const { error } = await supabase
     .from("team_athlete_season_overrides")
     .delete()

@@ -7,6 +7,7 @@ import {
   hasWorkoutFeedback,
   parseNumericLike,
 } from "../../../lib/feedbackParsing";
+import { loadAthleteDailyLogEntries, type AthleteDailyLogEntry } from "../../../lib/athleteDailyLogEntries";
 import { loadMileageFeedback, type MileageSessionFeedback } from "../../../lib/mileageFeedback";
 import { getWeekIndex, getWeekStartISO, parseISODate, toISODate } from "../../../lib/mileagePlan";
 import { loadWeekStartSetting } from "../../../lib/settings";
@@ -21,38 +22,60 @@ import { isActiveTrainingGroupMembership, teamDataStore } from "../../../lib/tea
 import { formatParsedWorkoutEntry, parseWorkoutEntryValue } from "../../../lib/workoutEntryParser";
 import type { WeekStartDay } from "../../../lib/types";
 
-type FeedbackFilter = "all" | "with_feedback" | "no_feedback";
+type FeedbackFilter = "submitted" | "missing" | "all";
 type ViewMode = "day" | "week" | "month";
-type SourceType = "workout" | "planned_session";
+type SourceType = "workout" | "mileage" | "daily_note" | "extra_activity";
+type PrescribedSourceType = "workout" | "mileage";
 
-type TrainingLogRow = {
+type SubmittedTrainingLogRow = {
   key: string;
   athleteId: string | null;
   athleteName: string;
   dateISO: string;
-  session: "AM" | "PM";
+  session: "AM" | "PM" | null;
   sourceType: SourceType;
   sourceTitle: string;
+  activityKind: string | null;
   prescribedText: string | null;
   completedMiles: number | null;
   completedTime: string | null;
   splitsOrPace: string | null;
   additionalFeedback: string | null;
   updatedAt: number | null;
-  hasFeedback: boolean;
+  duplicateReason: string | null;
 };
 
-type SessionSummary = {
-  session: "AM" | "PM";
-  total: number;
-  submitted: number;
-  missing: number;
-};
-
-type DaySummary = {
+type MissingTrainingLogRow = {
+  key: string;
+  athleteId: string | null;
+  athleteName: string;
   dateISO: string;
-  totalRows: number;
-  visibleSessions: SessionSummary[];
+  session: "AM" | "PM";
+  sourceType: PrescribedSourceType;
+  prescribedText: string | null;
+  sourceTitle: string | null;
+  categories: string[];
+};
+
+type TrainingLogRow = SubmittedTrainingLogRow;
+
+type SubmittedAthleteGroup = {
+  athleteKey: string;
+  athleteName: string;
+  rows: SubmittedTrainingLogRow[];
+};
+
+type WeekDayLogSection = {
+  dateISO: string;
+  submitted: {
+    groups: SubmittedAthleteGroup[];
+    total: number;
+  };
+  missing: {
+    am: MissingTrainingLogRow[];
+    pm: MissingTrainingLogRow[];
+    total: number;
+  };
 };
 
 type MonthSessionSummary = {
@@ -72,9 +95,9 @@ type MonthDaySummary = {
 };
 
 const FEEDBACK_FILTER_OPTIONS: Array<{ value: FeedbackFilter; label: string }> = [
+  { value: "submitted", label: "Submitted / Logged" },
+  { value: "missing", label: "Missing prescribed feedback" },
   { value: "all", label: "All" },
-  { value: "with_feedback", label: "With feedback" },
-  { value: "no_feedback", label: "No feedback" },
 ];
 
 const COACH_TRAINING_LOGS_SELECTED_ATHLETES_KEY = "coach_training_logs_selected_athletes_v1";
@@ -201,8 +224,39 @@ function formatCompletedLabel(row: TrainingLogRow): string {
   return parts.length > 0 ? parts.join(" • ") : "—";
 }
 
-function formatStatusLabel(row: TrainingLogRow): string {
-  return row.hasFeedback ? "Feedback submitted" : "No feedback";
+function formatSourceLabel(sourceType: SourceType): string {
+  if (sourceType === "workout") return "Workout";
+  if (sourceType === "mileage") return "Mileage";
+  if (sourceType === "extra_activity") return "Extra activity";
+  return "Daily note";
+}
+
+function formatActivityKindLabel(kind: string | null): string {
+  if (kind === "cross_training") return "Cross training";
+  if (kind === "run") return "Run";
+  if (kind === "strength") return "Strength";
+  if (kind === "mobility") return "Mobility";
+  if (kind === "other") return "Other";
+  return "";
+}
+
+function normalizeFeedbackFilter(value: unknown): FeedbackFilter {
+  const raw = String(value ?? "").trim();
+  if (raw === "submitted" || raw === "with_feedback") return "submitted";
+  if (raw === "missing" || raw === "no_feedback") return "missing";
+  if (raw === "all") return "all";
+  return "submitted";
+}
+
+function workoutCategories(row: TeamWorkoutRow): string[] {
+  const out = new Set<string>();
+  const primary = String(row.primary_category ?? "").trim();
+  if (primary) out.add(primary);
+  (Array.isArray(row.categories) ? row.categories : []).forEach((category) => {
+    const normalized = String(category ?? "").trim();
+    if (normalized) out.add(normalized);
+  });
+  return Array.from(out);
 }
 
 function resolveMileagePrescribedText(
@@ -246,8 +300,64 @@ function shouldPreferWorkout(nextRow: TeamWorkoutRow, currentRow: TeamWorkoutRow
   return nextUpdated >= currentUpdated;
 }
 
-function sortRowsByAthleteName(rows: TrainingLogRow[]): TrainingLogRow[] {
+function normalizeComparableFeedbackValue(value: unknown): string {
+  const numeric = parseNumericLike(value);
+  if (numeric != null) return String(Math.round(numeric * 100) / 100);
+  return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function mileageFeedbackDiffersFromWorkout(entry: MileageSessionFeedback, row: TeamWorkoutRow): boolean {
+  const comparisons: Array<[unknown, unknown]> = [
+    [entry.completedMiles, row.completed_miles],
+    [entry.completedTime, row.completed_time_text],
+    [entry.splitsOrPace, row.splits_or_pace],
+    [entry.additionalFeedback, row.additional_feedback],
+  ];
+
+  return comparisons.some(([mileageValue, workoutValue]) => {
+    const mileage = normalizeComparableFeedbackValue(mileageValue);
+    if (!mileage) return false;
+    const workout = normalizeComparableFeedbackValue(workoutValue);
+    return mileage !== workout;
+  });
+}
+
+function sortMissingRowsByAthleteName(rows: MissingTrainingLogRow[]): MissingTrainingLogRow[] {
   return [...rows].sort((a, b) => compareAthleteDisplayNamesByLastName(a.athleteName, b.athleteName));
+}
+
+function groupSubmittedRowsByAthlete(rows: SubmittedTrainingLogRow[]): SubmittedAthleteGroup[] {
+  const submittedByAthlete = new Map<string, SubmittedAthleteGroup>();
+  const rowOrder = (row: SubmittedTrainingLogRow) => {
+    if (row.session === "AM") return 0;
+    if (row.session === "PM") return 1;
+    return row.sourceType === "extra_activity" ? 2 : 3;
+  };
+
+  for (const row of rows) {
+    const athleteKey = row.athleteId ? `athlete:${row.athleteId}` : `name:${row.athleteName}`;
+    const group = submittedByAthlete.get(athleteKey) ?? {
+      athleteKey,
+      athleteName: row.athleteName,
+      rows: [],
+    };
+    group.rows.push(row);
+    submittedByAthlete.set(athleteKey, group);
+  }
+
+  return Array.from(submittedByAthlete.values())
+    .map((group) => ({
+      ...group,
+      rows: [...group.rows].sort((a, b) => {
+        const orderDiff = rowOrder(a) - rowOrder(b);
+        if (orderDiff !== 0) return orderDiff;
+        const updatedA = a.updatedAt ?? 0;
+        const updatedB = b.updatedAt ?? 0;
+        if (updatedA !== updatedB) return updatedA - updatedB;
+        return a.key.localeCompare(b.key);
+      }),
+    }))
+    .sort((a, b) => compareAthleteDisplayNamesByLastName(a.athleteName, b.athleteName));
 }
 
 export default function CoachTrainingLogsTab() {
@@ -260,14 +370,18 @@ export default function CoachTrainingLogsTab() {
   const [roster, setRoster] = useState<TeamRosterAthlete[]>([]);
   const [workoutRows, setWorkoutRows] = useState<TeamWorkoutRow[]>([]);
   const [mileageFeedback, setMileageFeedback] = useState<MileageSessionFeedback[]>([]);
+  const [dailyLogEntries, setDailyLogEntries] = useState<AthleteDailyLogEntry[]>([]);
   const [selectedAthleteIds, setSelectedAthleteIds] = useState<string[]>([]);
-  const [feedbackFilter, setFeedbackFilter] = useState<FeedbackFilter>("all");
+  const [feedbackFilter, setFeedbackFilter] = useState<FeedbackFilter>("submitted");
   const [athleteFilterOpen, setAthleteFilterOpen] = useState(false);
   const selectedTrainingGroupIds = store.sharedSelectedTrainingGroupIds;
   const [trainingGroupFilterOpen, setTrainingGroupFilterOpen] = useState(false);
   const selectedSeasonId = store.sharedSelectedSeasonId;
   const [seasonFilterOpen, setSeasonFilterOpen] = useState(false);
   const [feedbackFilterOpen, setFeedbackFilterOpen] = useState(false);
+  const [showDayMissingFeedback, setShowDayMissingFeedback] = useState(false);
+  const [expandedWeekDays, setExpandedWeekDays] = useState<Record<string, boolean>>({});
+  const [weekMissingOpenByDate, setWeekMissingOpenByDate] = useState<Record<string, boolean>>({});
   const [prefsHydrated, setPrefsHydrated] = useState(false);
   const [detailRow, setDetailRow] = useState<TrainingLogRow | null>(null);
 
@@ -338,16 +452,18 @@ export default function CoachTrainingLogsTab() {
       const dates = buildDateRange(startISO, endISO);
       const weekStarts = Array.from(new Set(dates.map((dateISO) => getWeekStartISO(dateISO, nextWeekStartsOn))));
 
-      const [rosterRows, rangeRows, mileageEntries] = await Promise.all([
+      const [rosterRows, rangeRows, mileageEntries, dailyEntries] = await Promise.all([
         loadTeamRoster(),
         listTeamWorkoutsInRange(startISO, endISO),
         loadMileageFeedback(),
+        loadAthleteDailyLogEntries(),
       ]);
       await Promise.all(weekStarts.map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO)));
 
       setRoster(Array.isArray(rosterRows) ? rosterRows : []);
       setWorkoutRows(Array.isArray(rangeRows) ? rangeRows : []);
       setMileageFeedback(Array.isArray(mileageEntries) ? mileageEntries : []);
+      setDailyLogEntries(Array.isArray(dailyEntries) ? dailyEntries : []);
     } finally {
       setLoading(false);
     }
@@ -380,13 +496,7 @@ export default function CoachTrainingLogsTab() {
           ? savedAthletesParsed.map((value) => String(value ?? "").trim()).filter(Boolean)
           : [];
 
-        const savedFeedbackFilter = String(savedFeedbackFilterRaw?.[1] ?? "").trim();
-        const nextFeedbackFilter: FeedbackFilter =
-          savedFeedbackFilter === "with_feedback" ||
-          savedFeedbackFilter === "no_feedback" ||
-          savedFeedbackFilter === "all"
-            ? savedFeedbackFilter
-            : "all";
+        const nextFeedbackFilter = normalizeFeedbackFilter(savedFeedbackFilterRaw?.[1]);
 
         const savedViewMode = String(savedViewModeRaw?.[1] ?? "").trim();
         const nextViewMode: ViewMode =
@@ -428,6 +538,10 @@ export default function CoachTrainingLogsTab() {
     if (!prefsHydrated) return;
     void AsyncStorage.setItem(COACH_TRAINING_LOGS_FEEDBACK_FILTER_KEY, feedbackFilter).catch(() => {});
   }, [feedbackFilter, prefsHydrated]);
+
+  useEffect(() => {
+    setShowDayMissingFeedback(false);
+  }, [anchorDateISO, feedbackFilter, selectedAthleteIds, selectedSeasonId, selectedTrainingGroupIds]);
 
   useEffect(() => {
     if (!prefsHydrated) return;
@@ -512,7 +626,10 @@ export default function CoachTrainingLogsTab() {
     }
   }, [seasonFilterOptions, selectedSeasonId, store.sharedCoachFiltersLoaded, store.teamSeasonsLoaded]);
 
-  const normalizedRows = useMemo<TrainingLogRow[]>(() => {
+  const normalizedLogRows = useMemo<{
+    submittedLogRows: SubmittedTrainingLogRow[];
+    missingPrescribedRows: MissingTrainingLogRow[];
+  }>(() => {
     const dateSet = new Set(visibleDates);
     const cellsByWeek = store.mileageCellsByWeek;
 
@@ -530,7 +647,32 @@ export default function CoachTrainingLogsTab() {
       }
     }
 
-    const rows: TrainingLogRow[] = [];
+    const mileageFeedbackByAthleteDateSession = new Map<string, MileageSessionFeedback[]>();
+    for (const entry of mileageFeedback) {
+      const dateISO = String(entry.dateISO ?? "");
+      if (!dateSet.has(dateISO)) continue;
+      const session = normalizeSession(entry.session);
+      const athleteIdRaw = String(entry.athleteId ?? "").trim();
+      const athleteNameFromEntry = String(entry.athleteName ?? "").trim();
+
+      let athleteId: string | null = athleteIdRaw || null;
+      if (!athleteId && athleteNameFromEntry) {
+        const matched = roster.find(
+          (athlete) =>
+            String(athlete.displayName ?? "").trim().toLowerCase() === athleteNameFromEntry.toLowerCase()
+        );
+        athleteId = matched ? String(matched.id ?? "").trim() || null : null;
+      }
+
+      if (!athleteId) continue;
+      const key = `${dateISO}|${athleteId}|${session}`;
+      const list = mileageFeedbackByAthleteDateSession.get(key) ?? [];
+      list.push(entry);
+      mileageFeedbackByAthleteDateSession.set(key, list);
+    }
+
+    const submittedLogRows: SubmittedTrainingLogRow[] = [];
+    const missingPrescribedRows: MissingTrainingLogRow[] = [];
 
     for (const [key, row] of workoutByAthleteDateSession.entries()) {
       const athleteId = String(row.athlete_profile_id ?? "").trim() || null;
@@ -550,22 +692,45 @@ export default function CoachTrainingLogsTab() {
           ? `${Math.round(row.planned_distance * 100) / 100} ${String(row.planned_distance_unit ?? "mi").toLowerCase()}`
           : "";
       const prescribedText = String(mileagePrescribed || distancePlan).trim() || null;
+      const workoutHasFeedback = hasWorkoutFeedback(row);
+      const matchingMileageEntries = mileageFeedbackByAthleteDateSession.get(key) ?? [];
+      const hasSubmittedMileageFeedback = matchingMileageEntries.some((entry) => hasMileageFeedback(entry));
 
-      rows.push({
-        key: `workout:${key}:${row.id}`,
+      if (workoutHasFeedback) {
+        submittedLogRows.push({
+          key: `workout:${key}:${row.id}`,
+          athleteId,
+          athleteName,
+          dateISO,
+          session,
+          sourceType: "workout",
+          sourceTitle: String(row.title ?? "Workout").trim() || "Workout",
+          activityKind: null,
+          prescribedText,
+          completedMiles: parseNumericLike(row.completed_miles) ?? null,
+          completedTime: String(row.completed_time_text ?? "").trim() || null,
+          splitsOrPace: String(row.splits_or_pace ?? "").trim() || null,
+          additionalFeedback: String(row.additional_feedback ?? "").trim() || null,
+          updatedAt: toComparableUpdatedAt(row.updated_at) || null,
+          duplicateReason: null,
+        });
+        continue;
+      }
+
+      // A mileage-only submission for the same athlete/date/session should be the
+      // submitted row; do not also show a blank workout row as missing.
+      if (hasSubmittedMileageFeedback) continue;
+
+      missingPrescribedRows.push({
+        key: `missing-workout:${key}:${row.id}`,
         athleteId,
         athleteName,
         dateISO,
         session,
         sourceType: "workout",
-        sourceTitle: String(row.title ?? "Workout").trim() || "Workout",
         prescribedText,
-        completedMiles: parseNumericLike(row.completed_miles) ?? null,
-        completedTime: String(row.completed_time_text ?? "").trim() || null,
-        splitsOrPace: String(row.splits_or_pace ?? "").trim() || null,
-        additionalFeedback: String(row.additional_feedback ?? "").trim() || null,
-        updatedAt: toComparableUpdatedAt(row.updated_at) || null,
-        hasFeedback: hasWorkoutFeedback(row),
+        sourceTitle: String(row.title ?? "Workout").trim() || "Workout",
+        categories: workoutCategories(row),
       });
     }
 
@@ -586,7 +751,18 @@ export default function CoachTrainingLogsTab() {
       }
 
       const dedupeKey = athleteId ? `${dateISO}|${athleteId}|${session}` : null;
-      if (dedupeKey && workoutByAthleteDateSession.has(dedupeKey)) continue;
+      const matchingWorkout = dedupeKey ? workoutByAthleteDateSession.get(dedupeKey) ?? null : null;
+      const mileageHasFeedback = hasMileageFeedback(entry);
+      let duplicateReason: string | null = null;
+      if (matchingWorkout) {
+        const workoutHasFeedback = hasWorkoutFeedback(matchingWorkout);
+        if (workoutHasFeedback) {
+          if (!mileageHasFeedback || !mileageFeedbackDiffersFromWorkout(entry, matchingWorkout)) {
+            continue;
+          }
+          duplicateReason = "Additional mileage feedback";
+        }
+      }
 
       const athleteName = athleteId
         ? resolveAthleteDisplayName(athleteId, rosterNameById, athleteNameFromEntry)
@@ -595,27 +771,83 @@ export default function CoachTrainingLogsTab() {
         athleteId && !String(entry.prescribed ?? "").trim()
           ? resolveMileagePrescribedText(cellsByWeek, athleteId, dateISO, session, weekStartsOn)
           : "";
+      const prescribedText = String(entry.prescribed ?? fallbackPrescribed).trim() || null;
 
-      rows.push({
-        key: `planned:${dateISO}:${String(entry.id ?? "") || `${athleteName}|${session}`}`,
+      if (mileageHasFeedback) {
+        submittedLogRows.push({
+          key: `planned:${dateISO}:${String(entry.id ?? "") || `${athleteName}|${session}`}`,
+          athleteId,
+          athleteName,
+          dateISO,
+          session,
+          sourceType: "mileage",
+          sourceTitle: "Planned mileage",
+          activityKind: null,
+          prescribedText,
+          completedMiles: parseNumericLike(entry.completedMiles) ?? null,
+          completedTime: String(entry.completedTime ?? "").trim() || null,
+          splitsOrPace: String(entry.splitsOrPace ?? "").trim() || null,
+          additionalFeedback: String(entry.additionalFeedback ?? "").trim() || null,
+          updatedAt: toComparableUpdatedAt(entry.updatedAt) || null,
+          duplicateReason,
+        });
+      } else if (!matchingWorkout) {
+        missingPrescribedRows.push({
+          key: `missing-mileage-feedback:${dateISO}:${String(entry.id ?? "") || `${athleteName}|${session}`}`,
+          athleteId,
+          athleteName,
+          dateISO,
+          session,
+          sourceType: "mileage",
+          prescribedText,
+          sourceTitle: "Planned mileage",
+          categories: [],
+        });
+      }
+    }
+
+    for (const entry of dailyLogEntries) {
+      const dateISO = String(entry.dateISO ?? "");
+      if (!dateSet.has(dateISO)) continue;
+      const athleteId = String(entry.athleteId ?? "").trim() || null;
+      const athleteNameFromEntry = String(entry.athleteName ?? "").trim();
+      const athleteName = athleteId
+        ? resolveAthleteDisplayName(athleteId, rosterNameById, athleteNameFromEntry)
+        : athleteNameFromEntry || "Athlete";
+      const session = entry.session === "AM" || entry.session === "PM" ? entry.session : null;
+      const title = String(entry.title ?? "").trim();
+      const notes = String(entry.notes ?? "").trim();
+      const entryType = entry.entryType === "extra_activity" ? "extra_activity" : "daily_note";
+      submittedLogRows.push({
+        key: `daily-log:${String(entry.id ?? "") || `${athleteName}|${dateISO}|${entry.updatedAt}`}`,
         athleteId,
         athleteName,
         dateISO,
         session,
-        sourceType: "planned_session",
-        sourceTitle: "Planned mileage",
-        prescribedText: String(entry.prescribed ?? fallbackPrescribed).trim() || null,
+        sourceType: entryType,
+        sourceTitle: title || formatSourceLabel(entryType),
+        activityKind: String(entry.activityKind ?? "").trim() || null,
+        prescribedText: null,
         completedMiles: parseNumericLike(entry.completedMiles) ?? null,
         completedTime: String(entry.completedTime ?? "").trim() || null,
-        splitsOrPace: String(entry.splitsOrPace ?? "").trim() || null,
-        additionalFeedback: String(entry.additionalFeedback ?? "").trim() || null,
+        splitsOrPace: null,
+        additionalFeedback: notes || null,
         updatedAt: toComparableUpdatedAt(entry.updatedAt) || null,
-        hasFeedback: hasMileageFeedback(entry),
+        duplicateReason: null,
       });
     }
 
-    return rows;
-  }, [mileageFeedback, roster, rosterNameById, store.mileageCellsByWeek, visibleDates, weekStartsOn, workoutRows]);
+    return { submittedLogRows, missingPrescribedRows };
+  }, [
+    dailyLogEntries,
+    mileageFeedback,
+    roster,
+    rosterNameById,
+    store.mileageCellsByWeek,
+    visibleDates,
+    weekStartsOn,
+    workoutRows,
+  ]);
 
   const selectedAthleteFilterLabel = useMemo(() => {
     if (selectedAthleteIds.length === 0) return "Athletes: All";
@@ -686,13 +918,11 @@ export default function CoachTrainingLogsTab() {
     return (store.teamSeasons ?? []).find((season) => String(season?.id ?? "").trim() === id) ?? null;
   }, [selectedSeasonId, store.teamSeasons]);
 
-  const athleteGroupSeasonFilteredRows = useMemo(() => {
-    let rows = normalizedRows;
-    const selectedAthletes = new Set(selectedAthleteIds);
-    rows = rows.filter((row) => {
+  const rowPassesSharedFilters = useCallback(
+    (row: { athleteId: string | null; dateISO: string }) => {
       const athleteId = String(row.athleteId ?? "").trim();
-      const athletePass =
-        selectedAthleteIds.length === 0 ? true : (!!athleteId && selectedAthletes.has(athleteId));
+      const selectedAthletes = new Set(selectedAthleteIds);
+      const athletePass = selectedAthleteIds.length === 0 ? true : (!!athleteId && selectedAthletes.has(athleteId));
       const groupPass =
         selectedTrainingGroupIds.length === 0 ? true : (!!athleteId && selectedTrainingGroupAthleteIds.has(athleteId));
       const rowDateISO = String(row.dateISO ?? "").trim();
@@ -708,105 +938,125 @@ export default function CoachTrainingLogsTab() {
         );
       })();
       return athletePass && groupPass && seasonPass;
-    });
-    return rows;
-  }, [
-    athleteSeasonOverridesBySeasonAndAthlete,
-    normalizedRows,
-    selectedAthleteIds,
-    selectedSeason,
-    selectedTrainingGroupAthleteIds,
-    selectedTrainingGroupIds.length,
-  ]);
+    },
+    [
+      athleteSeasonOverridesBySeasonAndAthlete,
+      selectedAthleteIds,
+      selectedSeason,
+      selectedTrainingGroupAthleteIds,
+      selectedTrainingGroupIds.length,
+    ]
+  );
 
-  const statusFilteredRows = useMemo(() => {
-    let rows = athleteGroupSeasonFilteredRows;
-    if (feedbackFilter === "with_feedback") rows = rows.filter((row) => row.hasFeedback);
-    if (feedbackFilter === "no_feedback") rows = rows.filter((row) => !row.hasFeedback);
-    return rows;
-  }, [athleteGroupSeasonFilteredRows, feedbackFilter]);
+  const filteredSubmittedLogRows = useMemo(
+    () => normalizedLogRows.submittedLogRows.filter(rowPassesSharedFilters),
+    [normalizedLogRows.submittedLogRows, rowPassesSharedFilters]
+  );
+
+  const filteredMissingPrescribedRows = useMemo(
+    () => normalizedLogRows.missingPrescribedRows.filter(rowPassesSharedFilters),
+    [normalizedLogRows.missingPrescribedRows, rowPassesSharedFilters]
+  );
 
   const dayRows = useMemo(() => {
-    const rows = statusFilteredRows.filter((row) => row.dateISO === anchorDateISO);
+    const submittedRows = filteredSubmittedLogRows.filter((row) => row.dateISO === anchorDateISO);
+    const missingRows = filteredMissingPrescribedRows.filter((row) => row.dateISO === anchorDateISO);
+    const submittedGroups = groupSubmittedRowsByAthlete(submittedRows);
+    const missingAm = sortMissingRowsByAthleteName(missingRows.filter((row) => row.session === "AM"));
+    const missingPm = sortMissingRowsByAthleteName(missingRows.filter((row) => row.session === "PM"));
+
     return {
-      am: sortRowsByAthleteName(rows.filter((row) => row.session === "AM")),
-      pm: sortRowsByAthleteName(rows.filter((row) => row.session === "PM")),
+      submitted: {
+        groups: submittedGroups,
+        total: submittedRows.length,
+      },
+      missing: {
+        am: missingAm,
+        pm: missingPm,
+        total: missingAm.length + missingPm.length,
+      },
     };
-  }, [anchorDateISO, statusFilteredRows]);
+  }, [anchorDateISO, filteredMissingPrescribedRows, filteredSubmittedLogRows]);
 
-  const weekDaySummaries = useMemo<DaySummary[]>(() => {
-    const byDateSession = new Map<string, { am: TrainingLogRow[]; pm: TrainingLogRow[] }>();
-    for (const dateISO of visibleDates) {
-      byDateSession.set(dateISO, { am: [], pm: [] });
-    }
-    for (const row of athleteGroupSeasonFilteredRows) {
-      const day = byDateSession.get(row.dateISO);
-      if (!day) continue;
-      if (row.session === "AM") day.am.push(row);
-      else day.pm.push(row);
-    }
-
-    const allowSession = (summary: SessionSummary): boolean => {
-      if (feedbackFilter === "with_feedback") return summary.submitted > 0;
-      if (feedbackFilter === "no_feedback") return summary.missing > 0;
-      return summary.total > 0;
-    };
-
+  const weekDaySections = useMemo<WeekDayLogSection[]>(() => {
+    if (viewMode !== "week") return [];
     return visibleDates.map((dateISO) => {
-      const buckets = byDateSession.get(dateISO) ?? { am: [], pm: [] };
-      const buildSummary = (session: "AM" | "PM", rows: TrainingLogRow[]): SessionSummary => {
-        const total = rows.length;
-        const submitted = rows.filter((row) => row.hasFeedback).length;
-        const missing = total - submitted;
-        return { session, total, submitted, missing };
-      };
-      const summaries = [buildSummary("AM", buckets.am), buildSummary("PM", buckets.pm)];
-      const visibleSessions = summaries.filter(allowSession);
+      const submittedRows = filteredSubmittedLogRows.filter((row) => row.dateISO === dateISO);
+      const missingRows = filteredMissingPrescribedRows.filter((row) => row.dateISO === dateISO);
+      const missingAm = sortMissingRowsByAthleteName(missingRows.filter((row) => row.session === "AM"));
+      const missingPm = sortMissingRowsByAthleteName(missingRows.filter((row) => row.session === "PM"));
       return {
         dateISO,
-        totalRows: summaries.reduce((sum, s) => sum + s.total, 0),
-        visibleSessions,
+        submitted: {
+          groups: groupSubmittedRowsByAthlete(submittedRows),
+          total: submittedRows.length,
+        },
+        missing: {
+          am: missingAm,
+          pm: missingPm,
+          total: missingAm.length + missingPm.length,
+        },
       };
     });
-  }, [athleteGroupSeasonFilteredRows, feedbackFilter, visibleDates]);
+  }, [filteredMissingPrescribedRows, filteredSubmittedLogRows, viewMode, visibleDates]);
+
+  useEffect(() => {
+    if (viewMode !== "week") return;
+    const singleAthleteMode = selectedAthleteIds.length === 1;
+    const nextExpanded: Record<string, boolean> = {};
+    for (const section of weekDaySections) {
+      if (!singleAthleteMode) {
+        nextExpanded[section.dateISO] = false;
+        continue;
+      }
+      nextExpanded[section.dateISO] =
+        feedbackFilter === "missing" ? section.missing.total > 0 : section.submitted.total > 0;
+    }
+    setExpandedWeekDays(nextExpanded);
+    setWeekMissingOpenByDate({});
+  }, [feedbackFilter, selectedAthleteIds.length, viewMode, visibleRange.startISO, weekDaySections]);
+
+  const summaryRows = useMemo(() => {
+    const submitted = filteredSubmittedLogRows.map((row) => ({ dateISO: row.dateISO, session: row.session, isSubmitted: true }));
+    const missing = filteredMissingPrescribedRows.map((row) => ({ dateISO: row.dateISO, session: row.session, isSubmitted: false }));
+    if (feedbackFilter === "submitted") return submitted;
+    if (feedbackFilter === "missing") return missing;
+    return [...submitted, ...missing];
+  }, [feedbackFilter, filteredMissingPrescribedRows, filteredSubmittedLogRows]);
 
   const hasWeekMatchesAfterFilters = useMemo(() => {
     if (viewMode !== "week") return true;
-    return weekDaySummaries.some((day) => day.visibleSessions.length > 0);
-  }, [viewMode, weekDaySummaries]);
+    if (feedbackFilter === "submitted") return weekDaySections.some((day) => day.submitted.total > 0);
+    if (feedbackFilter === "missing") return weekDaySections.some((day) => day.missing.total > 0);
+    return weekDaySections.some((day) => day.submitted.total > 0 || day.missing.total > 0);
+  }, [feedbackFilter, viewMode, weekDaySections]);
 
   const monthDaySummaries = useMemo<MonthDaySummary[]>(() => {
     if (viewMode !== "month") return [];
-    const byDate = new Map<string, TrainingLogRow[]>();
+    const byDate = new Map<string, typeof summaryRows>();
     for (const dateISO of visibleDates) byDate.set(dateISO, []);
-    for (const row of athleteGroupSeasonFilteredRows) {
+    for (const row of summaryRows) {
       const bucket = byDate.get(row.dateISO);
       if (bucket) bucket.push(row);
     }
 
-    const buildSessionSummary = (rows: TrainingLogRow[], session: "AM" | "PM"): MonthSessionSummary => {
+    const buildSessionSummary = (rows: typeof summaryRows, session: "AM" | "PM"): MonthSessionSummary => {
       const sessionRows = rows.filter((row) => row.session === session);
       const total = sessionRows.length;
-      const submitted = sessionRows.filter((row) => row.hasFeedback).length;
+      const submitted = sessionRows.filter((row) => row.isSubmitted).length;
       return { total, submitted, missing: total - submitted };
     };
 
     return visibleDates.map((dateISO) => {
       const rows = byDate.get(dateISO) ?? [];
       const total = rows.length;
-      const submitted = rows.filter((row) => row.hasFeedback).length;
+      const submitted = rows.filter((row) => row.isSubmitted).length;
       const missing = total - submitted;
       const am = buildSessionSummary(rows, "AM");
       const pm = buildSessionSummary(rows, "PM");
-      const isVisibleByStatusFilter =
-        feedbackFilter === "with_feedback"
-          ? submitted > 0
-          : feedbackFilter === "no_feedback"
-            ? missing > 0
-            : total > 0;
-      return { dateISO, total, submitted, missing, am, pm, isVisibleByStatusFilter };
+      return { dateISO, total, submitted, missing, am, pm, isVisibleByStatusFilter: total > 0 };
     });
-  }, [athleteGroupSeasonFilteredRows, feedbackFilter, viewMode, visibleDates]);
+  }, [summaryRows, viewMode, visibleDates]);
 
   const visibleMonthRows = useMemo(() => {
     return monthDaySummaries.filter((day) => day.isVisibleByStatusFilter);
@@ -828,83 +1078,70 @@ export default function CoachTrainingLogsTab() {
     return cells;
   }, [monthDaySummaries, viewMode, visibleDates, weekStartsOn]);
 
-  const renderRows = (rows: TrainingLogRow[]) => {
+  const renderMissingRows = (rows: MissingTrainingLogRow[]) => {
     if (rows.length === 0) return null;
-    return rows.map((row) => {
-      const content = (
-        <View
-          style={{
-            paddingHorizontal: 12,
-            paddingVertical: 10,
-            borderBottomWidth: 1,
-            borderBottomColor: "#edf2f7",
-            gap: 6,
-          }}
-        >
+    return rows.map((row) => (
+      <View
+        key={row.key}
+        style={{
+          paddingHorizontal: 12,
+          paddingVertical: 11,
+          borderBottomWidth: 1,
+          borderBottomColor: "#edf2f7",
+          gap: 6,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+          <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a", flexShrink: 1 }}>{row.athleteName}</Text>
           <View
             style={{
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 10,
+              borderRadius: 999,
+              borderWidth: 1,
+              borderColor: "#fed7aa",
+              backgroundColor: "#fff7ed",
+              paddingHorizontal: 8,
+              paddingVertical: 3,
             }}
           >
-            <Text style={{ fontSize: 13, fontWeight: "900", color: "#0f172a", flexShrink: 1 }}>
-              {row.athleteName}
-            </Text>
-            <View
-              style={{
-                borderRadius: 999,
-                borderWidth: 1,
-                borderColor: row.hasFeedback ? "#bbf7d0" : "#e2e8f0",
-                backgroundColor: row.hasFeedback ? "#ecfdf3" : "#f8fafc",
-                paddingHorizontal: 8,
-                paddingVertical: 3,
-              }}
-            >
-              <Text
-                style={{
-                  fontSize: 11,
-                  fontWeight: "800",
-                  color: row.hasFeedback ? "#166534" : "#64748b",
-                }}
-              >
-                {formatStatusLabel(row)}
-              </Text>
-            </View>
-          </View>
-
-          <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: 14, rowGap: 4 }}>
-            <Text style={{ fontSize: 12, color: "#334155" }}>
-              <Text style={{ fontWeight: "800", color: "#64748b" }}>Source: </Text>
-              {row.sourceTitle}
-            </Text>
-            <Text style={{ fontSize: 12, color: "#334155" }}>
-              <Text style={{ fontWeight: "800", color: "#64748b" }}>Planned: </Text>
-              {row.prescribedText || "—"}
-            </Text>
-            <Text style={{ fontSize: 12, color: "#334155" }}>
-              <Text style={{ fontWeight: "800", color: "#64748b" }}>Completed: </Text>
-              {formatCompletedLabel(row)}
-            </Text>
+            <Text style={{ fontSize: 11, fontWeight: "800", color: "#c2410c" }}>Missing</Text>
           </View>
         </View>
-      );
-
-      if (!row.hasFeedback) return <View key={row.key}>{content}</View>;
-      return (
-        <Pressable key={row.key} onPress={() => setDetailRow(row)}>
-          {content}
-        </Pressable>
-      );
-    });
+        <View style={{ gap: 4 }}>
+          <Text style={{ fontSize: 12, color: "#334155" }}>
+            <Text style={{ fontWeight: "800", color: "#64748b" }}>Source: </Text>
+            {row.sourceType === "workout" ? "Workout" : "Mileage"}
+          </Text>
+          {row.sourceTitle ? (
+            <Text style={{ fontSize: 13, fontWeight: "800", color: "#1f2937" }}>{row.sourceTitle}</Text>
+          ) : null}
+          {row.prescribedText ? (
+            <Text style={{ fontSize: 12, color: "#334155" }}>
+              <Text style={{ fontWeight: "800", color: "#64748b" }}>Prescribed: </Text>
+              {row.prescribedText}
+            </Text>
+          ) : null}
+          {row.categories.length > 0 ? (
+            <Text style={{ fontSize: 12, color: "#334155" }}>
+              <Text style={{ fontWeight: "800", color: "#64748b" }}>Categories: </Text>
+              {row.categories.join(" • ")}
+            </Text>
+          ) : null}
+        </View>
+      </View>
+    ));
   };
 
-  const renderSessionSection = (session: "AM" | "PM", rows: TrainingLogRow[]) => {
+  const renderSubmittedAthleteGroups = (
+    groups: SubmittedAthleteGroup[],
+    options?: { title?: string; total?: number; emptyLabel?: string; compact?: boolean }
+  ) => {
+    const title = options?.title ?? "Submitted Logs";
+    const total = options?.total ?? dayRows.submitted.total;
+    const emptyLabel = options?.emptyLabel ?? "No submitted logs for this day.";
     return (
       <View
         style={{
-          marginTop: 12,
+          marginTop: options?.compact ? 8 : 12,
           borderRadius: 12,
           borderWidth: 1,
           borderColor: "#dbe2ee",
@@ -924,18 +1161,135 @@ export default function CoachTrainingLogsTab() {
             justifyContent: "space-between",
           }}
         >
-          <Text style={{ fontSize: 14, fontWeight: "900", color: "#1f2a44" }}>{session}</Text>
+          <Text style={{ fontSize: 14, fontWeight: "900", color: "#1f2a44" }}>{title}</Text>
           <Text style={{ fontSize: 11, fontWeight: "800", color: "#64748b" }}>
-            {rows.length} {rows.length === 1 ? "log" : "logs"}
+            {total} {total === 1 ? "entry" : "entries"}
+          </Text>
+        </View>
+
+        {groups.length === 0 ? (
+          <View style={{ paddingHorizontal: 12, paddingVertical: 12 }}>
+            <Text style={{ fontSize: 12, fontWeight: "700", color: "#94a3b8" }}>
+              {emptyLabel}
+            </Text>
+          </View>
+        ) : (
+          groups.map((group) => (
+            <View
+              key={`training-logs-submitted-athlete-${group.athleteKey}`}
+              style={{
+                borderBottomWidth: 1,
+                borderBottomColor: "#edf2f7",
+                paddingHorizontal: 12,
+                paddingVertical: 12,
+                gap: 9,
+              }}
+            >
+              <Text style={{ fontSize: 15, fontWeight: "900", color: "#0f172a" }}>{group.athleteName}</Text>
+              {group.rows.map((row) => {
+                const completedLabel = formatCompletedLabel(row);
+                const sessionLabel = row.session ? `${row.session} • ${formatSourceLabel(row.sourceType)}` : formatSourceLabel(row.sourceType);
+                return (
+                  <Pressable
+                    key={row.key}
+                    onPress={() => setDetailRow(row)}
+                    style={{
+                      borderWidth: 1,
+                      borderColor: "#e2e8f0",
+                      borderRadius: 10,
+                      backgroundColor: "#f8fafc",
+                      paddingHorizontal: 10,
+                      paddingVertical: 9,
+                      gap: 5,
+                    }}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                      <Text style={{ fontSize: 12, fontWeight: "900", color: "#475569" }}>{sessionLabel}</Text>
+                      {row.duplicateReason ? (
+                        <Text style={{ fontSize: 11, fontWeight: "800", color: "#92400e", flexShrink: 1 }}>
+                          {row.duplicateReason}
+                        </Text>
+                      ) : null}
+                    </View>
+                    {row.sourceTitle ? (
+                      <Text style={{ fontSize: 13, fontWeight: "800", color: "#1f2937" }}>{row.sourceTitle}</Text>
+                    ) : null}
+                    {row.prescribedText ? (
+                      <Text style={{ fontSize: 12, color: "#334155" }}>
+                        <Text style={{ fontWeight: "800", color: "#64748b" }}>Planned: </Text>
+                        {row.prescribedText}
+                      </Text>
+                    ) : null}
+                    {row.activityKind ? (
+                      <Text style={{ fontSize: 12, color: "#334155" }}>
+                        <Text style={{ fontWeight: "800", color: "#64748b" }}>Activity: </Text>
+                        {formatActivityKindLabel(row.activityKind) || row.activityKind}
+                      </Text>
+                    ) : null}
+                    {completedLabel !== "—" ? (
+                      <Text style={{ fontSize: 12, color: "#334155" }}>
+                        <Text style={{ fontWeight: "800", color: "#64748b" }}>Completed: </Text>
+                        {completedLabel}
+                      </Text>
+                    ) : null}
+                    {row.splitsOrPace ? (
+                      <Text style={{ fontSize: 12, color: "#334155", lineHeight: 18 }}>
+                        <Text style={{ fontWeight: "800", color: "#64748b" }}>Splits/Pace: </Text>
+                        {row.splitsOrPace}
+                      </Text>
+                    ) : null}
+                    {row.additionalFeedback ? (
+                      <Text style={{ fontSize: 12, color: "#334155", lineHeight: 18 }}>
+                        <Text style={{ fontWeight: "800", color: "#64748b" }}>Notes: </Text>
+                        {row.additionalFeedback}
+                      </Text>
+                    ) : null}
+                  </Pressable>
+                );
+              })}
+            </View>
+          ))
+        )}
+      </View>
+    );
+  };
+
+  const renderMissingSection = (title: string, rows: MissingTrainingLogRow[]) => {
+    return (
+      <View
+        style={{
+          marginTop: 12,
+          borderRadius: 12,
+          borderWidth: 1,
+          borderColor: "#fed7aa",
+          backgroundColor: "#ffffff",
+          overflow: "hidden",
+        }}
+      >
+        <View
+          style={{
+            paddingHorizontal: 12,
+            paddingVertical: 10,
+            borderBottomWidth: 1,
+            borderBottomColor: "#fed7aa",
+            backgroundColor: "#fff7ed",
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <Text style={{ fontSize: 14, fontWeight: "900", color: "#7c2d12" }}>{title}</Text>
+          <Text style={{ fontSize: 11, fontWeight: "800", color: "#9a3412" }}>
+            {rows.length} {rows.length === 1 ? "row" : "rows"}
           </Text>
         </View>
 
         {rows.length === 0 ? (
           <View style={{ paddingHorizontal: 12, paddingVertical: 12 }}>
-            <Text style={{ fontSize: 12, fontWeight: "700", color: "#94a3b8" }}>No {session} logs</Text>
+            <Text style={{ fontSize: 12, fontWeight: "700", color: "#94a3b8" }}>No missing prescribed feedback</Text>
           </View>
         ) : (
-          renderRows(rows)
+          renderMissingRows(rows)
         )}
       </View>
     );
@@ -1030,11 +1384,13 @@ export default function CoachTrainingLogsTab() {
           </Pressable>
         </View>
 
-        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, zIndex: 30, flexWrap: "wrap" }}>
-          <View style={{ minWidth: 220, position: "relative", zIndex: 40 }}>
+        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
+          <View style={{ minWidth: 220 }}>
             <Pressable
               onPress={() => {
-                setAthleteFilterOpen((prev) => !prev);
+                setAthleteFilterOpen(true);
+                setTrainingGroupFilterOpen(false);
+                setSeasonFilterOpen(false);
                 setFeedbackFilterOpen(false);
               }}
               style={{
@@ -1054,97 +1410,17 @@ export default function CoachTrainingLogsTab() {
                 {selectedAthleteFilterLabel}
               </Text>
               <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>
-                {athleteFilterOpen ? "▴" : "▾"}
+                ▾
               </Text>
             </Pressable>
-
-            {athleteFilterOpen ? (
-              <View
-                style={{
-                  position: "absolute",
-                  top: 40,
-                  left: 0,
-                  right: 0,
-                  borderWidth: 1,
-                  borderColor: "#dbe2ee",
-                  borderRadius: 8,
-                  backgroundColor: "#fff",
-                  zIndex: 50,
-                  ...(Platform.OS === "android" ? { elevation: 8 } : null),
-                }}
-              >
-                <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
-                  <Pressable
-                    onPress={() => {
-                      setSelectedAthleteIds([]);
-                      setAthleteFilterOpen(false);
-                    }}
-                    style={{
-                      borderBottomWidth: 1,
-                      borderBottomColor: "#edf2f7",
-                      paddingHorizontal: 10,
-                      paddingVertical: 8,
-                      backgroundColor: selectedAthleteIds.length === 0 ? "#eff6ff" : "#fff",
-                    }}
-                  >
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
-                      All athletes (clear)
-                    </Text>
-                  </Pressable>
-
-                  <Pressable
-                    onPress={() => {
-                      setSelectedAthleteIds(activeAthleteFilterOptions.map((option) => option.id));
-                      setAthleteFilterOpen(false);
-                    }}
-                    style={{
-                      borderBottomWidth: 1,
-                      borderBottomColor: "#edf2f7",
-                      paddingHorizontal: 10,
-                      paddingVertical: 8,
-                      backgroundColor: "#fff",
-                    }}
-                  >
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>Select all</Text>
-                  </Pressable>
-
-                  {activeAthleteFilterOptions.map((option) => {
-                    const selected = selectedAthleteIds.includes(option.id);
-                    return (
-                      <Pressable
-                        key={`training-logs-athlete-${option.id}`}
-                        onPress={() => {
-                          setSelectedAthleteIds((prev) =>
-                            prev.includes(option.id)
-                              ? prev.filter((id) => id !== option.id)
-                              : [...prev, option.id]
-                          );
-                        }}
-                        style={{
-                          borderBottomWidth: 1,
-                          borderBottomColor: "#edf2f7",
-                          paddingHorizontal: 10,
-                          paddingVertical: 8,
-                          backgroundColor: selected ? "#eff6ff" : "#fff",
-                        }}
-                      >
-                        <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
-                          {selected ? "☑ " : "☐ "}
-                          {option.label}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-            ) : null}
           </View>
 
-          <View style={{ minWidth: 220, position: "relative", zIndex: 38 }}>
+          <View style={{ minWidth: 220 }}>
             <Pressable
               onPress={() => {
-                setTrainingGroupFilterOpen((prev) => !prev);
+                setTrainingGroupFilterOpen(true);
                 setAthleteFilterOpen(false);
+                setSeasonFilterOpen(false);
                 setFeedbackFilterOpen(false);
               }}
               style={{
@@ -1164,98 +1440,15 @@ export default function CoachTrainingLogsTab() {
                 {selectedTrainingGroupLabel}
               </Text>
               <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>
-                {trainingGroupFilterOpen ? "▴" : "▾"}
+                ▾
               </Text>
             </Pressable>
-
-            {trainingGroupFilterOpen ? (
-              <View
-                style={{
-                  position: "absolute",
-                  top: 40,
-                  left: 0,
-                  right: 0,
-                  borderWidth: 1,
-                  borderColor: "#dbe2ee",
-                  borderRadius: 8,
-                  backgroundColor: "#fff",
-                  zIndex: 48,
-                  ...(Platform.OS === "android" ? { elevation: 8 } : null),
-                }}
-              >
-                <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
-                  <Pressable
-                    onPress={() => {
-                      void teamDataStore.actions.setSharedSelectedTrainingGroupIds([]);
-                      setTrainingGroupFilterOpen(false);
-                    }}
-                    style={{
-                      borderBottomWidth: 1,
-                      borderBottomColor: "#edf2f7",
-                      paddingHorizontal: 10,
-                      paddingVertical: 8,
-                      backgroundColor: selectedTrainingGroupIds.length === 0 ? "#eff6ff" : "#fff",
-                    }}
-                  >
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
-                      All groups (clear)
-                    </Text>
-                  </Pressable>
-
-                  <Pressable
-                    onPress={() => {
-                      void teamDataStore.actions.setSharedSelectedTrainingGroupIds(
-                        trainingGroupFilterOptions.map((option) => option.id)
-                      );
-                      setTrainingGroupFilterOpen(false);
-                    }}
-                    style={{
-                      borderBottomWidth: 1,
-                      borderBottomColor: "#edf2f7",
-                      paddingHorizontal: 10,
-                      paddingVertical: 8,
-                      backgroundColor: "#fff",
-                    }}
-                  >
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>Select all</Text>
-                  </Pressable>
-
-                  {trainingGroupFilterOptions.map((option) => {
-                    const selected = selectedTrainingGroupIds.includes(option.id);
-                    return (
-                      <Pressable
-                        key={`training-logs-group-${option.id}`}
-                        onPress={() => {
-                          void teamDataStore.actions.setSharedSelectedTrainingGroupIds(
-                            selectedTrainingGroupIds.includes(option.id)
-                              ? selectedTrainingGroupIds.filter((id) => id !== option.id)
-                              : [...selectedTrainingGroupIds, option.id]
-                          );
-                        }}
-                        style={{
-                          borderBottomWidth: 1,
-                          borderBottomColor: "#edf2f7",
-                          paddingHorizontal: 10,
-                          paddingVertical: 8,
-                          backgroundColor: selected ? "#eff6ff" : "#fff",
-                        }}
-                      >
-                        <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
-                          {selected ? "☑ " : "☐ "}
-                          {option.label}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-            ) : null}
           </View>
 
-          <View style={{ minWidth: 220, position: "relative", zIndex: 36 }}>
+          <View style={{ minWidth: 220 }}>
             <Pressable
               onPress={() => {
-                setSeasonFilterOpen((prev) => !prev);
+                setSeasonFilterOpen(true);
                 setAthleteFilterOpen(false);
                 setTrainingGroupFilterOpen(false);
                 setFeedbackFilterOpen(false);
@@ -1277,81 +1470,21 @@ export default function CoachTrainingLogsTab() {
                 {selectedSeasonLabel}
               </Text>
               <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>
-                {seasonFilterOpen ? "▴" : "▾"}
+                ▾
               </Text>
             </Pressable>
-
-            {seasonFilterOpen ? (
-              <View
-                style={{
-                  position: "absolute",
-                  top: 40,
-                  left: 0,
-                  right: 0,
-                  borderWidth: 1,
-                  borderColor: "#dbe2ee",
-                  borderRadius: 8,
-                  backgroundColor: "#fff",
-                  zIndex: 46,
-                  ...(Platform.OS === "android" ? { elevation: 8 } : null),
-                }}
-              >
-                <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
-                  <Pressable
-                    onPress={() => {
-                      void teamDataStore.actions.setSharedSelectedSeasonId(null);
-                      setSeasonFilterOpen(false);
-                    }}
-                    style={{
-                      borderBottomWidth: 1,
-                      borderBottomColor: "#edf2f7",
-                      paddingHorizontal: 10,
-                      paddingVertical: 8,
-                      backgroundColor: !selectedSeasonId ? "#eff6ff" : "#fff",
-                    }}
-                  >
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
-                      All seasons (clear)
-                    </Text>
-                  </Pressable>
-
-                  {seasonFilterOptions.map((option) => {
-                    const selected = selectedSeasonId === option.id;
-                    return (
-                      <Pressable
-                        key={`training-logs-season-${option.id}`}
-                        onPress={() => {
-                          void teamDataStore.actions.setSharedSelectedSeasonId(option.id);
-                          setSeasonFilterOpen(false);
-                        }}
-                        style={{
-                          borderBottomWidth: 1,
-                          borderBottomColor: "#edf2f7",
-                          paddingHorizontal: 10,
-                          paddingVertical: 8,
-                          backgroundColor: selected ? "#eff6ff" : "#fff",
-                        }}
-                      >
-                        <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
-                          {selected ? "◉ " : "○ "}
-                          {option.label}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-            ) : null}
             <Text style={{ fontSize: 10, fontWeight: "700", color: "#64748b", marginTop: 4, marginLeft: 4 }}>
               Uses athlete-specific dates where set.
             </Text>
           </View>
 
-          <View style={{ width: 190, position: "relative", zIndex: 35 }}>
+          <View style={{ width: 190 }}>
             <Pressable
               onPress={() => {
-                setFeedbackFilterOpen((prev) => !prev);
+                setFeedbackFilterOpen(true);
                 setAthleteFilterOpen(false);
+                setTrainingGroupFilterOpen(false);
+                setSeasonFilterOpen(false);
               }}
               style={{
                 height: 34,
@@ -1370,47 +1503,9 @@ export default function CoachTrainingLogsTab() {
                 Status: {feedbackFilterLabel}
               </Text>
               <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>
-                {feedbackFilterOpen ? "▴" : "▾"}
+                ▾
               </Text>
             </Pressable>
-
-            {feedbackFilterOpen ? (
-              <View
-                style={{
-                  position: "absolute",
-                  top: 40,
-                  left: 0,
-                  right: 0,
-                  borderWidth: 1,
-                  borderColor: "#dbe2ee",
-                  borderRadius: 8,
-                  backgroundColor: "#fff",
-                  zIndex: 45,
-                  ...(Platform.OS === "android" ? { elevation: 8 } : null),
-                }}
-              >
-                {FEEDBACK_FILTER_OPTIONS.map((option) => (
-                  <Pressable
-                    key={`training-logs-filter-${option.value}`}
-                    onPress={() => {
-                      setFeedbackFilter(option.value);
-                      setFeedbackFilterOpen(false);
-                    }}
-                    style={{
-                      borderBottomWidth: 1,
-                      borderBottomColor: "#edf2f7",
-                      paddingHorizontal: 10,
-                      paddingVertical: 8,
-                      backgroundColor: feedbackFilter === option.value ? "#eff6ff" : "#fff",
-                    }}
-                  >
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
-                      {option.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
           </View>
         </View>
       </View>
@@ -1437,47 +1532,123 @@ export default function CoachTrainingLogsTab() {
           </View>
         ) : viewMode === "day" ? (
           <>
-            {renderSessionSection("AM", dayRows.am)}
-            {renderSessionSection("PM", dayRows.pm)}
+            {feedbackFilter !== "missing" ? (
+              <>
+                {renderSubmittedAthleteGroups(dayRows.submitted.groups)}
+                {dayRows.missing.total > 0 ? (
+                  <Pressable
+                    onPress={() => setShowDayMissingFeedback((prev) => !prev)}
+                    style={{
+                      marginTop: 12,
+                      borderWidth: 1,
+                      borderColor: showDayMissingFeedback ? "#fed7aa" : "#dbe2ee",
+                      borderRadius: 10,
+                      backgroundColor: showDayMissingFeedback ? "#fff7ed" : "#fff",
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 10,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        flex: 1,
+                        fontSize: 13,
+                        fontWeight: "900",
+                        color: showDayMissingFeedback ? "#7c2d12" : "#334155",
+                      }}
+                    >
+                      {showDayMissingFeedback ? "Hide" : "Show"} Missing Prescribed Feedback ({dayRows.missing.total})
+                    </Text>
+                    <Text style={{ fontSize: 12, fontWeight: "900", color: showDayMissingFeedback ? "#9a3412" : "#64748b" }}>
+                      {showDayMissingFeedback ? "▴" : "▾"}
+                    </Text>
+                  </Pressable>
+                ) : (
+                  <View
+                    style={{
+                      marginTop: 12,
+                      borderWidth: 1,
+                      borderColor: "#e2e8f0",
+                      borderRadius: 10,
+                      backgroundColor: "#f8fafc",
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                    }}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#64748b" }}>
+                      No missing prescribed feedback for this day.
+                    </Text>
+                  </View>
+                )}
+              </>
+            ) : null}
+            {feedbackFilter === "missing" || showDayMissingFeedback ? (
+              <>
+                {feedbackFilter !== "missing" ? (
+                  <Text style={{ marginTop: 16, fontSize: 15, fontWeight: "900", color: "#7c2d12" }}>
+                    Missing Prescribed Feedback
+                  </Text>
+                ) : null}
+                {renderMissingSection("AM Missing Prescribed Feedback", dayRows.missing.am)}
+                {renderMissingSection("PM Missing Prescribed Feedback", dayRows.missing.pm)}
+              </>
+            ) : null}
           </>
         ) : viewMode === "week" ? (
-          !hasWeekMatchesAfterFilters ? (
-            <View
-              style={{
-                marginTop: 12,
-                borderWidth: 1,
-                borderColor: "#dbe2ee",
-                borderRadius: 12,
-                backgroundColor: "#fff",
-                paddingHorizontal: 12,
-                paddingVertical: 14,
-              }}
-            >
-              <Text style={{ fontSize: 13, fontWeight: "800", color: "#64748b" }}>
-                No week logs match the current filters.
-              </Text>
-            </View>
-          ) : (
-            weekDaySummaries.map((day) => {
-              const totalVisible = day.visibleSessions.reduce((sum, s) => sum + s.total, 0);
+          <>
+            {!hasWeekMatchesAfterFilters ? (
+              <View
+                style={{
+                  marginTop: 12,
+                  borderWidth: 1,
+                  borderColor: "#dbe2ee",
+                  borderRadius: 12,
+                  backgroundColor: "#fff",
+                  paddingHorizontal: 12,
+                  paddingVertical: 14,
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "800", color: "#64748b" }}>
+                  {feedbackFilter === "missing"
+                    ? "No missing prescribed feedback this week."
+                    : "No submitted logs for this week."}
+                </Text>
+              </View>
+            ) : null}
+
+            {weekDaySections.map((day) => {
+              const expanded = !!expandedWeekDays[day.dateISO];
+              const missingOpen = feedbackFilter === "missing" || !!weekMissingOpenByDate[day.dateISO];
+              const shouldShowSubmitted = feedbackFilter !== "missing";
+              const shouldShowMissingToggle = feedbackFilter !== "missing" && day.missing.total > 0;
               return (
                 <View
-                  key={`training-logs-day-${day.dateISO}`}
+                  key={`training-logs-week-day-${day.dateISO}`}
                   style={{
                     marginTop: 12,
                     borderWidth: 1,
-                    borderColor: "#dbe2ee",
+                    borderColor: expanded ? "#bfdbfe" : "#dbe2ee",
                     borderRadius: 12,
                     backgroundColor: "#ffffff",
-                    padding: 10,
+                    overflow: "hidden",
                   }}
                 >
-                  <View
+                  <Pressable
+                    onPress={() =>
+                      setExpandedWeekDays((prev) => ({
+                        ...prev,
+                        [day.dateISO]: !prev[day.dateISO],
+                      }))
+                    }
                     style={{
-                      paddingHorizontal: 4,
-                      paddingBottom: 8,
+                      paddingHorizontal: 12,
+                      paddingVertical: 11,
                       borderBottomWidth: 1,
                       borderBottomColor: "#e8edf5",
+                      backgroundColor: expanded ? "#eff6ff" : "#fff",
                       flexDirection: "row",
                       alignItems: "center",
                       justifyContent: "space-between",
@@ -1489,65 +1660,101 @@ export default function CoachTrainingLogsTab() {
                         {formatDisplayDate(day.dateISO)}
                       </Text>
                       <Text style={{ marginTop: 2, fontSize: 11, fontWeight: "800", color: "#64748b" }}>
-                        {totalVisible} visible • {day.totalRows} total
+                        {day.submitted.total} {day.submitted.total === 1 ? "submission" : "submissions"}
+                        {day.missing.total > 0
+                          ? ` • ${day.missing.total} missing`
+                          : " • 0 missing"}
                       </Text>
                     </View>
-
-                    <Pressable
-                      onPress={() => openDayFromWeek(day.dateISO)}
-                      style={{
-                        borderWidth: 1,
-                        borderColor: "#cfd7e6",
-                        borderRadius: 8,
-                        paddingHorizontal: 10,
-                        paddingVertical: 6,
-                        backgroundColor: "#fff",
-                      }}
-                    >
-                      <Text style={{ fontSize: 12, fontWeight: "800", color: "#24334f" }}>Open day</Text>
-                    </Pressable>
-                  </View>
-
-                  {day.visibleSessions.length === 0 ? (
-                    <View style={{ paddingTop: 10, paddingHorizontal: 4 }}>
-                      <Text style={{ fontSize: 12, fontWeight: "700", color: "#94a3b8" }}>
-                        {day.totalRows === 0 ? "No logs for this day." : "No sessions match this status filter."}
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Pressable
+                        onPress={(event) => {
+                          event.stopPropagation();
+                          openDayFromWeek(day.dateISO);
+                        }}
+                        style={{
+                          borderWidth: 1,
+                          borderColor: "#cfd7e6",
+                          borderRadius: 8,
+                          paddingHorizontal: 10,
+                          paddingVertical: 6,
+                          backgroundColor: "#fff",
+                        }}
+                      >
+                        <Text style={{ fontSize: 12, fontWeight: "800", color: "#24334f" }}>Open day</Text>
+                      </Pressable>
+                      <Text style={{ fontSize: 14, fontWeight: "900", color: "#64748b" }}>
+                        {expanded ? "▴" : "▾"}
                       </Text>
                     </View>
-                  ) : (
-                    <View style={{ paddingTop: 8, gap: 8 }}>
-                      {day.visibleSessions.map((session) => (
-                        <View
-                          key={`training-logs-summary-${day.dateISO}-${session.session}`}
+                  </Pressable>
+
+                  {expanded ? (
+                    <View style={{ paddingHorizontal: 10, paddingBottom: 10 }}>
+                      {shouldShowSubmitted ? (
+                        renderSubmittedAthleteGroups(day.submitted.groups, {
+                          title: "Submitted Logs",
+                          total: day.submitted.total,
+                          emptyLabel: "No submitted logs for this day.",
+                          compact: true,
+                        })
+                      ) : null}
+
+                      {shouldShowMissingToggle ? (
+                        <Pressable
+                          onPress={() =>
+                            setWeekMissingOpenByDate((prev) => ({
+                              ...prev,
+                              [day.dateISO]: !prev[day.dateISO],
+                            }))
+                          }
                           style={{
+                            marginTop: 10,
                             borderWidth: 1,
-                            borderColor: "#e2e8f0",
+                            borderColor: missingOpen ? "#fed7aa" : "#dbe2ee",
                             borderRadius: 10,
-                            backgroundColor: "#f8fbff",
-                            paddingHorizontal: 10,
-                            paddingVertical: 8,
+                            backgroundColor: missingOpen ? "#fff7ed" : "#fff",
+                            paddingHorizontal: 12,
+                            paddingVertical: 10,
                             flexDirection: "row",
                             alignItems: "center",
                             justifyContent: "space-between",
-                            gap: 8,
+                            gap: 10,
                           }}
                         >
-                          <View style={{ flex: 1 }}>
-                            <Text style={{ fontSize: 12, fontWeight: "900", color: "#1f2a44" }}>
-                              {session.session} · {session.submitted}/{session.total} submitted
+                          <Text
+                            style={{
+                              flex: 1,
+                              fontSize: 12,
+                              fontWeight: "900",
+                              color: missingOpen ? "#7c2d12" : "#334155",
+                            }}
+                          >
+                            {missingOpen ? "Hide" : "Show"} Missing Prescribed Feedback ({day.missing.total})
+                          </Text>
+                          <Text style={{ fontSize: 12, fontWeight: "900", color: missingOpen ? "#9a3412" : "#64748b" }}>
+                            {missingOpen ? "▴" : "▾"}
+                          </Text>
+                        </Pressable>
+                      ) : null}
+
+                      {missingOpen ? (
+                        <>
+                          {feedbackFilter !== "missing" ? (
+                            <Text style={{ marginTop: 14, fontSize: 14, fontWeight: "900", color: "#7c2d12" }}>
+                              Missing Prescribed Feedback
                             </Text>
-                            <Text style={{ marginTop: 2, fontSize: 11, fontWeight: "700", color: "#64748b" }}>
-                              {session.missing} missing
-                            </Text>
-                          </View>
-                        </View>
-                      ))}
+                          ) : null}
+                          {renderMissingSection("AM Missing Prescribed Feedback", day.missing.am)}
+                          {renderMissingSection("PM Missing Prescribed Feedback", day.missing.pm)}
+                        </>
+                      ) : null}
                     </View>
-                  )}
+                  ) : null}
                 </View>
               );
-            })
-          )
+            })}
+          </>
         ) : (
           <View
             style={{
@@ -1674,6 +1881,459 @@ export default function CoachTrainingLogsTab() {
         )}
       </ScrollView>
 
+      <Modal
+        visible={athleteFilterOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAthleteFilterOpen(false)}
+      >
+        <Pressable
+          onPress={() => setAthleteFilterOpen(false)}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(2,6,23,0.28)",
+            alignItems: "center",
+            justifyContent: Platform.OS === "web" ? "flex-start" : "center",
+            paddingTop: Platform.OS === "web" ? 84 : 24,
+            paddingHorizontal: 16,
+          }}
+        >
+          <Pressable
+            onPress={(event) => event.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 520,
+              maxHeight: Platform.OS === "web" ? 520 : 460,
+              borderWidth: 1,
+              borderColor: "#dbe2ee",
+              borderRadius: 12,
+              backgroundColor: "#fff",
+              overflow: "hidden",
+              shadowColor: "#000",
+              shadowOpacity: 0.22,
+              shadowRadius: 14,
+              shadowOffset: { width: 0, height: 6 },
+              elevation: 16,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                borderBottomWidth: 1,
+                borderBottomColor: "#dbe2ee",
+              }}
+            >
+              <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a" }}>Athletes</Text>
+              <Pressable
+                onPress={() => setAthleteFilterOpen(false)}
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#e2e8f0",
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Done</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={{ maxHeight: Platform.OS === "web" ? 440 : 360 }} keyboardShouldPersistTaps="handled">
+              <Pressable
+                onPress={() => {
+                  setSelectedAthleteIds([]);
+                  setAthleteFilterOpen(false);
+                }}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#edf2f7",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  backgroundColor: selectedAthleteIds.length === 0 ? "#eff6ff" : "#fff",
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>All athletes (clear)</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setSelectedAthleteIds(activeAthleteFilterOptions.map((option) => option.id));
+                }}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#edf2f7",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  backgroundColor: "#fff",
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>Select all</Text>
+              </Pressable>
+              {activeAthleteFilterOptions.map((option) => {
+                const selected = selectedAthleteIds.includes(option.id);
+                return (
+                  <Pressable
+                    key={`training-logs-athlete-filter-modal-${option.id}`}
+                    onPress={() => {
+                      setSelectedAthleteIds((prev) =>
+                        prev.includes(option.id)
+                          ? prev.filter((id) => id !== option.id)
+                          : [...prev, option.id]
+                      );
+                    }}
+                    style={{
+                      borderBottomWidth: 1,
+                      borderBottomColor: "#edf2f7",
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                      backgroundColor: selected ? "#eff6ff" : "#fff",
+                    }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>
+                      {selected ? "☑ " : "☐ "}
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+              {activeAthleteFilterOptions.length === 0 ? (
+                <View style={{ paddingHorizontal: 12, paddingVertical: 10 }}>
+                  <Text style={{ fontSize: 12, color: "#64748b" }}>No athletes found</Text>
+                </View>
+              ) : null}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={trainingGroupFilterOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setTrainingGroupFilterOpen(false)}
+      >
+        <Pressable
+          onPress={() => setTrainingGroupFilterOpen(false)}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(2,6,23,0.28)",
+            alignItems: "center",
+            justifyContent: Platform.OS === "web" ? "flex-start" : "center",
+            paddingTop: Platform.OS === "web" ? 84 : 24,
+            paddingHorizontal: 16,
+          }}
+        >
+          <Pressable
+            onPress={(event) => event.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 520,
+              maxHeight: Platform.OS === "web" ? 520 : 460,
+              borderWidth: 1,
+              borderColor: "#dbe2ee",
+              borderRadius: 12,
+              backgroundColor: "#fff",
+              overflow: "hidden",
+              shadowColor: "#000",
+              shadowOpacity: 0.22,
+              shadowRadius: 14,
+              shadowOffset: { width: 0, height: 6 },
+              elevation: 16,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                borderBottomWidth: 1,
+                borderBottomColor: "#dbe2ee",
+              }}
+            >
+              <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a" }}>Training Groups</Text>
+              <Pressable
+                onPress={() => setTrainingGroupFilterOpen(false)}
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#e2e8f0",
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Done</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={{ maxHeight: Platform.OS === "web" ? 440 : 360 }} keyboardShouldPersistTaps="handled">
+              <Pressable
+                onPress={() => {
+                  void teamDataStore.actions.setSharedSelectedTrainingGroupIds([]);
+                  setTrainingGroupFilterOpen(false);
+                }}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#edf2f7",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  backgroundColor: selectedTrainingGroupIds.length === 0 ? "#eff6ff" : "#fff",
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>All groups (clear)</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  void teamDataStore.actions.setSharedSelectedTrainingGroupIds(
+                    trainingGroupFilterOptions.map((option) => option.id)
+                  );
+                }}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#edf2f7",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  backgroundColor: "#fff",
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>Select all</Text>
+              </Pressable>
+              {trainingGroupFilterOptions.map((option) => {
+                const selected = selectedTrainingGroupIds.includes(option.id);
+                return (
+                  <Pressable
+                    key={`training-logs-group-filter-modal-${option.id}`}
+                    onPress={() => {
+                      void teamDataStore.actions.setSharedSelectedTrainingGroupIds(
+                        selected
+                          ? selectedTrainingGroupIds.filter((id) => id !== option.id)
+                          : [...selectedTrainingGroupIds, option.id]
+                      );
+                    }}
+                    style={{
+                      borderBottomWidth: 1,
+                      borderBottomColor: "#edf2f7",
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                      backgroundColor: selected ? "#eff6ff" : "#fff",
+                    }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>
+                      {selected ? "☑ " : "☐ "}
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+              {trainingGroupFilterOptions.length === 0 ? (
+                <View style={{ paddingHorizontal: 12, paddingVertical: 10 }}>
+                  <Text style={{ fontSize: 12, color: "#64748b" }}>No training groups found</Text>
+                </View>
+              ) : null}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={seasonFilterOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSeasonFilterOpen(false)}
+      >
+        <Pressable
+          onPress={() => setSeasonFilterOpen(false)}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(2,6,23,0.28)",
+            alignItems: "center",
+            justifyContent: Platform.OS === "web" ? "flex-start" : "center",
+            paddingTop: Platform.OS === "web" ? 84 : 24,
+            paddingHorizontal: 16,
+          }}
+        >
+          <Pressable
+            onPress={(event) => event.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 520,
+              maxHeight: Platform.OS === "web" ? 520 : 460,
+              borderWidth: 1,
+              borderColor: "#dbe2ee",
+              borderRadius: 12,
+              backgroundColor: "#fff",
+              overflow: "hidden",
+              shadowColor: "#000",
+              shadowOpacity: 0.22,
+              shadowRadius: 14,
+              shadowOffset: { width: 0, height: 6 },
+              elevation: 16,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                borderBottomWidth: 1,
+                borderBottomColor: "#dbe2ee",
+              }}
+            >
+              <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a" }}>Season</Text>
+              <Pressable
+                onPress={() => setSeasonFilterOpen(false)}
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#e2e8f0",
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Done</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={{ maxHeight: Platform.OS === "web" ? 440 : 360 }} keyboardShouldPersistTaps="handled">
+              <Pressable
+                onPress={() => {
+                  void teamDataStore.actions.setSharedSelectedSeasonId(null);
+                  setSeasonFilterOpen(false);
+                }}
+                style={{
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#edf2f7",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  backgroundColor: !selectedSeasonId ? "#eff6ff" : "#fff",
+                }}
+              >
+                <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>All seasons (clear)</Text>
+              </Pressable>
+              {seasonFilterOptions.map((option) => {
+                const selected = selectedSeasonId === option.id;
+                return (
+                  <Pressable
+                    key={`training-logs-season-filter-modal-${option.id}`}
+                    onPress={() => {
+                      void teamDataStore.actions.setSharedSelectedSeasonId(option.id);
+                      setSeasonFilterOpen(false);
+                    }}
+                    style={{
+                      borderBottomWidth: 1,
+                      borderBottomColor: "#edf2f7",
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                      backgroundColor: selected ? "#eff6ff" : "#fff",
+                    }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>
+                      {selected ? "☑ " : "☐ "}
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+              {seasonFilterOptions.length === 0 ? (
+                <View style={{ paddingHorizontal: 12, paddingVertical: 10 }}>
+                  <Text style={{ fontSize: 12, color: "#64748b" }}>No seasons found</Text>
+                </View>
+              ) : null}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={feedbackFilterOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setFeedbackFilterOpen(false)}
+      >
+        <Pressable
+          onPress={() => setFeedbackFilterOpen(false)}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(2,6,23,0.28)",
+            alignItems: "center",
+            justifyContent: Platform.OS === "web" ? "flex-start" : "center",
+            paddingTop: Platform.OS === "web" ? 84 : 24,
+            paddingHorizontal: 16,
+          }}
+        >
+          <Pressable
+            onPress={(event) => event.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 420,
+              maxHeight: Platform.OS === "web" ? 420 : 360,
+              borderWidth: 1,
+              borderColor: "#dbe2ee",
+              borderRadius: 12,
+              backgroundColor: "#fff",
+              overflow: "hidden",
+              shadowColor: "#000",
+              shadowOpacity: 0.22,
+              shadowRadius: 14,
+              shadowOffset: { width: 0, height: 6 },
+              elevation: 16,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                borderBottomWidth: 1,
+                borderBottomColor: "#dbe2ee",
+              }}
+            >
+              <Text style={{ fontSize: 14, fontWeight: "900", color: "#0f172a" }}>Status</Text>
+              <Pressable
+                onPress={() => setFeedbackFilterOpen(false)}
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#e2e8f0",
+                  borderRadius: 8,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Done</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={{ maxHeight: Platform.OS === "web" ? 340 : 280 }} keyboardShouldPersistTaps="handled">
+              {FEEDBACK_FILTER_OPTIONS.map((option) => (
+                <Pressable
+                  key={`training-logs-status-filter-modal-${option.value}`}
+                  onPress={() => {
+                    setFeedbackFilter(option.value);
+                    setFeedbackFilterOpen(false);
+                  }}
+                  style={{
+                    borderBottomWidth: 1,
+                    borderBottomColor: "#edf2f7",
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    backgroundColor: feedbackFilter === option.value ? "#eff6ff" : "#fff",
+                  }}
+                >
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: "#334155" }}>
+                    {feedbackFilter === option.value ? "☑ " : "☐ "}
+                    {option.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {detailRow ? (
         <Modal transparent animationType="fade" visible onRequestClose={() => setDetailRow(null)}>
           <Pressable
@@ -1703,8 +2363,36 @@ export default function CoachTrainingLogsTab() {
               <Text style={{ fontSize: 16, fontWeight: "900", color: "#0f172a" }}>Athlete Feedback</Text>
               <Text style={{ fontSize: 13, fontWeight: "800", color: "#1e293b" }}>{detailRow.athleteName}</Text>
               <Text style={{ fontSize: 12, fontWeight: "700", color: "#334155" }}>
-                {detailRow.session} • {detailRow.sourceTitle}
+                {detailRow.session ?? "All day"} • {formatSourceLabel(detailRow.sourceType)}
               </Text>
+              {detailRow.duplicateReason ? (
+                <Text style={{ fontSize: 12, fontWeight: "800", color: "#92400e" }}>
+                  {detailRow.duplicateReason}
+                </Text>
+              ) : null}
+
+              {detailRow.sourceType === "workout" ? (
+                <View style={{ gap: 2 }}>
+                  <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>Workout</Text>
+                  <Text style={{ fontSize: 13, color: "#1f2937" }}>{detailRow.sourceTitle}</Text>
+                </View>
+              ) : null}
+
+              {detailRow.sourceType === "daily_note" || detailRow.sourceType === "extra_activity" ? (
+                <View style={{ gap: 2 }}>
+                  <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>Title</Text>
+                  <Text style={{ fontSize: 13, color: "#1f2937" }}>{detailRow.sourceTitle || "—"}</Text>
+                </View>
+              ) : null}
+
+              {detailRow.activityKind ? (
+                <View style={{ gap: 2 }}>
+                  <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>Activity kind</Text>
+                  <Text style={{ fontSize: 13, color: "#1f2937" }}>
+                    {formatActivityKindLabel(detailRow.activityKind) || detailRow.activityKind}
+                  </Text>
+                </View>
+              ) : null}
 
               {detailRow.prescribedText ? (
                 <View style={{ gap: 2 }}>

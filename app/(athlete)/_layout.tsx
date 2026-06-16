@@ -1,7 +1,44 @@
+import { useEffect, useState } from "react";
 import { Tabs } from "expo-router";
+import { useRouter } from "expo-router";
+import { ActivityIndicator, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { resolveStartupAccountContext, routeForAccountContext } from "../../lib/accountContexts";
 
 export default function AthleteTabs() {
+  const router = useRouter();
+  const [allowed, setAllowed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const resolution = await resolveStartupAccountContext();
+      if (resolution.status === "ready" && resolution.context.kind === "athlete") {
+        if (!cancelled) setAllowed(true);
+        return;
+      }
+      if (resolution.status === "ready") {
+        if (!cancelled) router.replace(routeForAccountContext(resolution.context));
+        return;
+      }
+      if (!cancelled) router.replace("/(auth)/choose-account");
+    })().catch(() => {
+      if (!cancelled) router.replace("/(auth)/choose-account");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  if (!allowed) {
+    return (
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10 }}>
+        <ActivityIndicator />
+        <Text style={{ color: "#64748b", fontWeight: "700" }}>Loading account...</Text>
+      </View>
+    );
+  }
+
   return (
     <Tabs screenOptions={{ headerShown: true }}>
       {/* Visible tabs */}
@@ -26,7 +63,7 @@ export default function AthleteTabs() {
       <Tabs.Screen
         name="feedback"
         options={{
-          title: "Feedback",
+          title: "Log",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="create" size={size} color={color} />
           ),

@@ -4,6 +4,11 @@ import { View, Text, TextInput, Pressable, Alert } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { acceptInvite, getMyClaimedAthleteProfileId, type AcceptInviteResult } from "../../lib/team";
 import { bootstrapTeamSyncOnce } from "../../lib/bootstrapTeamSync";
+import {
+  listAccountContextsForCurrentUser,
+  type AccountContext,
+} from "../../lib/accountContexts";
+import { switchAccountContext } from "../../lib/accountContextSwitch";
 
 const SELECTED_ATHLETE_KEY = "training_app_selected_athlete_v1";
 
@@ -31,7 +36,21 @@ export default function Join() {
         athleteProfileId = result.athlete_profile_id ?? null;
       }
 
-      await bootstrapTeamSyncOnce(); // pull team keys after claim
+      const acceptedRole = typeof result === "object" ? String(result.role ?? "").trim().toLowerCase() : "";
+      if (acceptedRole === "editor" || acceptedRole === "viewer" || acceptedRole === "coach") {
+        const contexts = await listAccountContextsForCurrentUser();
+        const acceptedContext =
+          contexts.find((context) => context.kind === "coach" && context.teamId === teamId) ??
+          contexts.find((context) => context.kind === "coach");
+        if (acceptedContext) {
+          const route = await switchAccountContext(acceptedContext);
+          await bootstrapTeamSyncOnce();
+          router.replace(route);
+          return;
+        }
+        router.replace("/(auth)/choose-account");
+        return;
+      }
 
       // Auto-select claimed athlete profile in athlete mode.
       const selectedAthleteId =
@@ -40,7 +59,22 @@ export default function Join() {
         await AsyncStorage.setItem(SELECTED_ATHLETE_KEY, selectedAthleteId);
       }
 
-      router.replace("/(athlete)"); // athlete view
+      const contexts = await listAccountContextsForCurrentUser();
+      const acceptedContext: AccountContext | undefined =
+        contexts.find(
+          (context) =>
+            context.kind === "athlete" &&
+            (!teamId || context.teamId === teamId) &&
+            (!selectedAthleteId || context.athleteId === selectedAthleteId)
+        ) ?? contexts.find((context) => context.kind === "athlete" && (!teamId || context.teamId === teamId));
+      if (acceptedContext) {
+        const route = await switchAccountContext(acceptedContext);
+        await bootstrapTeamSyncOnce();
+        router.replace(route);
+        return;
+      }
+
+      router.replace("/(auth)/choose-account");
     } catch (e: any) {
       Alert.alert("Invite failed", e?.message ?? "Invalid or expired invite.");
     } finally {

@@ -20,7 +20,13 @@ import {
   getAthleteSeasonTenureStatus,
   resolveAthleteSeasonWindowWithTenure,
 } from "../../../../lib/teamRoster";
-import { createClaimInvite } from "../../../../lib/team";
+import {
+  createClaimInvite,
+  getCurrentTeamId,
+  linkTeamAthleteToExistingUserEmail,
+  unlinkTeamAthleteLogin,
+  type AthleteLoginLinkResult,
+} from "../../../../lib/team";
 import { listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../../../lib/teamWorkoutsCloud";
 import { loadMileageFeedback, type MileageSessionFeedback } from "../../../../lib/mileageFeedback";
 import { hasMileageFeedback, hasWorkoutFeedback, parseNumericLike } from "../../../../lib/feedbackParsing";
@@ -29,6 +35,7 @@ import { getWeekIndex, getWeekStartISO, parseISODate, toISODate } from "../../..
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../../../lib/pace";
 import { formatParsedWorkoutEntry, parseWorkoutEntryValue, workoutEntryMilesRange, workoutEntryXTRange } from "../../../../lib/workoutEntryParser";
 import type { WeekStartDay } from "../../../../lib/types";
+import { canEditRoster, getCurrentTeamRole, type TeamRole } from "../../../../lib/teamPermissions";
 
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
@@ -224,6 +231,8 @@ export default function CoachEditTeamAthlete() {
   const [teamStartDate, setTeamStartDate] = useState("");
   const [teamEndDate, setTeamEndDate] = useState("");
   const [claimed, setClaimed] = useState(false);
+  const [loginAccessMessage, setLoginAccessMessage] = useState<string | null>(null);
+  const [loginAccessTone, setLoginAccessTone] = useState<"success" | "mutedText" | "danger">("mutedText");
   const [rosterStatus, setRosterStatus] = useState<TeamAthleteRosterStatus>("active");
   const [teamTenureError, setTeamTenureError] = useState<string | null>(null);
   const [seasonDraftById, setSeasonDraftById] = useState<Record<string, { start: string; end: string }>>({});
@@ -235,6 +244,8 @@ export default function CoachEditTeamAthlete() {
   const [seasonTrainingPaceSecPerMile, setSeasonTrainingPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
   const [seasonTrainingWorkoutRows, setSeasonTrainingWorkoutRows] = useState<TeamWorkoutRow[]>([]);
   const [seasonTrainingMileageFeedback, setSeasonTrainingMileageFeedback] = useState<MileageSessionFeedback[]>([]);
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const readOnlyRoster = !canEditRoster(currentTeamRole);
 
   // ---- IMPORTANT: prevent navigation loops on web (idempotent nav) ----
   const didNavigateRef = useRef(false);
@@ -253,6 +264,21 @@ export default function CoachEditTeamAthlete() {
 
     router.replace("/(coach)/(tabs)/roster");
   }, [router]);
+
+  useEffect(() => {
+    let active = true;
+    getCurrentTeamRole()
+      .then((role) => {
+        if (active) setCurrentTeamRole(role);
+      })
+      .catch((error) => {
+        console.warn("[coach-roster-detail] role load failed", error);
+        if (active) setCurrentTeamRole(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -295,6 +321,8 @@ export default function CoachEditTeamAthlete() {
         setTeamStartDate(String(a.team_start_date ?? ""));
         setTeamEndDate(String(a.team_end_date ?? ""));
         setClaimed(!!a.claimed_user_id);
+        setLoginAccessMessage(!!a.claimed_user_id ? "Linked" : null);
+        setLoginAccessTone(!!a.claimed_user_id ? "success" : "mutedText");
         setRosterStatus(
           String(a.roster_status ?? "").trim().toLowerCase() === "inactive"
             ? "inactive"
@@ -973,22 +1001,128 @@ export default function CoachEditTeamAthlete() {
 
     setBusy(true);
     try {
+      const cleanEmail = email.trim();
       await teamDataStore.actions.updateAthlete(athleteId, {
         display_name: name.trim(),
-        email: email.trim() || null,
+        email: cleanEmail || null,
         team_start_date: start || null,
         team_end_date: end || null,
       });
 
-      // Web: navigate immediately (alerts can behave oddly with router)
-      if (Platform.OS === "web") {
-        safeGoBack();
-        return;
+      if (cleanEmail) {
+        await tryLinkLoginEmail(cleanEmail);
+      } else {
+        setLoginAccessTone("mutedText");
+        setLoginAccessMessage("No login email is saved for this athlete.");
+        await refreshLoginClaimedState().catch(() => {});
       }
 
-      Alert.alert("Saved", "Athlete updated.", [{ text: "OK", onPress: safeGoBack }]);
+      if (Platform.OS !== "web") {
+        Alert.alert("Saved", "Athlete updated.");
+      }
     } catch (e: any) {
       Alert.alert("Save failed", e?.message ?? "Could not save.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function loginAccessCopy(result: AthleteLoginLinkResult) {
+    const linkedEmail = String(result.linked_email ?? email.trim()).trim();
+    if (result.status === "linked") {
+      return {
+        tone: "success" as const,
+        message: `Login linked to ${linkedEmail}. This athlete can now access this profile.`,
+      };
+    }
+    if (result.status === "no_user_found") {
+      return {
+        tone: "mutedText" as const,
+        message: `Email saved, but no login account exists for ${linkedEmail || "that email"} yet. Send an invite or have the athlete create an account.`,
+      };
+    }
+    if (result.status === "duplicate_claim") {
+      return {
+        tone: "danger" as const,
+        message: "That login is already linked to another athlete on this team.",
+      };
+    }
+    if (result.status === "unlinked") {
+      return {
+        tone: "mutedText" as const,
+        message: "Login access was unlinked from this athlete profile.",
+      };
+    }
+    return {
+      tone: "danger" as const,
+      message: "You do not have permission to link athlete login access.",
+    };
+  }
+
+  async function refreshLoginClaimedState() {
+    await teamDataStore.actions.refreshRoster({ throwOnError: true });
+    const next = teamDataStore.getAthleteById(athleteId);
+    setClaimed(!!next?.claimed_user_id);
+  }
+
+  async function tryLinkLoginEmail(nextEmail = email.trim()) {
+    const cleanEmail = String(nextEmail ?? "").trim();
+    if (!cleanEmail) {
+      setLoginAccessTone("mutedText");
+      setLoginAccessMessage("Add a login email, then retry linking.");
+      return null;
+    }
+    const teamId = await getCurrentTeamId();
+    const result = await linkTeamAthleteToExistingUserEmail(teamId, athleteId, cleanEmail);
+    const copy = loginAccessCopy(result);
+    setLoginAccessTone(copy.tone);
+    setLoginAccessMessage(copy.message);
+    if (result.status === "linked") {
+      setClaimed(true);
+    } else {
+      await refreshLoginClaimedState().catch(() => {});
+    }
+    return result;
+  }
+
+  async function retryLinkLogin() {
+    if (!isUuid(athleteId)) {
+      Alert.alert("Link blocked", `Invalid athlete id: ${athleteId}`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await tryLinkLoginEmail(email.trim());
+      if (result && Platform.OS !== "web") {
+        const copy = loginAccessCopy(result);
+        Alert.alert("Login Access", copy.message);
+      }
+    } catch (e: any) {
+      Alert.alert("Link failed", e?.message ?? "Could not link athlete login access.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function unlinkLogin() {
+    if (!isUuid(athleteId)) {
+      Alert.alert("Unlink blocked", `Invalid athlete id: ${athleteId}`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const teamId = await getCurrentTeamId();
+      const result = await unlinkTeamAthleteLogin(teamId, athleteId);
+      const copy = loginAccessCopy(result);
+      setLoginAccessTone(copy.tone);
+      setLoginAccessMessage(copy.message);
+      setClaimed(false);
+      await teamDataStore.actions.refreshRoster();
+      if (Platform.OS !== "web") {
+        Alert.alert("Login Access", copy.message);
+      }
+    } catch (e: any) {
+      Alert.alert("Unlink failed", e?.message ?? "Could not unlink athlete login access.");
     } finally {
       setBusy(false);
     }
@@ -1141,7 +1275,9 @@ export default function CoachEditTeamAthlete() {
       <Card style={{ gap: theme.space.md, borderColor: "#dde4f0", backgroundColor: "#fff" }}>
         <View style={{ gap: 4 }}>
           <AppText variant="headline">Profile</AppText>
-          <AppText variant="caption" color="mutedText">Edit athlete identity and invite contact details.</AppText>
+          <AppText variant="caption" color="mutedText">
+            {readOnlyRoster ? "Viewer access: editing is disabled." : "Edit athlete identity and invite contact details."}
+          </AppText>
         </View>
         <Divider />
         <TextField
@@ -1150,6 +1286,7 @@ export default function CoachEditTeamAthlete() {
           onChangeText={setName}
           placeholder="e.g. Alex Rivera"
           autoCapitalize="words"
+          editable={!readOnlyRoster}
         />
         <TextField
           label="Email"
@@ -1157,6 +1294,7 @@ export default function CoachEditTeamAthlete() {
           onChangeText={setEmail}
           placeholder="athlete@email.com"
           keyboardType="email-address"
+          editable={!readOnlyRoster}
         />
         <Divider />
         <View style={{ gap: 4 }}>
@@ -1174,6 +1312,7 @@ export default function CoachEditTeamAthlete() {
           }}
           placeholder="YYYY-MM-DD"
           autoCapitalize="none"
+          editable={!readOnlyRoster}
         />
         <TextField
           label="Team End Date"
@@ -1184,16 +1323,19 @@ export default function CoachEditTeamAthlete() {
           }}
           placeholder="YYYY-MM-DD"
           autoCapitalize="none"
+          editable={!readOnlyRoster}
         />
         {teamTenureError ? (
           <AppText variant="caption" color="danger">
             {teamTenureError}
           </AppText>
         ) : null}
-        <View style={{ flexDirection: "row", gap: theme.space.sm, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <Button title={busy || loading ? "Saving..." : "Save"} onPress={save} disabled={busy || loading} />
-          <Button title="Create invite" variant="secondary" onPress={invite} disabled={busy || loading} />
-        </View>
+        {!readOnlyRoster ? (
+          <View style={{ flexDirection: "row", gap: theme.space.sm, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Button title={busy || loading ? "Saving..." : "Save"} onPress={save} disabled={busy || loading} />
+            <Button title="Create invite" variant="secondary" onPress={invite} disabled={busy || loading} />
+          </View>
+        ) : null}
 
         {s.lastError ? (
           <AppText variant="caption" color="danger">
@@ -1202,6 +1344,56 @@ export default function CoachEditTeamAthlete() {
         ) : null}
       </Card>
 
+      <Card style={{ gap: theme.space.md, borderColor: "#dde4f0", backgroundColor: "#fff" }}>
+        <View style={{ gap: 4 }}>
+          <AppText variant="headline">Login Access</AppText>
+          <AppText variant="caption" color="mutedText">
+            Email is used to find an existing login account. Access is granted only when this profile is linked to an auth user id.
+          </AppText>
+        </View>
+        <Divider />
+        <View style={{ gap: 6 }}>
+          <AppText variant="caption" color="mutedText">Contact/login email</AppText>
+          <AppText variant="sub">{email.trim() || "No email saved"}</AppText>
+        </View>
+        <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <View
+            style={{
+              borderWidth: 1,
+              borderColor: claimed ? "#b8e7ca" : "#d7dfeb",
+              backgroundColor: claimed ? "#eefaf2" : "#f7f9fd",
+              borderRadius: 999,
+              paddingVertical: 5,
+              paddingHorizontal: 10,
+            }}
+          >
+            <AppText variant="caption" color={claimed ? "success" : "mutedText"}>
+              {claimed ? "Linked" : "Not linked"}
+            </AppText>
+          </View>
+          {loginAccessMessage ? (
+            <AppText variant="caption" color={loginAccessTone} style={{ flex: 1, minWidth: 220 }}>
+              {loginAccessMessage}
+            </AppText>
+          ) : (
+            <AppText variant="caption" color="mutedText" style={{ flex: 1, minWidth: 220 }}>
+              Save or retry link to connect this athlete to an existing login account.
+            </AppText>
+          )}
+        </View>
+        {!readOnlyRoster ? (
+          <View style={{ flexDirection: "row", gap: theme.space.sm, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Button title={busy || loading ? "Working..." : "Retry link"} variant="secondary" onPress={retryLinkLogin} disabled={busy || loading} />
+            <Button title="Unlink login" variant="danger" onPress={unlinkLogin} disabled={busy || loading || !claimed} />
+          </View>
+        ) : (
+          <AppText variant="caption" color="mutedText">
+            Viewer access: login linking is read-only.
+          </AppText>
+        )}
+      </Card>
+
+      {!readOnlyRoster ? (
       <Card style={{ gap: theme.space.md, borderColor: "#dde4f0", backgroundColor: "#fff" }}>
         <AppText variant="headline">Roster status</AppText>
         <Divider />
@@ -1215,7 +1407,9 @@ export default function CoachEditTeamAthlete() {
           disabled={busy || loading}
         />
       </Card>
+      ) : null}
 
+      {!readOnlyRoster ? (
       <Card style={{ gap: theme.space.md, borderColor: "#dde4f0", backgroundColor: "#fff" }}>
         <AppText variant="headline">Season Overrides</AppText>
         <Divider />
@@ -1404,6 +1598,7 @@ export default function CoachEditTeamAthlete() {
           </View>
         )}
       </Card>
+      ) : null}
 
       <Card style={{ gap: theme.space.md, borderColor: "#dde4f0", backgroundColor: "#fff" }}>
         <AppText variant="headline">Season Training View</AppText>

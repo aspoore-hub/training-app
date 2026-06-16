@@ -17,6 +17,7 @@ import type { AthleteWorkout, WeekStartDay } from "../../../lib/types";
 import {
   buildMileageFeedbackId,
   getMileageFeedbackById,
+  migrateLocalMileageFeedbackToTeamForAthlete,
   type MileageSessionFeedback,
   upsertMileageFeedback,
 } from "../../../lib/mileageFeedback";
@@ -24,9 +25,10 @@ import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../..
 import { loadAuxiliaryRoutines } from "../../../lib/auxiliaryRoutines";
 import { parseNumericLike } from "../../../lib/feedbackParsing";
 import { getCurrentTeamId } from "../../../lib/team";
+import { resolveAthleteSessionContext } from "../../../lib/athleteSession";
 import { loadRosterNameMapForTeam } from "../../../lib/rosterNameMap";
-import { getTeamWorkoutById, listTeamWorkoutsInRange, updateTeamWorkoutById, type TeamWorkoutRow } from "../../../lib/teamWorkoutsCloud";
-import { teamDataStore } from "../../../lib/teamDataStore";
+import { getVisibleAthleteWorkoutById, updateTeamWorkoutById, type TeamWorkoutRow } from "../../../lib/teamWorkoutsCloud";
+import { teamDataStore, visibleMileageAthleteWeekKey } from "../../../lib/teamDataStore";
 import {
   getWeekIndex,
   getWeekStartISO,
@@ -43,6 +45,10 @@ function normalizeGroupId(groupId?: string): string {
 
 function normalizeSession(value: string | undefined): "AM" | "PM" {
   return String(value ?? "PM").toUpperCase() === "AM" ? "AM" : "PM";
+}
+
+function firstParam(value: string | string[] | undefined): string {
+  return String(Array.isArray(value) ? value[0] ?? "" : value ?? "").trim();
 }
 
 function formatDisplayDate(iso: string) {
@@ -96,7 +102,7 @@ function toAthleteWorkout(row: TeamWorkoutRow, rosterMap: Map<string, string>): 
 
 function resolvePrescribedText(
   state: {
-    mileageCellsByWeek: ReturnType<typeof teamDataStore.use>["mileageCellsByWeek"];
+    visibleMileageCellsByAthleteWeek: ReturnType<typeof teamDataStore.use>["visibleMileageCellsByAthleteWeek"];
   },
   athleteId: string,
   dateISO: string,
@@ -111,7 +117,7 @@ function resolvePrescribedText(
 
   if (!Number.isFinite(dayIdx) || dayIdx < 0 || dayIdx > 6) return "";
 
-  const cells = state.mileageCellsByWeek[weekStartISO] ?? [];
+  const cells = state.visibleMileageCellsByAthleteWeek[visibleMileageAthleteWeekKey(athlete, weekStartISO)] ?? [];
   const cell = cells.find(
     (row) => row.athlete_profile_id === athlete && row.day_idx === dayIdx && row.session === session
   );
@@ -139,6 +145,7 @@ export default function AthleteWorkoutDetail() {
     session,
     prescribed,
     athleteId,
+    returnTo,
   } = useLocalSearchParams<{
     id: string;
     name?: string;
@@ -147,10 +154,12 @@ export default function AthleteWorkoutDetail() {
     session?: string;
     prescribed?: string;
     athleteId?: string;
+    returnTo?: string | string[];
   }>();
   const router = useRouter();
 
   const isSynthetic = String(synthetic ?? "") === "1";
+  const returnTarget = firstParam(returnTo);
 
   const distanceRef = useRef<TextInput>(null);
   const timeRef = useRef<TextInput>(null);
@@ -180,6 +189,29 @@ export default function AthleteWorkoutDetail() {
     Keyboard.dismiss();
   }
 
+  function leaveWorkoutDetail() {
+    dismissKeyboard();
+    if (returnTarget) {
+      router.replace(returnTarget as any);
+      return;
+    }
+
+    const canGoBack = (() => {
+      try {
+        return Boolean((router as any).canGoBack?.());
+      } catch {
+        return false;
+      }
+    })();
+
+    if (canGoBack) {
+      router.back();
+      return;
+    }
+
+    router.replace("/(athlete)/dashboard");
+  }
+
   function focusByOffset(delta: -1 | 1) {
     const fields = [distanceRef.current, timeRef.current, splitsRef.current, feedbackRef.current];
     const focused = fields.findIndex((ref) => ref?.isFocused?.());
@@ -191,6 +223,8 @@ export default function AthleteWorkoutDetail() {
 
   useEffect(() => {
     (async () => {
+      const athleteSession = await resolveAthleteSessionContext();
+      const visibleAthleteId = String(athleteSession.athleteId ?? athleteId ?? "").trim();
       const [rosterMap, unit, routines, weekStartResult] = await Promise.all([
         loadRosterAny(),
         loadDistanceUnit(),
@@ -207,7 +241,7 @@ export default function AthleteWorkoutDetail() {
       setRoutineTitleById(new Map(routines.map((routine) => [routine.id, routine.title] as const)));
       setWeekStartsOn(resolvedWeekStart);
 
-      const foundRow = await getTeamWorkoutById(String(id));
+      const foundRow = visibleAthleteId ? await getVisibleAthleteWorkoutById(String(id), visibleAthleteId) : null;
       const found = foundRow ? toAthleteWorkout(foundRow, rosterMap) : null;
 
       if (!isSynthetic && found) {
@@ -217,40 +251,21 @@ export default function AthleteWorkoutDetail() {
         setSplitsText(String(found.splitsOrPace ?? ""));
         setAdditionalFeedbackText(String(found.additionalFeedback ?? found.feedback ?? ""));
 
-        if (found.batchId) {
-          const groupId = normalizeGroupId(found.groupId);
-          const peerRows = await listTeamWorkoutsInRange(String(found.dateISO), String(found.dateISO));
-          const peers = peerRows
-            .map((row) => toAthleteWorkout(row, rosterMap))
-            .filter(
-              (w) =>
-                w.batchId === found.batchId &&
-                normalizeGroupId(w.groupId) === groupId &&
-                w.id !== found.id
-            );
-          const names = Array.from(
-            new Set(
-              peers
-                .map((peer) => {
-                  if (peer.athleteId) return rosterMap.get(peer.athleteId) ?? peer.athleteName;
-                  return peer.athleteName;
-                })
-                .filter((value): value is string => Boolean(value && value.trim()))
-            )
-          );
-          setGroupMateNames(names);
-        } else {
-          setGroupMateNames([]);
-        }
+        setGroupMateNames([]);
 
         if (found?.athleteId && found?.dateISO) {
-          void teamDataStore.actions.loadMileageWeek(
+          void teamDataStore.actions.loadVisibleMileageWeekForAthlete(
+            String(found.athleteId),
             getWeekStartISO(String(found.dateISO), resolvedWeekStart)
           );
         }
       }
 
       if (isSynthetic) {
+        await migrateLocalMileageFeedbackToTeamForAthlete({
+          athleteId: String(athleteId ?? "") || undefined,
+          athleteName: String(name ?? "") || undefined,
+        });
         const feedbackId = buildMileageFeedbackId({
           athleteId: String(athleteId ?? "") || undefined,
           athleteName: String(name ?? "") || undefined,
@@ -336,7 +351,7 @@ export default function AthleteWorkoutDetail() {
           additional_feedback: additionalFeedbackText.trim() || null,
         });
 
-        const refreshedRow = await getTeamWorkoutById(workout.id);
+        const refreshedRow = await getVisibleAthleteWorkoutById(workout.id, String(workout.athleteId ?? ""));
         if (!refreshedRow) {
           throw new Error("Saved workout could not be reloaded.");
         }
@@ -353,14 +368,14 @@ export default function AthleteWorkoutDetail() {
       }
 
       setSubmitStatus("saved");
-      Alert.alert("Submitted", "Your feedback was saved.", [
+      Alert.alert("Submitted", "Your log was saved.", [
         {
           text: "OK",
-          onPress: () => router.back(),
+          onPress: leaveWorkoutDetail,
         },
       ]);
     } catch (error: any) {
-      const message = String(error?.message ?? error ?? "Could not save feedback.");
+      const message = String(error?.message ?? error ?? "Could not save log.");
       setSubmitStatus("error");
       setSubmitError(message);
       Alert.alert("Save failed", message);
@@ -377,8 +392,19 @@ export default function AthleteWorkoutDetail() {
 
   if (!isSynthetic && !workout) {
     return (
-      <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
-        <Text>Workout not found.</Text>
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", padding: 20 }}>
+        <Text style={{ fontWeight: "800", marginBottom: 12 }}>Workout not found.</Text>
+        <Pressable
+          onPress={leaveWorkoutDetail}
+          style={{
+            borderRadius: 12,
+            backgroundColor: "#0f172a",
+            paddingHorizontal: 16,
+            paddingVertical: 10,
+          }}
+        >
+          <Text style={{ color: "white", fontWeight: "800" }}>Back</Text>
+        </Pressable>
       </View>
     );
   }
@@ -419,10 +445,7 @@ export default function AthleteWorkoutDetail() {
           title: "Workout",
           headerRight: () => (
             <Pressable
-              onPress={() => {
-                dismissKeyboard();
-                router.back();
-              }}
+              onPress={leaveWorkoutDetail}
               style={{ paddingHorizontal: 12 }}
             >
               <Text style={{ fontSize: 16, fontWeight: "600" }}>Done</Text>
@@ -489,7 +512,7 @@ export default function AthleteWorkoutDetail() {
             }}
           >
             <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.4, color: "#475569" }}>
-              FEEDBACK SUMMARY
+              LOG SUMMARY
             </Text>
             <Text style={{ marginTop: 6, fontSize: 13, fontWeight: "700", color: "#0f172a" }}>
               Prescribed: {prescribedLabel || "Not set"}
@@ -512,7 +535,7 @@ export default function AthleteWorkoutDetail() {
               padding: 12,
             }}
           >
-          <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.6, color: "#64748b" }}>YOUR FEEDBACK</Text>
+          <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.6, color: "#64748b" }}>YOUR LOG</Text>
           <Text style={{ marginTop: 6, fontWeight: "700", color: "#0f172a" }}>Distance Completed ({distanceUnitLabel(distanceUnit).toUpperCase()})</Text>
           <TextInput
             ref={distanceRef}
@@ -571,7 +594,7 @@ export default function AthleteWorkoutDetail() {
             }}
           />
 
-          <Text style={{ fontWeight: "700", color: "#0f172a" }}>Additional Feedback</Text>
+          <Text style={{ fontWeight: "700", color: "#0f172a" }}>Notes</Text>
           <TextInput
             ref={feedbackRef}
             inputAccessoryViewID={Platform.OS === "ios" ? IOS_ACCESSORY_ID : undefined}
@@ -606,7 +629,7 @@ export default function AthleteWorkoutDetail() {
               opacity: submitStatus === "saving" ? 0.7 : 1,
             }}
           >
-            <Text style={{ color: "white", fontWeight: "800", fontSize: 16 }}>Submit Feedback</Text>
+            <Text style={{ color: "white", fontWeight: "800", fontSize: 16 }}>Submit log</Text>
           </Pressable>
           </View>
         </ScrollView>

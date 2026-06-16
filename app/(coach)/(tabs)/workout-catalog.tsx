@@ -21,10 +21,12 @@ import {
   getCurrentTeamRoster,
   type TeamRosterAthlete,
 } from "../../../lib/teamRoster";
+import { canEditTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
 
 const HISTORY_START_ISO = "2000-01-01";
 const HISTORY_END_ISO = "2100-12-31";
 const WORKOUT_CATALOG_UI_STATE_KEY = "training_app_workout_catalog_ui_state_v1";
+const WORKOUT_CATALOG_CACHE_TTL_MS = 3 * 60 * 1000;
 
 type CatalogEntry = {
   signature: string;
@@ -73,6 +75,22 @@ type WorkoutCatalogUiState = {
   expandedTitleGroups?: string[];
   scrollY?: number;
 };
+
+type WorkoutCatalogSnapshot = {
+  titleGroups: CatalogTitleGroup[];
+  categoryOrder: string[];
+  roster: TeamRosterAthlete[];
+  routineTitleById: Map<string, string>;
+};
+
+let workoutCatalogCache:
+  | {
+      loadedAt: number;
+      snapshot: WorkoutCatalogSnapshot;
+    }
+  | null = null;
+
+let workoutCatalogInFlight: Promise<WorkoutCatalogSnapshot> | null = null;
 
 function normalizeText(value: unknown): string {
   return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
@@ -251,6 +269,151 @@ function toCatalogEntryFromBatch(batchRowsRaw: TeamWorkoutRow[]): CatalogEntry |
   };
 }
 
+function cloneCatalogSnapshot(snapshot: WorkoutCatalogSnapshot): WorkoutCatalogSnapshot {
+  return {
+    titleGroups: snapshot.titleGroups,
+    categoryOrder: [...snapshot.categoryOrder],
+    roster: [...snapshot.roster],
+    routineTitleById: new Map(snapshot.routineTitleById),
+  };
+}
+
+function isCatalogCacheFresh(now = Date.now()): boolean {
+  return !!workoutCatalogCache && now - workoutCatalogCache.loadedAt < WORKOUT_CATALOG_CACHE_TTL_MS;
+}
+
+function buildCatalogSnapshot(
+  rows: TeamWorkoutRow[],
+  coreSettings: Awaited<ReturnType<typeof loadCoreCoachSettings>>,
+  rosterRows: TeamRosterAthlete[],
+  routines: Awaited<ReturnType<typeof loadAuxiliaryRoutines>>
+): WorkoutCatalogSnapshot {
+  const categoryOrder = (Array.isArray(coreSettings.categories) ? coreSettings.categories : [])
+    .map((c) => String(c?.name ?? "").trim())
+    .filter(Boolean);
+  const roster = [...(Array.isArray(rosterRows) ? rosterRows : [])].sort((a, b) =>
+    compareAthleteDisplayNamesByLastName(a.displayName, b.displayName)
+  );
+  const routineTitleById = new Map<string, string>();
+  (Array.isArray(routines) ? routines : []).forEach((routine) => {
+    const id = String(routine.id ?? "").trim();
+    const title = String(routine.title ?? "").trim();
+    if (!id || !title) return;
+    routineTitleById.set(id, title);
+  });
+
+  const byBatchId = new Map<string, TeamWorkoutRow[]>();
+  rows.forEach((row) => {
+    const batchId = String(row.batch_id ?? "").trim();
+    if (!batchId) return;
+    const list = byBatchId.get(batchId) ?? [];
+    list.push(row);
+    byBatchId.set(batchId, list);
+  });
+
+  const allBatchEntries: CatalogEntry[] = [];
+  Array.from(byBatchId.values()).forEach((batchRows) => {
+    const entry = toCatalogEntryFromBatch(batchRows);
+    if (!entry) return;
+    allBatchEntries.push(entry);
+  });
+
+  const groupsByTitle = new Map<string, CatalogEntry[]>();
+  allBatchEntries.forEach((entry) => {
+    const titleKey = normalizeTitleKey(entry.title);
+    const list = groupsByTitle.get(titleKey) ?? [];
+    list.push(entry);
+    groupsByTitle.set(titleKey, list);
+  });
+
+  const titleGroups: CatalogTitleGroup[] = Array.from(groupsByTitle.entries()).map(([titleKey, versionsRaw]) => {
+    const versions = [...versionsRaw].sort((a, b) => {
+      if (a.latestDateISO !== b.latestDateISO) return b.latestDateISO.localeCompare(a.latestDateISO);
+      if (a.sourceDateISO !== b.sourceDateISO) return b.sourceDateISO.localeCompare(a.sourceDateISO);
+      return String(a.sourceBatchId ?? "").localeCompare(String(b.sourceBatchId ?? ""));
+    });
+    const primaryEntry = versions[0]!;
+    const categorySet = new Set<string>();
+    const preSet = new Set<string>();
+    const postSet = new Set<string>();
+    let athleteCountMax = 0;
+    let rowCountMax = 0;
+    versions.forEach((entry) => {
+      (entry.categories.length > 0 ? entry.categories : ["Uncategorized"]).forEach((name) => {
+        const key = String(name ?? "").trim() || "Uncategorized";
+        categorySet.add(key);
+      });
+      entry.preRoutineIds.forEach((id) => preSet.add(String(id ?? "").trim()));
+      entry.postRoutineIds.forEach((id) => postSet.add(String(id ?? "").trim()));
+      athleteCountMax = Math.max(athleteCountMax, entry.athleteCount);
+      rowCountMax = Math.max(rowCountMax, entry.rowCount);
+    });
+
+    return {
+      titleKey,
+      title: primaryEntry.title,
+      versions,
+      primaryEntry,
+      categories: Array.from(categorySet).filter(Boolean).sort((a, b) => a.localeCompare(b)),
+      preRoutineIds: Array.from(preSet).filter(Boolean),
+      postRoutineIds: Array.from(postSet).filter(Boolean),
+      latestDateISO: primaryEntry.latestDateISO,
+      athleteCountMax,
+      rowCountMax,
+    };
+  });
+
+  titleGroups.sort((a, b) => {
+    if (a.title !== b.title) return a.title.localeCompare(b.title);
+    return b.latestDateISO.localeCompare(a.latestDateISO);
+  });
+
+  return {
+    titleGroups,
+    categoryOrder,
+    roster,
+    routineTitleById,
+  };
+}
+
+async function loadWorkoutCatalogSnapshot(forceRefresh = false): Promise<WorkoutCatalogSnapshot> {
+  if (!forceRefresh && workoutCatalogCache && isCatalogCacheFresh()) {
+    return cloneCatalogSnapshot(workoutCatalogCache.snapshot);
+  }
+  if (!forceRefresh && workoutCatalogInFlight) {
+    return cloneCatalogSnapshot(await workoutCatalogInFlight);
+  }
+
+  const nextLoad = (async () => {
+    const [rows, coreSettings, rosterRows, routines] = await Promise.all([
+      listTeamWorkoutsInRange(HISTORY_START_ISO, HISTORY_END_ISO),
+      loadCoreCoachSettings(),
+      getCurrentTeamRoster(),
+      loadAuxiliaryRoutines(),
+    ]);
+    const snapshot = buildCatalogSnapshot(rows, coreSettings, rosterRows, routines);
+    workoutCatalogCache = {
+      loadedAt: Date.now(),
+      snapshot,
+    };
+    return snapshot;
+  })();
+  workoutCatalogInFlight = nextLoad;
+
+  try {
+    return cloneCatalogSnapshot(await nextLoad);
+  } finally {
+    if (workoutCatalogInFlight === nextLoad) {
+      workoutCatalogInFlight = null;
+    }
+  }
+}
+
+function invalidateWorkoutCatalogCache() {
+  workoutCatalogCache = null;
+  workoutCatalogInFlight = null;
+}
+
 export default function CoachWorkoutCatalogTab() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
@@ -261,6 +424,8 @@ export default function CoachWorkoutCatalogTab() {
   const [assignAthleteSearch, setAssignAthleteSearch] = useState("");
   const [selectedAssignAthleteIds, setSelectedAssignAthleteIds] = useState<string[]>([]);
   const [assigningSignature, setAssigningSignature] = useState<string | null>(null);
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const readOnlyCatalog = !canEditTraining(currentTeamRole);
   const [titleGroups, setTitleGroups] = useState<CatalogTitleGroup[]>([]);
   const [categoryOrder, setCategoryOrder] = useState<string[]>([]);
   const [routineTitleById, setRoutineTitleById] = useState<Map<string, string>>(new Map());
@@ -271,112 +436,58 @@ export default function CoachWorkoutCatalogTab() {
   const [uiHydrated, setUiHydrated] = useState(false);
   const listScrollRef = useRef<ScrollView>(null);
   const restoredScrollAppliedRef = useRef(false);
+  const loadRequestIdRef = useRef(0);
 
-  const reload = useCallback(async () => {
-    setLoading(true);
+  const applyCatalogSnapshot = useCallback((snapshot: WorkoutCatalogSnapshot) => {
+    setCategoryOrder(snapshot.categoryOrder);
+    setRoster(snapshot.roster);
+    setRoutineTitleById(snapshot.routineTitleById);
+    setTitleGroups(snapshot.titleGroups);
+  }, []);
+
+  const reload = useCallback(async (options?: { forceRefresh?: boolean }) => {
+    const forceRefresh = !!options?.forceRefresh;
+    const requestId = loadRequestIdRef.current + 1;
+    loadRequestIdRef.current = requestId;
+    if (!workoutCatalogCache || forceRefresh || !isCatalogCacheFresh()) {
+      setLoading(true);
+    }
     try {
-      const [rows, coreSettings, rosterRows, routines] = await Promise.all([
-        listTeamWorkoutsInRange(HISTORY_START_ISO, HISTORY_END_ISO),
-        loadCoreCoachSettings(),
-        getCurrentTeamRoster(),
-        loadAuxiliaryRoutines(),
-      ]);
-
-      const categoriesFromSettings = (Array.isArray(coreSettings.categories) ? coreSettings.categories : [])
-        .map((c) => String(c?.name ?? "").trim())
-        .filter(Boolean);
-      setCategoryOrder(categoriesFromSettings);
-      setRoster(
-        [...(Array.isArray(rosterRows) ? rosterRows : [])].sort((a, b) =>
-          compareAthleteDisplayNamesByLastName(a.displayName, b.displayName)
-        )
-      );
-      const routineMap = new Map<string, string>();
-      (Array.isArray(routines) ? routines : []).forEach((routine) => {
-        const id = String(routine.id ?? "").trim();
-        const title = String(routine.title ?? "").trim();
-        if (!id || !title) return;
-        routineMap.set(id, title);
-      });
-      setRoutineTitleById(routineMap);
-
-      const byBatchId = new Map<string, TeamWorkoutRow[]>();
-      rows.forEach((row) => {
-        const batchId = String(row.batch_id ?? "").trim();
-        if (!batchId) return;
-        const list = byBatchId.get(batchId) ?? [];
-        list.push(row);
-        byBatchId.set(batchId, list);
-      });
-
-      const allBatchEntries: CatalogEntry[] = [];
-      Array.from(byBatchId.values()).forEach((batchRows) => {
-        const entry = toCatalogEntryFromBatch(batchRows);
-        if (!entry) return;
-        allBatchEntries.push(entry);
-      });
-
-      const groupsByTitle = new Map<string, CatalogEntry[]>();
-      allBatchEntries.forEach((entry) => {
-        const titleKey = normalizeTitleKey(entry.title);
-        const list = groupsByTitle.get(titleKey) ?? [];
-        list.push(entry);
-        groupsByTitle.set(titleKey, list);
-      });
-
-      const nextGroups: CatalogTitleGroup[] = Array.from(groupsByTitle.entries()).map(([titleKey, versionsRaw]) => {
-        const versions = [...versionsRaw].sort((a, b) => {
-          if (a.latestDateISO !== b.latestDateISO) return b.latestDateISO.localeCompare(a.latestDateISO);
-          if (a.sourceDateISO !== b.sourceDateISO) return b.sourceDateISO.localeCompare(a.sourceDateISO);
-          return String(a.sourceBatchId ?? "").localeCompare(String(b.sourceBatchId ?? ""));
-        });
-        const primaryEntry = versions[0]!;
-        const categorySet = new Set<string>();
-        const preSet = new Set<string>();
-        const postSet = new Set<string>();
-        let athleteCountMax = 0;
-        let rowCountMax = 0;
-        versions.forEach((entry) => {
-          (entry.categories.length > 0 ? entry.categories : ["Uncategorized"]).forEach((name) => {
-            const key = String(name ?? "").trim() || "Uncategorized";
-            categorySet.add(key);
-          });
-          entry.preRoutineIds.forEach((id) => preSet.add(String(id ?? "").trim()));
-          entry.postRoutineIds.forEach((id) => postSet.add(String(id ?? "").trim()));
-          athleteCountMax = Math.max(athleteCountMax, entry.athleteCount);
-          rowCountMax = Math.max(rowCountMax, entry.rowCount);
-        });
-
-        return {
-          titleKey,
-          title: primaryEntry.title,
-          versions,
-          primaryEntry,
-          categories: Array.from(categorySet).filter(Boolean).sort((a, b) => a.localeCompare(b)),
-          preRoutineIds: Array.from(preSet).filter(Boolean),
-          postRoutineIds: Array.from(postSet).filter(Boolean),
-          latestDateISO: primaryEntry.latestDateISO,
-          athleteCountMax,
-          rowCountMax,
-        };
-      });
-
-      nextGroups.sort((a, b) => {
-        if (a.title !== b.title) return a.title.localeCompare(b.title);
-        return b.latestDateISO.localeCompare(a.latestDateISO);
-      });
-      setTitleGroups(nextGroups);
+      const snapshot = await loadWorkoutCatalogSnapshot(forceRefresh);
+      if (loadRequestIdRef.current !== requestId) return;
+      applyCatalogSnapshot(snapshot);
     } catch (error: any) {
+      if (loadRequestIdRef.current !== requestId) return;
       Alert.alert("Workout Catalog", String(error?.message ?? "Could not load workout history."));
       setTitleGroups([]);
     } finally {
-      setLoading(false);
+      if (loadRequestIdRef.current === requestId) {
+        setLoading(false);
+      }
     }
+  }, [applyCatalogSnapshot]);
+
+  useEffect(() => {
+    let active = true;
+    getCurrentTeamRole()
+      .then((role) => {
+        if (active) setCurrentTeamRole(role);
+      })
+      .catch((error) => {
+        console.warn("[workout-catalog] role load failed", error);
+        if (active) setCurrentTeamRole(null);
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useFocusEffect(
     useCallback(() => {
-      void reload();
+      const timer = setTimeout(() => {
+        void reload();
+      }, 0);
+      return () => clearTimeout(timer);
     }, [reload])
   );
 
@@ -722,6 +833,7 @@ export default function CoachWorkoutCatalogTab() {
       setAssigningSignature(entry.signature);
       try {
         await createTeamWorkoutBatch(payload);
+        invalidateWorkoutCatalogCache();
         if (sourceMainNotes) {
           await Promise.all([
             saveTeamWorkoutBatchHeaderNotes({
@@ -830,7 +942,7 @@ export default function CoachWorkoutCatalogTab() {
               />
             </View>
             <Pressable
-              onPress={() => void reload()}
+              onPress={() => void reload({ forceRefresh: true })}
               style={{
                 borderWidth: 1,
                 borderColor: "#d5deea",
@@ -871,6 +983,11 @@ export default function CoachWorkoutCatalogTab() {
               ? "Loading historical batches..."
               : `${filteredGroups.length} title groups from ${titleGroups.length} grouped workouts`}
           </Text>
+          {readOnlyCatalog ? (
+            <Text style={{ fontSize: 11, fontWeight: "800", color: "#64748b" }}>
+              Viewer access: editing is disabled.
+            </Text>
+          ) : null}
         </Card>
 
         <ScrollView
@@ -965,26 +1082,28 @@ export default function CoachWorkoutCatalogTab() {
                             </Text>
                           </Pressable>
                         ) : null}
-                        <Pressable
-                          onPress={(event) => {
-                            event?.stopPropagation?.();
-                            openAssignFlow(latest);
-                          }}
-                          disabled={assigning}
-                          style={{
-                            borderWidth: 1,
-                            borderColor: "#cdd7e6",
-                            borderRadius: 8,
-                            paddingHorizontal: 10,
-                            paddingVertical: 6,
-                            backgroundColor: "#f8fafc",
-                            opacity: assigning ? 0.65 : 1,
-                          }}
-                        >
-                          <Text style={{ fontSize: 12, fontWeight: "900", color: "#1e293b" }}>
-                            {assigning ? "Assigning..." : "Assign"}
-                          </Text>
-                        </Pressable>
+                        {!readOnlyCatalog ? (
+                          <Pressable
+                            onPress={(event) => {
+                              event?.stopPropagation?.();
+                              openAssignFlow(latest);
+                            }}
+                            disabled={assigning}
+                            style={{
+                              borderWidth: 1,
+                              borderColor: "#cdd7e6",
+                              borderRadius: 8,
+                              paddingHorizontal: 10,
+                              paddingVertical: 6,
+                              backgroundColor: "#f8fafc",
+                              opacity: assigning ? 0.65 : 1,
+                            }}
+                          >
+                            <Text style={{ fontSize: 12, fontWeight: "900", color: "#1e293b" }}>
+                              {assigning ? "Assigning..." : "Assign"}
+                            </Text>
+                          </Pressable>
+                        ) : null}
                       </View>
                     </View>
 
@@ -1030,26 +1149,28 @@ export default function CoachWorkoutCatalogTab() {
                                   {version.timeText ? ` • ${version.timeText}` : ""}
                                   {version.location ? ` • ${version.location}` : ""}
                                 </Text>
-                                <Pressable
-                                  onPress={(event) => {
-                                    event?.stopPropagation?.();
-                                    openAssignFlow(version);
-                                  }}
-                                  disabled={versionAssigning}
-                                  style={{
-                                    borderWidth: 1,
-                                    borderColor: "#d5deea",
-                                    borderRadius: 7,
-                                    paddingHorizontal: 8,
-                                    paddingVertical: 5,
-                                    backgroundColor: "#fff",
-                                    opacity: versionAssigning ? 0.65 : 1,
-                                  }}
-                                >
-                                  <Text style={{ fontSize: 11, fontWeight: "900", color: "#1e293b" }}>
-                                    {versionAssigning ? "Assigning..." : "Assign"}
-                                  </Text>
-                                </Pressable>
+                                {!readOnlyCatalog ? (
+                                  <Pressable
+                                    onPress={(event) => {
+                                      event?.stopPropagation?.();
+                                      openAssignFlow(version);
+                                    }}
+                                    disabled={versionAssigning}
+                                    style={{
+                                      borderWidth: 1,
+                                      borderColor: "#d5deea",
+                                      borderRadius: 7,
+                                      paddingHorizontal: 8,
+                                      paddingVertical: 5,
+                                      backgroundColor: "#fff",
+                                      opacity: versionAssigning ? 0.65 : 1,
+                                    }}
+                                  >
+                                    <Text style={{ fontSize: 11, fontWeight: "900", color: "#1e293b" }}>
+                                      {versionAssigning ? "Assigning..." : "Assign"}
+                                    </Text>
+                                  </Pressable>
+                                ) : null}
                               </View>
                               {version.details ? (
                                 <Text style={{ fontSize: 11, lineHeight: 16, color: "#475569" }}>

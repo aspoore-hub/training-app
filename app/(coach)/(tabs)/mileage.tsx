@@ -24,7 +24,7 @@ import { loadCoachWeekLabels, loadCoreCoachSettings, loadWeekStartSetting, saveC
 import { loadJSON, saveJSON } from "../../../lib/storage";
 import { getWeekLabelTone } from "../../../lib/weekLabelStyle";
 import {
-  compareAthleteDisplayNamesByLastName,
+  isAthleteEligibleDuringWeek,
   normalizeTeamRosterAthlete,
   resolveAthleteSeasonWindowWithTenure,
   sortRosterByName,
@@ -41,15 +41,32 @@ import {
   workoutEntryXTRange,
   parseWorkoutEntryValue,
 } from "../../../lib/workoutEntryParser";
+import {
+  fetchMileageWeekVisibilityForWeek,
+  setMileageVisibilityByDateRange,
+  setMileageVisibilityByWeeks,
+  type MileageWeekVisibilityRow,
+} from "../../../lib/mileageCloud";
+import { setWorkoutVisibilityByDateRange } from "../../../lib/teamWorkoutsCloud";
+import { canEditMileage, canExport, canPublishTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MILEAGE_GRID_ID = "mileage-grid";
 const MILEAGE_VIEW_PREFS_KEY = "training_app_coach_mileage_view_prefs_v1";
 const MILEAGE_WEEK_CACHE_PREFIX = "coach_mileage_week_cache_v1";
 const COACH_MILEAGE_PLAN_EXPORT_RANGE_KEY = "coach_mileage_plan_export_range_v1";
-const COACH_MILEAGE_ATHLETE_VIEW_DATE_RANGE_KEY = "coach_mileage_athlete_view_date_range_v1";
+const COACH_MILEAGE_ATHLETE_VIEW_WEEK_RANGE_KEY = "coach_mileage_athlete_view_week_range_v1";
+const COACH_MILEAGE_ATHLETE_VIEW_DATE_RANGE_KEY = "coach_mileage_athlete_view_range_v2";
+const COACH_MILEAGE_ATHLETE_VIEW_DATE_RANGE_LEGACY_KEY = "coach_mileage_athlete_view_date_range_v1";
 const MAX_MILEAGE_PLAN_EXPORT_RANGE_DAYS = 365;
-const MAX_ATHLETE_MULTI_VIEW_RANGE_DAYS = 365;
+
+function isTextEditingTarget(target: unknown): boolean {
+  if (Platform.OS !== "web") return false;
+  const node = target as any;
+  if (!node) return false;
+  const tag = String(node.tagName ?? "").toLowerCase();
+  return tag === "input" || tag === "textarea" || !!node.isContentEditable;
+}
 
 type MileageValue =
   | number
@@ -76,6 +93,9 @@ type SecRange = { min: number; max: number };
 type CellField = "am" | "pm";
 type CellKey = string; // `${athleteId}__${weekStartISO}__${dayIdx}__${field}`
 type OffKey = string; // `${athleteId}__${weekStartISO}__${dayIdx}`
+type TrainingVisibilityAction = "publish" | "hide";
+type TrainingVisibilityContent = "workouts" | "mileage" | "both";
+type TrainingVisibilityRange = "week" | "custom" | "season";
 type WeekClipboard = {
   sourceWeekStartISO: string;
   copiedAtMs: number;
@@ -83,6 +103,7 @@ type WeekClipboard = {
   flags: Array<{ athleteId: string; dayIdx: number; ncaaOff: boolean }>;
 };
 type MileageViewMode = "teamWeek" | "athleteMultiWeek";
+type AthleteRangeMode = "season" | "custom";
 type TrainingGroupFilterOption = {
   id: string;
   label: string;
@@ -115,6 +136,11 @@ function cellCloudKey(athleteId: string, weekStart: string, dayIdx: number, fiel
 
 function offKey(athleteId: string, weekStart: string, dayIdx: number) {
   return `${athleteId}__${weekStart}__${dayIdx}`;
+}
+
+function rowBelongsToMileageWeek(row: any, weekStartISO: string): boolean {
+  const rowWeek = String(row?.week_start_iso ?? "").trim();
+  return !rowWeek || rowWeek === weekStartISO;
 }
 
 function toRange(v: MileageValue | null | undefined, paceSecPerMile: number): Range {
@@ -593,10 +619,19 @@ export default function CoachMileageTab() {
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
   const [weekAnchorISO, setWeekAnchorISO] = useState(() => toISODate(new Date()));
   const [viewMode, setViewMode] = useState<MileageViewMode>("teamWeek");
+  const [athleteMultiFirstWeekStartISO, setAthleteMultiFirstWeekStartISO] = useState(() => getWeekStartISO(toISODate(new Date()), 1));
+  const [athleteMultiNumberOfWeeks, setAthleteMultiNumberOfWeeks] = useState(6);
   const [athleteMultiRangeStartISO, setAthleteMultiRangeStartISO] = useState(() => getWeekStartISO(toISODate(new Date()), 1));
   const [athleteMultiRangeEndISO, setAthleteMultiRangeEndISO] = useState(() => addDaysISO(getWeekStartISO(toISODate(new Date()), 1), 41));
+  const [athleteMultiRangeMode, setAthleteMultiRangeMode] = useState<AthleteRangeMode>("season");
   const [athleteMultiSelectedId, setAthleteMultiSelectedId] = useState("");
   const [athleteMultiRangeError, setAthleteMultiRangeError] = useState<string | null>(null);
+  const [athleteMultiExcludedSeasonMessage, setAthleteMultiExcludedSeasonMessage] = useState<string | null>(null);
+  const [athleteRangeEditorOpen, setAthleteRangeEditorOpen] = useState(false);
+  const [athleteRangeDraftFirstWeekISO, setAthleteRangeDraftFirstWeekISO] = useState("");
+  const [athleteRangeDraftWeekCount, setAthleteRangeDraftWeekCount] = useState("6");
+  const [athleteRangeDraftError, setAthleteRangeDraftError] = useState<string | null>(null);
+  const [athleteMultiWeeksLoading, setAthleteMultiWeeksLoading] = useState(false);
   const [athleteSearchQuery, setAthleteSearchQuery] = useState("");
   const [athletePickerOpen, setAthletePickerOpen] = useState(false);
   const selectedTrainingGroupIds = s.sharedSelectedTrainingGroupIds;
@@ -629,6 +664,17 @@ export default function CoachMileageTab() {
     cells: any[];
     flags: any[];
   } | null>(null);
+  const [weekVisibilityRows, setWeekVisibilityRows] = useState<MileageWeekVisibilityRow[]>([]);
+  const [weekVisibilityBusy, setWeekVisibilityBusy] = useState(false);
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const [trainingVisibilityOpen, setTrainingVisibilityOpen] = useState(false);
+  const [trainingVisibilityAction, setTrainingVisibilityAction] = useState<TrainingVisibilityAction>("publish");
+  const [trainingVisibilityContent, setTrainingVisibilityContent] = useState<TrainingVisibilityContent>("mileage");
+  const [trainingVisibilityRange, setTrainingVisibilityRange] = useState<TrainingVisibilityRange>("week");
+  const [trainingVisibilityStartISO, setTrainingVisibilityStartISO] = useState(() => getWeekStartISO(toISODate(new Date()), 1));
+  const [trainingVisibilityEndISO, setTrainingVisibilityEndISO] = useState(() => addDaysISO(getWeekStartISO(toISODate(new Date()), 1), 6));
+  const [trainingVisibilityApplying, setTrainingVisibilityApplying] = useState(false);
+  const [trainingVisibilityError, setTrainingVisibilityError] = useState<string | null>(null);
   const [activeGridId, setActiveGridId] = useState<string | null>(null);
   const [mileageDraftsByKey, setMileageDraftsByKey] = useState<Record<string, string>>({});
   const actionBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -646,6 +692,25 @@ export default function CoachMileageTab() {
   >({});
   const editingCloudKeyRef = useRef<string | null>(null);
   const restoredWeekAnchorRef = useRef(false);
+  const athleteMultiWeeksLoadSeqRef = useRef(0);
+  const readOnlyMileage = !canEditMileage(currentTeamRole);
+  const canPublishMileageTraining = canPublishTraining(currentTeamRole);
+  const canExportMileage = canExport(currentTeamRole);
+
+  useEffect(() => {
+    let active = true;
+    getCurrentTeamRole()
+      .then((role) => {
+        if (active) setCurrentTeamRole(role);
+      })
+      .catch((error) => {
+        console.warn("[coach-mileage] role load failed", error);
+        if (active) setCurrentTeamRole(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -666,15 +731,50 @@ export default function CoachMileageTab() {
         setAthleteMultiSelectedId(prefs.athleteMultiSelectedId);
       }
       try {
-        const rawRange = await AsyncStorage.getItem(COACH_MILEAGE_ATHLETE_VIEW_DATE_RANGE_KEY);
-        const parsedRange = rawRange
-          ? (JSON.parse(rawRange) as { startDateISO?: string; endDateISO?: string; seasonId?: string | null })
+        const rawWeekRange = await AsyncStorage.getItem(COACH_MILEAGE_ATHLETE_VIEW_WEEK_RANGE_KEY);
+        const parsedWeekRange = rawWeekRange
+          ? (JSON.parse(rawWeekRange) as {
+              selectedSeasonId?: string | null;
+              rangeMode?: AthleteRangeMode;
+              firstWeekStartISO?: string;
+              numberOfWeeks?: number;
+            })
           : null;
-        const savedStart = String(parsedRange?.startDateISO ?? "").trim();
-        const savedEnd = String(parsedRange?.endDateISO ?? "").trim();
-        if (isValidISODate(savedStart) && isValidISODate(savedEnd) && savedEnd >= savedStart) {
-          setAthleteMultiRangeStartISO(savedStart);
-          setAthleteMultiRangeEndISO(savedEnd);
+        if (parsedWeekRange) {
+          const mode = parsedWeekRange?.rangeMode === "custom" ? "custom" : "season";
+          const firstWeekStartISO = String(parsedWeekRange?.firstWeekStartISO ?? "").trim();
+          const numberOfWeeksRaw = Number(parsedWeekRange?.numberOfWeeks ?? 6);
+          const numberOfWeeks = Number.isInteger(numberOfWeeksRaw)
+            ? Math.min(52, Math.max(1, numberOfWeeksRaw))
+            : 6;
+          if (isValidISODate(firstWeekStartISO)) {
+            setAthleteMultiFirstWeekStartISO(firstWeekStartISO);
+            setAthleteMultiNumberOfWeeks(numberOfWeeks);
+            setAthleteMultiRangeMode(mode);
+          }
+        } else {
+          const rawRange = await AsyncStorage.getItem(COACH_MILEAGE_ATHLETE_VIEW_DATE_RANGE_KEY);
+          const parsedRange = rawRange
+            ? (JSON.parse(rawRange) as { rangeMode?: AthleteRangeMode; startDateISO?: string; endDateISO?: string })
+            : null;
+          const fallbackRaw =
+            parsedRange == null ? await AsyncStorage.getItem(COACH_MILEAGE_ATHLETE_VIEW_DATE_RANGE_LEGACY_KEY) : null;
+          const fallbackParsed = fallbackRaw
+            ? (JSON.parse(fallbackRaw) as { startDateISO?: string; endDateISO?: string })
+            : null;
+          const savedStart = String(parsedRange?.startDateISO ?? fallbackParsed?.startDateISO ?? "").trim();
+          const savedEnd = String(parsedRange?.endDateISO ?? fallbackParsed?.endDateISO ?? "").trim();
+          if (isValidISODate(savedStart) && isValidISODate(savedEnd) && savedEnd >= savedStart) {
+            const firstWeekStart = getWeekStartISO(savedStart, 1);
+            const lastWeekStart = getWeekStartISO(savedEnd, 1);
+            const numberOfWeeks = Math.min(
+              52,
+              Math.max(1, Math.floor((isoDayNumber(lastWeekStart) - isoDayNumber(firstWeekStart)) / 7) + 1)
+            );
+            setAthleteMultiFirstWeekStartISO(firstWeekStart);
+            setAthleteMultiNumberOfWeeks(numberOfWeeks);
+            setAthleteMultiRangeMode(parsedRange?.rangeMode === "season" ? "season" : "custom");
+          }
         }
       } catch {}
       restoredWeekAnchorRef.current = true;
@@ -701,17 +801,36 @@ export default function CoachMileageTab() {
 
   useEffect(() => {
     if (!weekAnchorReady || !restoredWeekAnchorRef.current) return;
-    if (!isValidISODate(athleteMultiRangeStartISO) || !isValidISODate(athleteMultiRangeEndISO)) return;
-    if (athleteMultiRangeEndISO < athleteMultiRangeStartISO) return;
+    if (!isValidISODate(athleteMultiFirstWeekStartISO)) return;
+    if (!Number.isInteger(athleteMultiNumberOfWeeks) || athleteMultiNumberOfWeeks < 1) return;
+    const safeWeeks = Math.min(52, Math.max(1, athleteMultiNumberOfWeeks));
     void AsyncStorage.setItem(
-      COACH_MILEAGE_ATHLETE_VIEW_DATE_RANGE_KEY,
+      COACH_MILEAGE_ATHLETE_VIEW_WEEK_RANGE_KEY,
       JSON.stringify({
-        startDateISO: athleteMultiRangeStartISO,
-        endDateISO: athleteMultiRangeEndISO,
-        seasonId: selectedSeasonId ?? null,
+        selectedSeasonId: selectedSeasonId ?? null,
+        rangeMode: athleteMultiRangeMode,
+        firstWeekStartISO: athleteMultiFirstWeekStartISO,
+        numberOfWeeks: safeWeeks,
       })
     ).catch(() => {});
-  }, [athleteMultiRangeEndISO, athleteMultiRangeStartISO, selectedSeasonId, weekAnchorReady]);
+  }, [
+    athleteMultiFirstWeekStartISO,
+    athleteMultiNumberOfWeeks,
+    athleteMultiRangeMode,
+    selectedSeasonId,
+    weekAnchorReady,
+  ]);
+
+  useEffect(() => {
+    const safeFirst = isValidISODate(athleteMultiFirstWeekStartISO)
+      ? getWeekStartISO(athleteMultiFirstWeekStartISO, weekStartsOn)
+      : getWeekStartISO(toISODate(new Date()), weekStartsOn);
+    const safeWeeks = Math.min(52, Math.max(1, Number(athleteMultiNumberOfWeeks) || 1));
+    const derivedStart = safeFirst;
+    const derivedEnd = addDaysISO(safeFirst, safeWeeks * 7 - 1);
+    if (athleteMultiRangeStartISO !== derivedStart) setAthleteMultiRangeStartISO(derivedStart);
+    if (athleteMultiRangeEndISO !== derivedEnd) setAthleteMultiRangeEndISO(derivedEnd);
+  }, [athleteMultiFirstWeekStartISO, athleteMultiNumberOfWeeks, athleteMultiRangeEndISO, athleteMultiRangeStartISO, weekStartsOn]);
 
   const loadMileageWeekStartSetting = useCallback(async () => {
     const weekStartResult = await loadWeekStartSetting();
@@ -884,6 +1003,7 @@ export default function CoachMileageTab() {
   const cellsByKey = useMemo(() => {
     const next: Record<CellKey, MileageValue | null> = {};
     for (const row of weekCells as any[]) {
+      if (!rowBelongsToMileageWeek(row, weekStartISO)) continue;
       const athleteId = String(row?.athlete_profile_id ?? "");
       const dayIdx = Number(row?.day_idx);
       const session = String(row?.session ?? "").toUpperCase();
@@ -897,6 +1017,7 @@ export default function CoachMileageTab() {
   const ncaaOffByKey = useMemo(() => {
     const next: Record<OffKey, boolean> = {};
     for (const row of weekFlags as any[]) {
+      if (!rowBelongsToMileageWeek(row, weekStartISO)) continue;
       const athleteId = String(row?.athlete_profile_id ?? "");
       const dayIdx = Number(row?.day_idx);
       if (!athleteId || !Number.isInteger(dayIdx) || dayIdx < 0 || dayIdx > 6) continue;
@@ -905,62 +1026,26 @@ export default function CoachMileageTab() {
     return next;
   }, [weekFlags, weekStartISO]);
 
+  const weekEndISO = useMemo(() => addDaysISO(weekStartISO, 6), [weekStartISO]);
+
   const athletesWithIds = useMemo(() => {
     const activeNormalized = sortRosterByName(
-      teamDataStore.getActiveRoster()
+      (Array.isArray(s.roster) ? s.roster : [])
         .map((item) => normalizeTeamRosterAthlete(item))
         .filter((item): item is NonNullable<typeof item> => !!item)
+        .filter((athlete) => isAthleteEligibleDuringWeek(athlete, weekStartISO, weekEndISO))
     );
-    const allNormalized = (Array.isArray(s.roster) ? s.roster : [])
-      .map((item) => normalizeTeamRosterAthlete(item))
-      .filter((item): item is NonNullable<typeof item> => !!item);
-    const allById = new Map<string, (typeof allNormalized)[number]>();
-    allNormalized.forEach((athlete) => {
-      const id = String(athlete.id ?? "").trim();
-      if (!id) return;
-      allById.set(id, athlete);
-    });
 
-    const activeIds = new Set<string>();
     const out: Array<{ raw: any; index: number; id: string; name: string }> = [];
     activeNormalized.forEach((athlete, i) => {
       const id = String(athlete.id ?? "").trim();
       if (!id) return;
-      activeIds.add(id);
       const name = String(athlete.displayName ?? "").trim() || `Athlete ${i + 1}`;
       out.push({ raw: athlete, index: out.length, id, name });
     });
 
-    const historicalIds = new Set<string>();
-    (weekCells as any[]).forEach((row) => {
-      const athleteId = String(row?.athlete_profile_id ?? "").trim();
-      if (athleteId) historicalIds.add(athleteId);
-    });
-    (weekFlags as any[]).forEach((row) => {
-      const athleteId = String(row?.athlete_profile_id ?? "").trim();
-      if (athleteId) historicalIds.add(athleteId);
-    });
-
-    Array.from(historicalIds)
-      .filter((id) => !activeIds.has(id))
-      .map((id) => {
-        const athlete = allById.get(id);
-        const name =
-          String(athlete?.displayName ?? "").trim() ||
-          (id ? `Archived Athlete (${id.slice(-6)})` : "Archived Athlete");
-        return {
-          raw: athlete ?? { id, displayName: name, isActive: false },
-          id,
-          name,
-        };
-      })
-      .sort((a, b) => compareAthleteDisplayNamesByLastName(a.name, b.name))
-      .forEach((athlete) => {
-        out.push({ ...athlete, index: out.length });
-      });
-
     return out;
-  }, [s.roster, weekCells, weekFlags]);
+  }, [s.roster, weekEndISO, weekStartISO]);
 
   const trainingGroupFilterOptions = useMemo<TrainingGroupFilterOption[]>(() => {
     const byId = new Map<string, TrainingGroupFilterOption>();
@@ -1150,6 +1235,219 @@ export default function CoachMileageTab() {
     });
   }, [resolveSelectedSeasonWindowForAthlete, selectedSeason, teamWeekGroupFilteredAthletes, weekStartISO]);
 
+  const refreshMileageWeekVisibility = useCallback(async () => {
+    try {
+      const rows = await fetchMileageWeekVisibilityForWeek(weekStartISO);
+      setWeekVisibilityRows(rows);
+    } catch (error) {
+      console.warn("[coach-mileage] load week visibility failed", error);
+      setWeekVisibilityRows([]);
+    }
+  }, [weekStartISO]);
+
+  useEffect(() => {
+    void refreshMileageWeekVisibility();
+  }, [refreshMileageWeekVisibility]);
+
+  const mileageWeekVisibilityLabel = useMemo(() => {
+    const athleteIds = teamWeekVisibleAthletes.map((athlete) => String(athlete.id ?? "").trim()).filter(Boolean);
+    if (athleteIds.length === 0) return "No athletes";
+    const byAthlete = new Map(weekVisibilityRows.map((row) => [String(row.athlete_profile_id ?? "").trim(), !!row.athlete_visible]));
+    const visibleCount = athleteIds.filter((athleteId) => byAthlete.get(athleteId) === true).length;
+    if (visibleCount === athleteIds.length) return "Published to athletes";
+    if (visibleCount === 0) return "Hidden from athletes";
+    return "Mixed visibility";
+  }, [teamWeekVisibleAthletes, weekVisibilityRows]);
+
+  const setDisplayedMileageWeekVisibility = useCallback(async (visible: boolean) => {
+    const athleteIds = teamWeekVisibleAthletes.map((athlete) => String(athlete.id ?? "").trim()).filter(Boolean);
+    if (athleteIds.length === 0) return;
+    setWeekVisibilityBusy(true);
+    try {
+      await setMileageVisibilityByWeeks({ athleteIds, weekStartISOs: [weekStartISO], visible });
+      await refreshMileageWeekVisibility();
+      setActionBannerText(visible ? "Published mileage week to athletes." : "Hid mileage week from athletes.");
+    } catch (error: any) {
+      Alert.alert("Visibility update failed", String(error?.message ?? error ?? "Could not update mileage visibility."));
+    } finally {
+      setWeekVisibilityBusy(false);
+    }
+  }, [refreshMileageWeekVisibility, teamWeekVisibleAthletes, weekStartISO]);
+
+  const openTrainingVisibilityModal = useCallback((content: TrainingVisibilityContent = "mileage") => {
+    setTrainingVisibilityContent(content);
+    setTrainingVisibilityRange("week");
+    setTrainingVisibilityStartISO(weekStartISO);
+    setTrainingVisibilityEndISO(weekEndISO);
+    setTrainingVisibilityError(null);
+    setTrainingVisibilityOpen(true);
+  }, [weekEndISO, weekStartISO]);
+
+  const applyTrainingVisibilityNow = useCallback(async () => {
+    const visible = trainingVisibilityAction === "publish";
+    const includeWorkouts = trainingVisibilityContent === "workouts" || trainingVisibilityContent === "both";
+    const includeMileage = trainingVisibilityContent === "mileage" || trainingVisibilityContent === "both";
+    const athleteIds = teamWeekVisibleAthletes.map((athlete) => String(athlete.id ?? "").trim()).filter(Boolean);
+    const weekStartsOnForMileage = weekStartsOn === 0 ? 0 : 1;
+    setTrainingVisibilityError(null);
+
+    const showValidation = (title: string, message: string) => {
+      setTrainingVisibilityError(message);
+      Alert.alert(title, message);
+    };
+
+    if (athleteIds.length === 0) {
+      showValidation("No athletes", "There are no athletes in the current Team Week scope.");
+      return;
+    }
+    if (trainingVisibilityRange === "custom") {
+      const startISO = String(trainingVisibilityStartISO ?? "").trim();
+      const endISO = String(trainingVisibilityEndISO ?? "").trim();
+      if (!isValidISODate(startISO) || !isValidISODate(endISO) || startISO > endISO) {
+        showValidation("Invalid range", "Enter a valid start and end date.");
+        return;
+      }
+    }
+    if (trainingVisibilityRange === "season" && !selectedSeason) {
+      showValidation("No season selected", "Select a season before applying visibility.");
+      return;
+    }
+
+    const seasonWindows: Array<{ athleteId: string; startISO: string; endISO: string }> = [];
+    let targetAthleteCount = athleteIds.length;
+    if (trainingVisibilityRange === "season" && selectedSeason) {
+      const seasonId = String(selectedSeason.id ?? "").trim();
+      if (!seasonId) {
+        showValidation("No season selected", "Select a season before applying visibility.");
+        return;
+      }
+      const rosterById = new Map((s.roster ?? []).map((athlete) => [String(athlete?.id ?? "").trim(), athlete]));
+      for (const athleteId of athleteIds) {
+        if (isAthleteExcludedFromSeason(athleteId, seasonId, s.athleteSeasonOverrides ?? [])) continue;
+        const athlete = rosterById.get(athleteId) ?? null;
+        const override = athleteSeasonOverridesBySeasonAndAthlete.get(`${seasonId}:${athleteId}`) ?? null;
+        const resolved = resolveAthleteSeasonWindowWithTenure(athlete as any, selectedSeason as any, override as any);
+        const startISO = String(resolved.start_date ?? "").trim();
+        const endISO = String(resolved.end_date ?? "").trim();
+        if (!isValidISODate(startISO) || !isValidISODate(endISO) || startISO > endISO) continue;
+        seasonWindows.push({ athleteId, startISO, endISO });
+      }
+      targetAthleteCount = seasonWindows.length;
+      if (seasonWindows.length === 0) {
+        showValidation("No eligible athletes", "No eligible athletes found for this season.");
+        return;
+      }
+    }
+
+    if (!includeWorkouts && !includeMileage) {
+      showValidation("Choose training", "Select workouts, mileage, or both.");
+      return;
+    }
+
+    const run = async () => {
+      setTrainingVisibilityApplying(true);
+      try {
+        let mileageRows = 0;
+        let workoutRows = 0;
+        if (trainingVisibilityRange === "season" && selectedSeason) {
+          for (const { athleteId, startISO, endISO } of seasonWindows) {
+            if (includeWorkouts) {
+              workoutRows += await setWorkoutVisibilityByDateRange({ startISO, endISO, athleteIds: [athleteId], visible });
+            }
+            if (includeMileage) {
+              const result = await setMileageVisibilityByDateRange({
+                athleteIds: [athleteId],
+                startISO,
+                endISO,
+                visible,
+                weekStartsOn: weekStartsOnForMileage,
+              });
+              mileageRows += result.rowCount;
+            }
+          }
+        } else {
+          const startISO = trainingVisibilityRange === "week" ? weekStartISO : String(trainingVisibilityStartISO ?? "").trim();
+          const endISO = trainingVisibilityRange === "week" ? weekEndISO : String(trainingVisibilityEndISO ?? "").trim();
+          if (includeWorkouts) {
+            workoutRows = await setWorkoutVisibilityByDateRange({ startISO, endISO, athleteIds, visible });
+          }
+          if (includeMileage) {
+            const result = await setMileageVisibilityByDateRange({
+              athleteIds,
+              startISO,
+              endISO,
+              visible,
+              weekStartsOn: weekStartsOnForMileage,
+            });
+            mileageRows = result.rowCount;
+          }
+        }
+
+        if ((includeWorkouts ? workoutRows : 0) === 0 && (includeMileage ? mileageRows : 0) === 0) {
+          const message =
+            trainingVisibilityRange === "season"
+              ? "No matching workouts or mileage weeks were found for this season."
+              : "No matching workouts or mileage weeks were found for this range.";
+          setTrainingVisibilityError(message);
+          Alert.alert("Nothing found", message);
+          return;
+        }
+
+        await Promise.all([
+          refreshMileageWeekVisibility(),
+          teamDataStore.actions.loadMileageWeek(weekStartISO, true),
+        ]);
+        setTrainingVisibilityOpen(false);
+        const verb = visible ? "Published" : "Hid";
+        const updatedParts = [
+          includeWorkouts ? `${workoutRows} workout${workoutRows === 1 ? "" : "s"}` : "",
+          includeMileage ? `${mileageRows} mileage week row${mileageRows === 1 ? "" : "s"}` : "",
+        ].filter(Boolean);
+        setActionBannerText(`${verb} training visibility for ${targetAthleteCount} athlete${targetAthleteCount === 1 ? "" : "s"}. Updated ${updatedParts.join(" and ")}.`);
+      } catch (error: any) {
+        const message = String(error?.message ?? error ?? "Could not update training visibility.");
+        console.error("[coach-mileage] training visibility apply failed", {
+          rangeMode: trainingVisibilityRange,
+          content: trainingVisibilityContent,
+          action: trainingVisibilityAction,
+          selectedSeasonId: selectedSeason ? String(selectedSeason.id ?? "") : null,
+          athleteCount: athleteIds.length,
+          error,
+        });
+        setTrainingVisibilityError(message);
+        Alert.alert("Visibility update failed", message);
+      } finally {
+        setTrainingVisibilityApplying(false);
+      }
+    };
+
+    const actionText = visible ? "Publish training to athletes?" : "Hide training from athletes?";
+    const confirmMessage = `${visible ? "Athletes will be able to see this training and submit feedback." : "Coaches will still see this training. Hidden training will not appear on athlete Dashboard, Calendar, or Log."}\n\nMileage visibility is week-based. Any week touched by this range will be affected.`;
+    if (Platform.OS === "web" && typeof window !== "undefined" && typeof window.confirm === "function") {
+      if (window.confirm(`${actionText}\n\n${confirmMessage}`)) void run();
+      return;
+    }
+    Alert.alert(actionText, confirmMessage, [
+      { text: "Cancel", style: "cancel" },
+      { text: visible ? "Publish" : "Hide", style: visible ? "default" : "destructive", onPress: () => void run() },
+    ]);
+  }, [
+    athleteSeasonOverridesBySeasonAndAthlete,
+    refreshMileageWeekVisibility,
+    s.athleteSeasonOverrides,
+    s.roster,
+    selectedSeason,
+    teamWeekVisibleAthletes,
+    trainingVisibilityAction,
+    trainingVisibilityContent,
+    trainingVisibilityEndISO,
+    trainingVisibilityRange,
+    trainingVisibilityStartISO,
+    weekEndISO,
+    weekStartISO,
+    weekStartsOn,
+  ]);
+
   useEffect(() => {
     if (athleteMultiSelectedId && athletesWithIds.some((a) => a.id === athleteMultiSelectedId)) return;
     const first = athletesWithIds[0]?.id ?? "";
@@ -1157,26 +1455,28 @@ export default function CoachMileageTab() {
   }, [athleteMultiSelectedId, athletesWithIds]);
 
   const athleteMultiRangeStartWeekISO = useMemo(
-    () => getWeekStartISO(athleteMultiRangeStartISO, weekStartsOn),
-    [athleteMultiRangeStartISO, weekStartsOn]
+    () => getWeekStartISO(athleteMultiFirstWeekStartISO, weekStartsOn),
+    [athleteMultiFirstWeekStartISO, weekStartsOn]
+  );
+  const athleteMultiSafeWeekCount = useMemo(
+    () => Math.min(52, Math.max(1, Number(athleteMultiNumberOfWeeks) || 1)),
+    [athleteMultiNumberOfWeeks]
   );
   const athleteMultiRangeEndWeekISO = useMemo(
-    () => getWeekStartISO(athleteMultiRangeEndISO, weekStartsOn),
-    [athleteMultiRangeEndISO, weekStartsOn]
+    () => addDaysISO(athleteMultiRangeStartWeekISO, (athleteMultiSafeWeekCount - 1) * 7),
+    [athleteMultiRangeStartWeekISO, athleteMultiSafeWeekCount]
   );
   const athleteMultiVisibleWeekStarts = useMemo(
     () => {
-      if (!isValidISODate(athleteMultiRangeStartISO) || !isValidISODate(athleteMultiRangeEndISO)) return [];
-      if (athleteMultiRangeEndISO < athleteMultiRangeStartISO) return [];
-      const daySpan = isoDayNumber(athleteMultiRangeEndISO) - isoDayNumber(athleteMultiRangeStartISO) + 1;
-      if (daySpan > MAX_ATHLETE_MULTI_VIEW_RANGE_DAYS) return [];
+      if (!isValidISODate(athleteMultiRangeStartWeekISO)) return [];
       const out: string[] = [];
-      for (let ws = athleteMultiRangeStartWeekISO; ws <= athleteMultiRangeEndWeekISO; ws = addDaysISO(ws, 7)) {
+      for (let i = 0; i < athleteMultiSafeWeekCount; i++) {
+        const ws = addDaysISO(athleteMultiRangeStartWeekISO, i * 7);
         out.push(ws);
       }
       return out;
     },
-    [athleteMultiRangeEndISO, athleteMultiRangeEndWeekISO, athleteMultiRangeStartISO, athleteMultiRangeStartWeekISO]
+    [athleteMultiRangeStartWeekISO, athleteMultiSafeWeekCount]
   );
 
   const athleteMultiSelectedSeasonWindow = useMemo(() => {
@@ -1185,11 +1485,13 @@ export default function CoachMileageTab() {
   }, [athleteMultiSelectedId, resolveSelectedSeasonWindowForAthlete, selectedSeason]);
 
   const athleteMultiSeasonVisibleWeekStarts = useMemo(
-    () =>
-      athleteMultiVisibleWeekStarts.filter((weekISO) =>
+    () => {
+      if (athleteMultiRangeMode !== "season") return athleteMultiVisibleWeekStarts;
+      return athleteMultiVisibleWeekStarts.filter((weekISO) =>
         seasonIntersectsWeek(weekISO, athleteMultiSelectedSeasonWindow)
-      ),
-    [athleteMultiSelectedSeasonWindow, athleteMultiVisibleWeekStarts]
+      );
+    },
+    [athleteMultiRangeMode, athleteMultiSelectedSeasonWindow, athleteMultiVisibleWeekStarts]
   );
 
   const buildDaysForAthleteWeek = useCallback(
@@ -1396,7 +1698,7 @@ export default function CoachMileageTab() {
       const lastWeekStart = getWeekStartISO(endISO, weekStartsOn);
       const weekStarts: string[] = [];
       for (let ws = firstWeekStart; ws <= lastWeekStart; ws = addDaysISO(ws, 7)) weekStarts.push(ws);
-      await Promise.all(weekStarts.map((ws) => teamDataStore.actions.loadMileageWeek(ws).catch(() => {})));
+      await teamDataStore.actions.loadMileageWeeks(weekStarts);
       const refreshedState = teamDataStore.getState();
 
       const weekRows = weekStarts.map((ws) => {
@@ -1421,13 +1723,11 @@ export default function CoachMileageTab() {
           const pmDraft = String(mileageDraftsRef.current[pmKey] ?? "").trim();
           const amValue = amDraft.length > 0 ? parseMileageInput(amDraft) : (weekCellLookup[amKey] ?? null);
           const pmValue = pmDraft.length > 0 ? parseMileageInput(pmDraft) : (weekCellLookup[pmKey] ?? null);
-          if (inRange) {
-            const pace = resolveAthletePaceSeconds(athleteId, athletePaceOverrides, paceSecPerMile);
-            totalMiles = addRange(totalMiles, toRange(amValue as any, pace));
-            totalMiles = addRange(totalMiles, toRange(pmValue as any, pace));
-            totalXT = addSecRange(totalXT, toXTSecRange(amValue as any));
-            totalXT = addSecRange(totalXT, toXTSecRange(pmValue as any));
-          }
+          const pace = resolveAthletePaceSeconds(athleteId, athletePaceOverrides, paceSecPerMile);
+          totalMiles = addRange(totalMiles, toRange(amValue as any, pace));
+          totalMiles = addRange(totalMiles, toRange(pmValue as any, pace));
+          totalXT = addSecRange(totalXT, toXTSecRange(amValue as any));
+          totalXT = addSecRange(totalXT, toXTSecRange(pmValue as any));
           const flaggedOff = !!weekFlagLookup[offKey(athleteId, ws, dayIdx)];
           return {
             inRange,
@@ -1583,9 +1883,18 @@ export default function CoachMileageTab() {
 
   useEffect(() => {
     if (viewMode !== "athleteMultiWeek") return;
-    athleteMultiVisibleWeekStarts.forEach((ws) => {
-      if (s.mileageLoadedWeeks[ws]) return;
-      void teamDataStore.actions.loadMileageWeek(ws).catch(() => {});
+    const missingWeekStarts = athleteMultiVisibleWeekStarts.filter((ws) => !s.mileageLoadedWeeks[ws]);
+    if (missingWeekStarts.length === 0) {
+      setAthleteMultiWeeksLoading(false);
+      return;
+    }
+    const loadSeq = athleteMultiWeeksLoadSeqRef.current + 1;
+    athleteMultiWeeksLoadSeqRef.current = loadSeq;
+    setAthleteMultiWeeksLoading(true);
+    void teamDataStore.actions.loadMileageWeeks(missingWeekStarts).finally(() => {
+      if (athleteMultiWeeksLoadSeqRef.current === loadSeq) {
+        setAthleteMultiWeeksLoading(false);
+      }
     });
   }, [athleteMultiVisibleWeekStarts, s.mileageLoadedWeeks, viewMode]);
 
@@ -2026,7 +2335,7 @@ export default function CoachMileageTab() {
   );
 
   const mileageGrid = useGridEngine<string, string>({
-    enabled: isWeb && isDesktop,
+    enabled: isWeb && isDesktop && !readOnlyMileage,
     rowIds: editableAthleteIds,
     colKeys: mileageColKeys,
     onActivate: () => setActiveGridId(MILEAGE_GRID_ID),
@@ -2036,6 +2345,7 @@ export default function CoachMileageTab() {
       return String(mileageDraftsByKey[key] ?? "");
     },
     setValuesBatch: (changes) => {
+      if (readOnlyMileage) return;
       applyMileageValueBatch(
         changes.map((change) => ({
           athleteId: change.rowId,
@@ -2214,6 +2524,8 @@ export default function CoachMileageTab() {
   useEffect(() => {
     if (!(isWeb && isDesktop)) return;
     const onKeyDown = (e: any) => {
+      const doc = (globalThis as any)?.document;
+      if (isTextEditingTarget(e?.target) || isTextEditingTarget(doc?.activeElement)) return;
       const handled = activeGridId === MILEAGE_GRID_ID ? mileageGrid.handleKeyDown(e) : false;
       if (!handled) return;
       e.preventDefault?.();
@@ -2240,48 +2552,88 @@ export default function CoachMileageTab() {
     () => getWeekStartISO(toISODate(new Date()), weekStartsOn),
     [weekStartsOn]
   );
-  const athleteMultiRangeSpanDays = useMemo(() => {
-    if (!isValidISODate(athleteMultiRangeStartISO) || !isValidISODate(athleteMultiRangeEndISO)) return 0;
-    return isoDayNumber(athleteMultiRangeEndISO) - isoDayNumber(athleteMultiRangeStartISO) + 1;
-  }, [athleteMultiRangeEndISO, athleteMultiRangeStartISO]);
-
   useEffect(() => {
-    if (!isValidISODate(athleteMultiRangeStartISO) || !isValidISODate(athleteMultiRangeEndISO)) {
-      setAthleteMultiRangeError("Choose valid start/end dates.");
+    if (!isValidISODate(athleteMultiFirstWeekStartISO)) {
+      setAthleteMultiRangeError("Choose a valid first week.");
       return;
     }
-    if (athleteMultiRangeEndISO < athleteMultiRangeStartISO) {
-      setAthleteMultiRangeError("End date must be on or after start date.");
+    if (!Number.isInteger(athleteMultiNumberOfWeeks) || athleteMultiNumberOfWeeks < 1) {
+      setAthleteMultiRangeError("Weeks to show must be at least 1.");
       return;
     }
-    if (athleteMultiRangeSpanDays > MAX_ATHLETE_MULTI_VIEW_RANGE_DAYS) {
-      setAthleteMultiRangeError(`Please choose a range of ${MAX_ATHLETE_MULTI_VIEW_RANGE_DAYS} days or less.`);
+    if (athleteMultiNumberOfWeeks > 52) {
+      setAthleteMultiRangeError("Please choose 52 weeks or less.");
       return;
     }
-    setAthleteMultiRangeError(null);
-  }, [athleteMultiRangeEndISO, athleteMultiRangeSpanDays, athleteMultiRangeStartISO]);
+    setAthleteMultiRangeError(athleteMultiExcludedSeasonMessage);
+  }, [athleteMultiExcludedSeasonMessage, athleteMultiFirstWeekStartISO, athleteMultiNumberOfWeeks]);
 
-  const shiftAthleteMultiRange = useCallback((deltaDays: number) => {
-    setAthleteMultiRangeStartISO((prev) => addDaysISO(prev, deltaDays));
-    setAthleteMultiRangeEndISO((prev) => addDaysISO(prev, deltaDays));
-  }, []);
-
-  const applySelectedSeasonToAthleteRange = useCallback(() => {
+  const resolveAthleteSeasonRange = useCallback(() => {
     const athleteId = String(athleteMultiSelectedId ?? "").trim();
-    if (!athleteId || !selectedSeason) return;
+    if (!athleteId || !selectedSeason) return null;
     if (isAthleteExcludedFromSeason(athleteId, String(selectedSeason.id ?? "").trim(), s.athleteSeasonOverrides ?? [])) {
-      setAthleteMultiRangeError("Selected athlete is excluded from the selected season.");
-      return;
+      return { excluded: true as const, message: "Selected athlete is excluded from the selected season." };
     }
     const athlete = (s.roster ?? []).find((row) => String((row as any)?.id ?? "").trim() === athleteId);
     const override = athleteSeasonOverridesBySeasonAndAthlete.get(
       `${String(selectedSeason.id ?? "").trim()}:${athleteId}`
     ) ?? null;
     const resolved = resolveAthleteSeasonWindowWithTenure(athlete ?? null, selectedSeason as any, override as any);
-    setAthleteMultiRangeStartISO(String(resolved.start_date ?? "").trim());
-    setAthleteMultiRangeEndISO(String(resolved.end_date ?? "").trim());
-    setAthleteMultiRangeError(null);
+    const start = String(resolved.start_date ?? "").trim();
+    const end = String(resolved.end_date ?? "").trim();
+    if (!isValidISODate(start) || !isValidISODate(end) || end < start) {
+      return { excluded: true as const, message: "Selected season has an invalid date range for this athlete." };
+    }
+    return { excluded: false as const, start, end };
   }, [athleteMultiSelectedId, athleteSeasonOverridesBySeasonAndAthlete, s.athleteSeasonOverrides, s.roster, selectedSeason]);
+
+  const applySelectedSeasonToAthleteRange = useCallback(() => {
+    const resolved = resolveAthleteSeasonRange();
+    if (!resolved) return;
+    if (resolved.excluded) {
+      setAthleteMultiExcludedSeasonMessage(resolved.message);
+      setAthleteMultiRangeError(resolved.message);
+      return;
+    }
+    setAthleteMultiExcludedSeasonMessage(null);
+    const firstWeekStart = getWeekStartISO(resolved.start, weekStartsOn);
+    const lastWeekStart = getWeekStartISO(resolved.end, weekStartsOn);
+    const numberOfWeeks = Math.min(
+      52,
+      Math.max(1, Math.floor((isoDayNumber(lastWeekStart) - isoDayNumber(firstWeekStart)) / 7) + 1)
+    );
+    setAthleteMultiFirstWeekStartISO(firstWeekStart);
+    setAthleteMultiNumberOfWeeks(numberOfWeeks);
+    setAthleteMultiRangeError(null);
+    setAthleteMultiRangeMode("season");
+  }, [resolveAthleteSeasonRange, weekStartsOn]);
+
+  useEffect(() => {
+    if (athleteMultiRangeMode !== "season") return;
+    const resolved = resolveAthleteSeasonRange();
+    if (!resolved) return;
+    if (resolved.excluded) {
+      setAthleteMultiExcludedSeasonMessage(resolved.message);
+      setAthleteMultiRangeError(resolved.message);
+      return;
+    }
+    setAthleteMultiExcludedSeasonMessage(null);
+    const firstWeekStart = getWeekStartISO(resolved.start, weekStartsOn);
+    const lastWeekStart = getWeekStartISO(resolved.end, weekStartsOn);
+    const numberOfWeeks = Math.min(
+      52,
+      Math.max(1, Math.floor((isoDayNumber(lastWeekStart) - isoDayNumber(firstWeekStart)) / 7) + 1)
+    );
+    if (athleteMultiFirstWeekStartISO !== firstWeekStart) setAthleteMultiFirstWeekStartISO(firstWeekStart);
+    if (athleteMultiNumberOfWeeks !== numberOfWeeks) setAthleteMultiNumberOfWeeks(numberOfWeeks);
+    setAthleteMultiRangeError(null);
+  }, [
+    athleteMultiFirstWeekStartISO,
+    athleteMultiNumberOfWeeks,
+    athleteMultiRangeMode,
+    resolveAthleteSeasonRange,
+    weekStartsOn,
+  ]);
   const athleteMultiVisibleRange = useMemo(() => {
     const starts = athleteMultiVisibleWeekStarts;
     if (!starts.length) {
@@ -2293,32 +2645,64 @@ export default function CoachMileageTab() {
     return { startISO, endISO };
   }, [athleteMultiRangeStartWeekISO, athleteMultiVisibleWeekStarts]);
 
+  const athleteMultiVisibleRangeLabel = useMemo(() => {
+    const start = isValidISODate(athleteMultiRangeStartISO) ? athleteMultiRangeStartISO : athleteMultiVisibleRange.startISO;
+    const end = isValidISODate(athleteMultiRangeEndISO) ? athleteMultiRangeEndISO : athleteMultiVisibleRange.endISO;
+    const startLabel = parseISODate(start).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const endLabel = parseISODate(end).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+    const weeksLabel = `${athleteMultiSafeWeekCount} week${athleteMultiSafeWeekCount === 1 ? "" : "s"}`;
+    return `${startLabel} - ${endLabel} • ${weeksLabel}`;
+  }, [
+    athleteMultiRangeEndISO,
+    athleteMultiRangeStartISO,
+    athleteMultiSafeWeekCount,
+    athleteMultiVisibleRange.endISO,
+    athleteMultiVisibleRange.startISO,
+  ]);
+
+  const openAthleteRangeEditor = useCallback(() => {
+    setAthleteRangeDraftFirstWeekISO(athleteMultiFirstWeekStartISO);
+    setAthleteRangeDraftWeekCount(String(athleteMultiSafeWeekCount));
+    setAthleteRangeDraftError(null);
+    setAthleteRangeEditorOpen(true);
+  }, [athleteMultiFirstWeekStartISO, athleteMultiSafeWeekCount]);
+
+  const applyAthleteRangeDraft = useCallback(() => {
+    const firstWeekInput = String(athleteRangeDraftFirstWeekISO ?? "").trim();
+    const firstWeekStart = isValidISODate(firstWeekInput) ? getWeekStartISO(firstWeekInput, weekStartsOn) : "";
+    const weeksRaw = Number.parseInt(String(athleteRangeDraftWeekCount ?? "").trim(), 10);
+    if (!isValidISODate(firstWeekStart)) {
+      setAthleteRangeDraftError("Choose a valid first-week date (YYYY-MM-DD).");
+      return;
+    }
+    if (!Number.isInteger(weeksRaw)) {
+      setAthleteRangeDraftError("Weeks to show must be a whole number.");
+      return;
+    }
+    const safeWeeks = Math.min(52, Math.max(1, weeksRaw));
+    if (safeWeeks !== weeksRaw) {
+      setAthleteRangeDraftError("Weeks to show must be between 1 and 52.");
+      return;
+    }
+    setAthleteMultiFirstWeekStartISO(firstWeekStart);
+    setAthleteMultiNumberOfWeeks(safeWeeks);
+    setAthleteMultiRangeMode("custom");
+    setAthleteMultiExcludedSeasonMessage(null);
+    setAthleteRangeEditorOpen(false);
+    setAthleteRangeDraftError(null);
+  }, [athleteRangeDraftFirstWeekISO, athleteRangeDraftWeekCount, weekStartsOn]);
+
   const openMileagePlanExport = useCallback(() => {
     if (!athleteMultiSelectedId) {
       Alert.alert("Select athlete", "Choose an athlete in Athlete Multi-Week before exporting a mileage plan.");
       return;
     }
-    void (async () => {
-      const fallbackStart = athleteMultiVisibleRange.startISO;
-      const fallbackEnd = athleteMultiVisibleRange.endISO;
-      try {
-        const raw = await AsyncStorage.getItem(COACH_MILEAGE_PLAN_EXPORT_RANGE_KEY);
-        const parsed = raw ? JSON.parse(raw) as { startDateISO?: string; endDateISO?: string; seasonId?: string | null } : null;
-        const start = String(parsed?.startDateISO ?? "").trim();
-        const end = String(parsed?.endDateISO ?? "").trim();
-        const seasonId = String(parsed?.seasonId ?? "").trim() || null;
-        setMileagePlanExportStartISO(isValidISODate(start) ? start : fallbackStart);
-        setMileagePlanExportEndISO(isValidISODate(end) ? end : fallbackEnd);
-        setMileagePlanExportSeasonId(seasonId);
-      } catch {
-        setMileagePlanExportStartISO(fallbackStart);
-        setMileagePlanExportEndISO(fallbackEnd);
-        setMileagePlanExportSeasonId(null);
-      }
-      setMileagePlanExportError(null);
-      setMileagePlanExportOpen(true);
-    })();
-  }, [athleteMultiSelectedId, athleteMultiVisibleRange.endISO, athleteMultiVisibleRange.startISO]);
+    setMileagePlanExportStartISO(athleteMultiRangeStartISO);
+    setMileagePlanExportEndISO(athleteMultiRangeEndISO);
+    setMileagePlanExportSeasonId(selectedSeasonId ?? null);
+    setMileagePlanExportError(null);
+    setMileagePlanExportOpen(true);
+  }, [athleteMultiRangeEndISO, athleteMultiRangeStartISO, athleteMultiSelectedId, selectedSeasonId]);
 
   const applyMileagePlanSeasonRange = useCallback((seasonId: string | null) => {
     const athleteId = String(athleteMultiSelectedId ?? "").trim();
@@ -2429,27 +2813,50 @@ export default function CoachMileageTab() {
   );
 
   const athleteMultiGrid = useGridEngine<string, string>({
-    enabled: isWeb && isDesktop && viewMode === "athleteMultiWeek",
+    enabled: isWeb && isDesktop && viewMode === "athleteMultiWeek" && !readOnlyMileage,
     rowIds: athleteMultiRowIds,
     colKeys: athleteMultiColKeys,
     onActivate: () => setActiveGridId("athlete-multi-grid"),
     getValue: (weekISO, colKey) => getAthleteMultiDraftValue(weekISO, colKey),
-    setValuesBatch: (changes) =>
+    setValuesBatch: (changes) => {
+      if (readOnlyMileage) return;
+      return (
       applyAthleteMultiValueBatch(
         changes.map((change) => ({
           weekStartISO: change.rowId,
           colKey: change.colKey,
           value: change.value,
         }))
-      ),
-    setValue: (weekISO, colKey, value) =>
-      applyAthleteMultiValueBatch([{ weekStartISO: weekISO, colKey, value: String(value ?? "") }]),
+      ));
+    },
+    setValue: (weekISO, colKey, value) => {
+      if (readOnlyMileage) return;
+      applyAthleteMultiValueBatch([{ weekStartISO: weekISO, colKey, value: String(value ?? "") }]);
+    },
   });
+
+  const athleteMultiEditingCloudKey = useMemo(() => {
+    const editing = athleteMultiGrid.editingCell;
+    if (!editing || !athleteMultiSelectedId) return null;
+    const { dayIdx, field } = mileageColMeta(editing.colKey);
+    return cellCloudKey(athleteMultiSelectedId, editing.rowId, dayIdx, field);
+  }, [athleteMultiGrid.editingCell, athleteMultiSelectedId, mileageColMeta]);
+
+  useEffect(() => {
+    if (viewMode !== "athleteMultiWeek") return;
+    const prev = editingCloudKeyRef.current;
+    editingCloudKeyRef.current = athleteMultiEditingCloudKey;
+    if (prev && prev !== athleteMultiEditingCloudKey && pendingDraftSaveKeysRef.current.has(prev)) {
+      queueMileageDraftSave(prev, 80);
+    }
+  }, [athleteMultiEditingCloudKey, queueMileageDraftSave, viewMode]);
 
   useEffect(() => {
     if (!(isWeb && isDesktop)) return;
     const onKeyDown = (e: any) => {
       if (activeGridId !== "athlete-multi-grid") return;
+      const doc = (globalThis as any)?.document;
+      if (isTextEditingTarget(e?.target) || isTextEditingTarget(doc?.activeElement)) return;
       const handled = athleteMultiGrid.handleKeyDown(e);
       if (!handled) return;
       e.preventDefault?.();
@@ -2796,7 +3203,7 @@ export default function CoachMileageTab() {
         </View>
       ) : null}
       {teamWeekVisibleAthletes.map((a, rowIndex) => {
-        const canEdit = !!a.id;
+        const canEdit = !!a.id && !readOnlyMileage;
         const rowSelected = mileageGrid.isRowSelected(a.id);
         const baseRowBg = rowIndex % 2 === 0 ? colors.card : colors.bg;
         const rowBgColor = rowSelected ? rowSelectedBg : baseRowBg;
@@ -3161,6 +3568,7 @@ export default function CoachMileageTab() {
                     <View style={{ width: subColWidth, borderWidth: 1, borderColor: colors.border, borderRadius: radiusCell, backgroundColor: amEditing ? editingCellFill : amActive ? activeCellFill : amSelected ? rangeSelectionFill : colors.card }}>
                       <GridCell
                         binding={athleteMultiGrid.bindCell(weekISO, amCol)}
+                        editable={!readOnlyMileage}
                         value={getAthleteMultiDraftValue(weekISO, amCol)}
                         onChangeText={(v) => athleteMultiGrid.applyCellValue(weekISO, amCol, v)}
                         gridEditing={amEditing}
@@ -3178,6 +3586,7 @@ export default function CoachMileageTab() {
                     <View style={{ width: subColWidth, borderWidth: 1, borderColor: colors.border, borderRadius: radiusCell, backgroundColor: pmEditing ? editingCellFill : pmActive ? activeCellFill : pmSelected ? rangeSelectionFill : colors.card }}>
                       <GridCell
                         binding={athleteMultiGrid.bindCell(weekISO, pmCol)}
+                        editable={!readOnlyMileage}
                         value={getAthleteMultiDraftValue(weekISO, pmCol)}
                         onChangeText={(v) => athleteMultiGrid.applyCellValue(weekISO, pmCol, v)}
                         gridEditing={pmEditing}
@@ -3278,6 +3687,7 @@ export default function CoachMileageTab() {
                     autoCorrect={false}
                     onFocus={handleWeekLabelFocus}
                     onBlur={handleWeekLabelBlur}
+                    editable={!readOnlyMileage}
                     style={{
                       width: 118,
                       height: 26,
@@ -3364,6 +3774,31 @@ export default function CoachMileageTab() {
                 />
               </View>
             </View>
+            {canPublishMileageTraining ? (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>
+                  {mileageWeekVisibilityLabel}
+                </Text>
+                <Button
+                  title="Visibility"
+                  variant="secondary"
+                  disabled={weekVisibilityBusy || teamWeekVisibleAthletes.length === 0}
+                  onPress={() => openTrainingVisibilityModal("mileage")}
+                />
+                <Button
+                  title={weekVisibilityBusy ? "Publishing..." : "Publish Week"}
+                  variant="secondary"
+                  disabled={weekVisibilityBusy || teamWeekVisibleAthletes.length === 0}
+                  onPress={() => void setDisplayedMileageWeekVisibility(true)}
+                />
+                <Button
+                  title={weekVisibilityBusy ? "Hiding..." : "Hide Week"}
+                  variant="secondary"
+                  disabled={weekVisibilityBusy || teamWeekVisibleAthletes.length === 0}
+                  onPress={() => void setDisplayedMileageWeekVisibility(false)}
+                />
+              </View>
+            ) : null}
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>Groups</Text>
               <View
@@ -3411,7 +3846,7 @@ export default function CoachMileageTab() {
                 }}
               >
                 <Pressable
-                  onPress={() => setSeasonFilterOpen((prev) => !prev)}
+                  onPress={() => setSeasonFilterOpen(true)}
                   style={{
                     height: 34,
                     borderWidth: 1,
@@ -3432,61 +3867,6 @@ export default function CoachMileageTab() {
                     {seasonFilterOpen ? "▴" : "▾"}
                   </Text>
                 </Pressable>
-                {seasonFilterOpen ? (
-                  <View
-                    style={{
-                      position: "absolute",
-                      top: 40,
-                      left: 0,
-                      right: 0,
-                      borderWidth: 1,
-                      borderColor: colors.border,
-                      borderRadius: 8,
-                      backgroundColor: colors.card,
-                      zIndex: 20,
-                      ...(Platform.OS === "android" ? { elevation: 8 } : null),
-                    }}
-                  >
-                    <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
-                      <Pressable
-                        onPress={() => {
-                          void teamDataStore.actions.setSharedSelectedSeasonId(null);
-                          setSeasonFilterOpen(false);
-                        }}
-                        style={{
-                          borderBottomWidth: 1,
-                          borderBottomColor: colors.border,
-                          paddingHorizontal: 10,
-                          paddingVertical: 8,
-                          backgroundColor: !selectedSeasonId ? "rgba(37,99,235,0.12)" : colors.card,
-                        }}
-                      >
-                        <Text style={{ fontSize: 12, fontWeight: "700", color: colors.text }}>All seasons (clear)</Text>
-                      </Pressable>
-                      {seasonFilterOptions.map((option) => (
-                        <Pressable
-                          key={`mileage-season-filter-${option.id}`}
-                          onPress={() => {
-                            void teamDataStore.actions.setSharedSelectedSeasonId(option.id);
-                            setSeasonFilterOpen(false);
-                          }}
-                          style={{
-                            borderBottomWidth: 1,
-                            borderBottomColor: colors.border,
-                            paddingHorizontal: 10,
-                            paddingVertical: 8,
-                            backgroundColor: selectedSeasonId === option.id ? "rgba(37,99,235,0.12)" : colors.card,
-                          }}
-                        >
-                          <Text style={{ fontSize: 12, fontWeight: "700", color: colors.text }}>
-                            {selectedSeasonId === option.id ? "◉ " : "○ "}
-                            {option.label}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </ScrollView>
-                  </View>
-                ) : null}
                 <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText, marginTop: 4, marginLeft: 4 }}>
                   Uses athlete-specific dates where set.
                 </Text>
@@ -3539,7 +3919,7 @@ export default function CoachMileageTab() {
                     }}
                   >
                     <Pressable
-                      onPress={() => setSeasonFilterOpen((prev) => !prev)}
+                      onPress={() => setSeasonFilterOpen(true)}
                       style={{
                         height: 34,
                         borderWidth: 1,
@@ -3560,99 +3940,37 @@ export default function CoachMileageTab() {
                         {seasonFilterOpen ? "▴" : "▾"}
                       </Text>
                     </Pressable>
-                    {seasonFilterOpen ? (
-                      <View
-                        style={{
-                          position: "absolute",
-                          top: 40,
-                          left: 0,
-                          right: 0,
-                          borderWidth: 1,
-                          borderColor: colors.border,
-                          borderRadius: 8,
-                          backgroundColor: colors.card,
-                          zIndex: 20,
-                          ...(Platform.OS === "android" ? { elevation: 8 } : null),
-                        }}
-                      >
-                        <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 240 }}>
-                          <Pressable
-                            onPress={() => {
-                              void teamDataStore.actions.setSharedSelectedSeasonId(null);
-                              setSeasonFilterOpen(false);
-                            }}
-                            style={{
-                              borderBottomWidth: 1,
-                              borderBottomColor: colors.border,
-                              paddingHorizontal: 10,
-                              paddingVertical: 8,
-                              backgroundColor: !selectedSeasonId ? "rgba(37,99,235,0.12)" : colors.card,
-                            }}
-                          >
-                            <Text style={{ fontSize: 12, fontWeight: "700", color: colors.text }}>All seasons (clear)</Text>
-                          </Pressable>
-                          {seasonFilterOptions.map((option) => (
-                            <Pressable
-                              key={`mileage-athlete-season-filter-${option.id}`}
-                              onPress={() => {
-                                void teamDataStore.actions.setSharedSelectedSeasonId(option.id);
-                                setSeasonFilterOpen(false);
-                              }}
-                              style={{
-                                borderBottomWidth: 1,
-                                borderBottomColor: colors.border,
-                                paddingHorizontal: 10,
-                                paddingVertical: 8,
-                                backgroundColor: selectedSeasonId === option.id ? "rgba(37,99,235,0.12)" : colors.card,
-                              }}
-                            >
-                              <Text style={{ fontSize: 12, fontWeight: "700", color: colors.text }}>
-                                {selectedSeasonId === option.id ? "◉ " : "○ "}
-                                {option.label}
-                              </Text>
-                            </Pressable>
-                          ))}
-                        </ScrollView>
-                      </View>
-                    ) : null}
                     <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText, marginTop: 4, marginLeft: 4 }}>
                       Uses athlete-specific dates where set.
                     </Text>
                   </View>
                 </View>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                  <Button title="Prev" variant="secondary" onPress={() => shiftAthleteMultiRange(-7)} />
-                  <Button
-                    title="Current Week"
-                    variant="secondary"
-                    onPress={() => {
-                      setAthleteMultiRangeStartISO(athleteMultiCurrentWeekStartISO);
-                      setAthleteMultiRangeEndISO(addDaysISO(athleteMultiCurrentWeekStartISO, 41));
-                    }}
-                  />
-                  <Button title="Next" variant="secondary" onPress={() => shiftAthleteMultiRange(7)} />
-                  <Button
-                    title={selectedSeason ? "Use Season Range" : "Select Season First"}
-                    variant="secondary"
-                    onPress={applySelectedSeasonToAthleteRange}
-                    disabled={!selectedSeason || !athleteMultiSelectedId}
-                  />
-                  <Button
-                    title={exportingMileagePlanPdf ? "Exporting..." : "Export Mileage Plan"}
-                    variant="secondary"
-                    onPress={openMileagePlanExport}
-                    disabled={!athleteMultiSelectedId || exportingMileagePlanPdf}
-                  />
-                  <Text style={{ fontSize: 11, fontWeight: "700", color: colors.text }}>
-                    {athleteMultiRangeStartISO} → {athleteMultiRangeEndISO}
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>
+                    Range: {athleteMultiVisibleRangeLabel}
                   </Text>
-                  <Button title="-1w start" variant="secondary" onPress={() => setAthleteMultiRangeStartISO(addDaysISO(athleteMultiRangeStartISO, -7))} />
-                  <Button title="+1w start" variant="secondary" onPress={() => setAthleteMultiRangeStartISO(addDaysISO(athleteMultiRangeStartISO, 7))} />
-                  <Button title="-1w end" variant="secondary" onPress={() => setAthleteMultiRangeEndISO(addDaysISO(athleteMultiRangeEndISO, -7))} />
-                  <Button title="+1w end" variant="secondary" onPress={() => setAthleteMultiRangeEndISO(addDaysISO(athleteMultiRangeEndISO, 7))} />
                   <Text style={{ fontSize: 11, fontWeight: "700", color: colors.mutedText }}>
-                    {athleteMultiSelected ? `Selected: ${athleteMultiSelected.name}` : "No athlete selected"}
+                    Mode: {athleteMultiRangeMode === "season" ? "Season" : "Custom"}
                   </Text>
+                  {!readOnlyMileage ? (
+                    <>
+                      <Button title="Edit Range" variant="secondary" onPress={openAthleteRangeEditor} />
+                      <Button
+                        title="Use Selected Season"
+                        variant="secondary"
+                        onPress={applySelectedSeasonToAthleteRange}
+                        disabled={!selectedSeason || !athleteMultiSelectedId}
+                      />
+                    </>
+                  ) : null}
+                  {canExportMileage ? (
+                    <Button
+                      title={exportingMileagePlanPdf ? "Exporting..." : "Export Mileage Plan"}
+                      variant="secondary"
+                      onPress={openMileagePlanExport}
+                      disabled={!athleteMultiSelectedId || exportingMileagePlanPdf}
+                    />
+                  ) : null}
                   {athleteMultiRangeError ? (
                     <Text style={{ fontSize: 11, fontWeight: "700", color: "#b91c1c" }}>{athleteMultiRangeError}</Text>
                   ) : null}
@@ -3699,6 +4017,12 @@ export default function CoachMileageTab() {
             ) : null}
           </View>
 
+          {readOnlyMileage ? (
+            <View style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 10, backgroundColor: "#f8fafc", paddingHorizontal: 10, paddingVertical: 8 }}>
+              <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Viewer access: editing is disabled.</Text>
+            </View>
+          ) : null}
+
           <View
             style={{
               borderWidth: 1,
@@ -3719,21 +4043,27 @@ export default function CoachMileageTab() {
                 <AppText variant="caption" color="mutedText" style={{ fontWeight: "800", marginRight: 2 }}>
                   WEEK ACTIONS
                 </AppText>
-                <Button title="Copy Week" variant="secondary" onPress={copyEntireVisibleWeek} />
-                <Button
-                  title="Paste Week"
-                  variant="secondary"
-                  onPress={() => void pasteWeekClipboardIntoVisibleWeek()}
-                  disabled={!weekClipboard}
-                />
-                <Button title="Copy Previous Week" variant="secondary" onPress={copyPreviousWeekAll} />
-                <Button title="Clear Entire Week" variant="secondary" onPress={clearEntireWeekAll} />
-                <Button
-                  title={exportingPdf ? "Exporting..." : "Export PDF"}
-                  variant="secondary"
-                  onPress={() => void handleExportMileagePdf()}
-                  disabled={exportingPdf}
-                />
+                {!readOnlyMileage ? (
+                  <>
+                    <Button title="Copy Week" variant="secondary" onPress={copyEntireVisibleWeek} />
+                    <Button
+                      title="Paste Week"
+                      variant="secondary"
+                      onPress={() => void pasteWeekClipboardIntoVisibleWeek()}
+                      disabled={!weekClipboard}
+                    />
+                    <Button title="Copy Previous Week" variant="secondary" onPress={copyPreviousWeekAll} />
+                    <Button title="Clear Entire Week" variant="secondary" onPress={clearEntireWeekAll} />
+                  </>
+                ) : null}
+                {canExportMileage ? (
+                  <Button
+                    title={exportingPdf ? "Exporting..." : "Export PDF"}
+                    variant="secondary"
+                    onPress={() => void handleExportMileagePdf()}
+                    disabled={exportingPdf}
+                  />
+                ) : null}
                 {weekClipboard ? (
                   <View
                     style={{
@@ -3763,6 +4093,7 @@ export default function CoachMileageTab() {
               </Text>
             </View>
 
+            {!readOnlyMileage ? (
             <View
               style={{
                 flexDirection: "row",
@@ -3822,6 +4153,7 @@ export default function CoachMileageTab() {
                 disabled={editableAthleteIds.length < 2}
               />
             </View>
+            ) : null}
             </>
             ) : (
               <View
@@ -3835,7 +4167,9 @@ export default function CoachMileageTab() {
               >
                 <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText }}>
                   Athlete Grid: {athleteMultiGrid.selectedRowIds.length} week row{athleteMultiGrid.selectedRowIds.length === 1 ? "" : "s"} selected
+                  {athleteMultiWeeksLoading ? " • Loading visible weeks..." : ""}
                 </Text>
+                {!readOnlyMileage ? (
                 <View style={{ flexDirection: "row", gap: 4, flexWrap: "wrap" }}>
                   <MiniPill compact label="Copy" onPress={() => { setActiveGridId("athlete-multi-grid"); void athleteMultiGrid.copySelectionToClipboard(); }} />
                   <MiniPill compact label="Paste" onPress={() => { setActiveGridId("athlete-multi-grid"); void athleteMultiGrid.pasteFromClipboard(); }} />
@@ -3859,6 +4193,7 @@ export default function CoachMileageTab() {
                     disabled={athleteMultiRowIds.length < 2}
                   />
                 </View>
+                ) : null}
               </View>
             )}
           </View>
@@ -4012,6 +4347,155 @@ export default function CoachMileageTab() {
         ) : null}
 
         <Modal
+          visible={trainingVisibilityOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setTrainingVisibilityOpen(false)}
+        >
+          <Pressable
+            onPress={() => setTrainingVisibilityOpen(false)}
+            style={{
+              flex: 1,
+              backgroundColor: "rgba(2,6,23,0.28)",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 18,
+            }}
+          >
+            <Pressable
+              onPress={() => {}}
+              style={{
+                width: "100%",
+                maxWidth: 520,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: colors.border,
+                backgroundColor: colors.card,
+                padding: 14,
+                gap: 10,
+              }}
+            >
+              <Text style={{ fontSize: 18, fontWeight: "900", color: colors.text }}>Training Visibility</Text>
+              <Text style={{ fontSize: 12, fontWeight: "700", color: colors.mutedText }}>
+                Current scope: {teamWeekVisibleAthletes.length} Team Week athlete{teamWeekVisibleAthletes.length === 1 ? "" : "s"}.
+              </Text>
+
+              <Text style={{ fontSize: 11, fontWeight: "900", color: colors.mutedText }}>Action</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                {(["publish", "hide"] as TrainingVisibilityAction[]).map((value) => (
+                  <Pressable
+                    key={`mileage-visibility-action-${value}`}
+                    onPress={() => setTrainingVisibilityAction(value)}
+                    style={{
+                      minHeight: 32,
+                      paddingHorizontal: 10,
+                      borderRadius: 16,
+                      borderWidth: 1,
+                      borderColor: trainingVisibilityAction === value ? colors.tint : colors.border,
+                      backgroundColor: trainingVisibilityAction === value ? "rgba(37,99,235,0.12)" : colors.card,
+                      justifyContent: "center",
+                    }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: "900", color: colors.text }}>
+                      {value === "publish" ? "Publish to athletes" : "Hide from athletes"}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Text style={{ fontSize: 11, fontWeight: "900", color: colors.mutedText }}>Content</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                {([
+                  ["workouts", "Workouts only"],
+                  ["mileage", "Mileage only"],
+                  ["both", "Workouts + Mileage"],
+                ] as Array<[TrainingVisibilityContent, string]>).map(([value, label]) => (
+                  <Pressable
+                    key={`mileage-visibility-content-${value}`}
+                    onPress={() => setTrainingVisibilityContent(value)}
+                    style={{
+                      minHeight: 32,
+                      paddingHorizontal: 10,
+                      borderRadius: 16,
+                      borderWidth: 1,
+                      borderColor: trainingVisibilityContent === value ? colors.tint : colors.border,
+                      backgroundColor: trainingVisibilityContent === value ? "rgba(37,99,235,0.12)" : colors.card,
+                      justifyContent: "center",
+                    }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: "900", color: colors.text }}>{label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Text style={{ fontSize: 11, fontWeight: "900", color: colors.mutedText }}>Range</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                {([
+                  ["week", "Current week"],
+                  ["custom", "Custom range"],
+                  ["season", "Selected season"],
+                ] as Array<[TrainingVisibilityRange, string]>).map(([value, label]) => (
+                  <Pressable
+                    key={`mileage-visibility-range-${value}`}
+                    onPress={() => setTrainingVisibilityRange(value)}
+                    style={{
+                      minHeight: 32,
+                      paddingHorizontal: 10,
+                      borderRadius: 16,
+                      borderWidth: 1,
+                      borderColor: trainingVisibilityRange === value ? colors.tint : colors.border,
+                      backgroundColor: trainingVisibilityRange === value ? "rgba(37,99,235,0.12)" : colors.card,
+                      justifyContent: "center",
+                    }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: "900", color: colors.text }}>{label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              {trainingVisibilityRange === "season" ? (
+                <Text style={{ fontSize: 12, fontWeight: "700", color: colors.mutedText }}>Season: {selectedSeasonLabel}</Text>
+              ) : null}
+              {trainingVisibilityRange === "custom" ? (
+                <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                  <View style={{ flex: 1, minWidth: 150, gap: 4 }}>
+                    <Text style={{ fontSize: 11, fontWeight: "900", color: colors.mutedText }}>Start date</Text>
+                    <TextInput
+                      value={trainingVisibilityStartISO}
+                      onChangeText={setTrainingVisibilityStartISO}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      placeholder="YYYY-MM-DD"
+                      style={{ height: 38, borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, color: colors.text }}
+                    />
+                  </View>
+                  <View style={{ flex: 1, minWidth: 150, gap: 4 }}>
+                    <Text style={{ fontSize: 11, fontWeight: "900", color: colors.mutedText }}>End date</Text>
+                    <TextInput
+                      value={trainingVisibilityEndISO}
+                      onChangeText={setTrainingVisibilityEndISO}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      placeholder="YYYY-MM-DD"
+                      style={{ height: 38, borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, color: colors.text }}
+                    />
+                  </View>
+                </View>
+              ) : null}
+              <Text style={{ fontSize: 12, fontWeight: "700", color: colors.mutedText }}>
+                Mileage visibility is week-based. Any week touched by this range will be affected.
+              </Text>
+              {trainingVisibilityError ? (
+                <Text style={{ fontSize: 11, fontWeight: "800", color: "#b91c1c" }}>{trainingVisibilityError}</Text>
+              ) : null}
+              <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+                <Button title="Cancel" variant="secondary" disabled={trainingVisibilityApplying} onPress={() => setTrainingVisibilityOpen(false)} />
+                <Button title={trainingVisibilityApplying ? "Applying..." : "Apply"} disabled={trainingVisibilityApplying} onPress={() => void applyTrainingVisibilityNow()} />
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        <Modal
           visible={viewMode === "teamWeek" && trainingGroupFilterOpen}
           transparent
           animationType="fade"
@@ -4123,6 +4607,216 @@ export default function CoachMileageTab() {
                   </View>
                 ) : null}
               </ScrollView>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        <Modal
+          visible={seasonFilterOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setSeasonFilterOpen(false)}
+        >
+          <Pressable
+            onPress={() => setSeasonFilterOpen(false)}
+            style={{
+              flex: 1,
+              backgroundColor: "rgba(2,6,23,0.28)",
+              alignItems: "center",
+              justifyContent: isDesktop ? "flex-start" : "center",
+              paddingTop: isDesktop ? 84 : 24,
+              paddingHorizontal: 16,
+            }}
+          >
+            <Pressable
+              onPress={() => {}}
+              style={{
+                width: "100%",
+                maxWidth: 520,
+                maxHeight: isDesktop ? 520 : 460,
+                borderWidth: 1,
+                borderColor: colors.border,
+                borderRadius: 12,
+                backgroundColor: colors.card,
+                overflow: "hidden",
+                shadowColor: "#000",
+                shadowOpacity: 0.22,
+                shadowRadius: 14,
+                shadowOffset: { width: 0, height: 6 },
+                elevation: 16,
+              }}
+            >
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  borderBottomWidth: 1,
+                  borderBottomColor: colors.border,
+                }}
+              >
+                <Text style={{ fontSize: 14, fontWeight: "900", color: colors.text }}>Season</Text>
+                <Button title="Done" variant="secondary" onPress={() => setSeasonFilterOpen(false)} />
+              </View>
+
+              <ScrollView style={{ maxHeight: isDesktop ? 440 : 360 }} keyboardShouldPersistTaps="handled">
+                <Pressable
+                  onPress={() => {
+                    void teamDataStore.actions.setSharedSelectedSeasonId(null);
+                    setSeasonFilterOpen(false);
+                  }}
+                  style={{
+                    borderBottomWidth: 1,
+                    borderBottomColor: colors.border,
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    backgroundColor: !selectedSeasonId ? "rgba(37,99,235,0.12)" : colors.card,
+                  }}
+                >
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: colors.text }}>All seasons (clear)</Text>
+                </Pressable>
+                {seasonFilterOptions.map((option) => (
+                  <Pressable
+                    key={`mileage-season-filter-modal-${option.id}`}
+                    onPress={() => {
+                      void teamDataStore.actions.setSharedSelectedSeasonId(option.id);
+                      setSeasonFilterOpen(false);
+                    }}
+                    style={{
+                      borderBottomWidth: 1,
+                      borderBottomColor: "rgba(15,23,42,0.06)",
+                      paddingHorizontal: 12,
+                      paddingVertical: 10,
+                      backgroundColor: selectedSeasonId === option.id ? "rgba(37,99,235,0.12)" : colors.card,
+                    }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: "700", color: colors.text }}>
+                      {selectedSeasonId === option.id ? "☑ " : "☐ "}
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                ))}
+                {seasonFilterOptions.length === 0 ? (
+                  <View style={{ paddingHorizontal: 12, paddingVertical: 10 }}>
+                    <Text style={{ fontSize: 12, color: colors.mutedText }}>No seasons found</Text>
+                  </View>
+                ) : null}
+              </ScrollView>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        <Modal
+          visible={athleteRangeEditorOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setAthleteRangeEditorOpen(false)}
+        >
+          <Pressable
+            onPress={() => setAthleteRangeEditorOpen(false)}
+            style={{
+              flex: 1,
+              backgroundColor: "rgba(2,6,23,0.28)",
+              alignItems: "center",
+              justifyContent: "center",
+              paddingHorizontal: 16,
+            }}
+          >
+            <Pressable
+              onPress={() => {}}
+              style={{
+                width: "100%",
+                maxWidth: 520,
+                borderWidth: 1,
+                borderColor: colors.border,
+                borderRadius: 12,
+                backgroundColor: colors.card,
+                overflow: "hidden",
+              }}
+            >
+              <View style={{ paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+                <Text style={{ fontSize: 14, fontWeight: "900", color: colors.text }}>Edit Athlete Range</Text>
+                <Text style={{ fontSize: 11, fontWeight: "600", color: colors.mutedText }}>
+                  {athleteMultiSelected?.name || "No athlete selected"} • Max 52 weeks
+                </Text>
+              </View>
+              <View style={{ padding: 10, gap: 8 }}>
+                <Text style={{ fontSize: 12, fontWeight: "800", color: colors.mutedText }}>First week (YYYY-MM-DD)</Text>
+                <TextInput
+                  value={athleteRangeDraftFirstWeekISO}
+                  onChangeText={setAthleteRangeDraftFirstWeekISO}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  placeholder="YYYY-MM-DD"
+                  style={{
+                    height: 36,
+                    borderWidth: 1,
+                    borderColor: colors.border,
+                    borderRadius: 8,
+                    paddingHorizontal: 10,
+                    color: colors.text,
+                    backgroundColor: colors.bg,
+                  }}
+                />
+                <Text style={{ fontSize: 11, fontWeight: "700", color: colors.mutedText }}>
+                  Week of{" "}
+                  {formatAthleteWeekRangeLabel(
+                    getWeekStartISO(
+                      isValidISODate(athleteRangeDraftFirstWeekISO)
+                        ? athleteRangeDraftFirstWeekISO
+                        : toISODate(new Date()),
+                      weekStartsOn
+                    )
+                  )}
+                </Text>
+                <Text style={{ fontSize: 12, fontWeight: "800", color: colors.mutedText }}>Weeks to show</Text>
+                <TextInput
+                  value={athleteRangeDraftWeekCount}
+                  onChangeText={setAthleteRangeDraftWeekCount}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  placeholder="1-52"
+                  keyboardType={Platform.OS === "ios" ? "number-pad" : "numeric"}
+                  style={{
+                    height: 36,
+                    borderWidth: 1,
+                    borderColor: colors.border,
+                    borderRadius: 8,
+                    paddingHorizontal: 10,
+                    color: colors.text,
+                    backgroundColor: colors.bg,
+                  }}
+                />
+                <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                  <Button
+                    title="Use Selected Season"
+                    variant="secondary"
+                    onPress={() => {
+                      applySelectedSeasonToAthleteRange();
+                      setAthleteRangeEditorOpen(false);
+                    }}
+                    disabled={!selectedSeason || !athleteMultiSelectedId}
+                  />
+                  <Button
+                    title="This Week"
+                    variant="secondary"
+                    onPress={() => {
+                      const ws = athleteMultiCurrentWeekStartISO;
+                      setAthleteRangeDraftFirstWeekISO(ws);
+                      setAthleteRangeDraftError(null);
+                    }}
+                  />
+                </View>
+                {athleteRangeDraftError ? (
+                  <Text style={{ fontSize: 11, fontWeight: "700", color: "#b91c1c" }}>{athleteRangeDraftError}</Text>
+                ) : null}
+                <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+                  <Button title="Cancel" variant="secondary" onPress={() => setAthleteRangeEditorOpen(false)} />
+                  <Button title="Save Range" onPress={applyAthleteRangeDraft} />
+                </View>
+              </View>
             </Pressable>
           </Pressable>
         </Modal>

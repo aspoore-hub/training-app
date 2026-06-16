@@ -245,6 +245,121 @@ export function isAthleteEligibleOnDate(
   return isAthleteWithinTeamTenureOnDate(athlete, dateISO);
 }
 
+export function isAthleteEligibleDuringWeek(
+  athlete:
+    | {
+        isActive?: boolean | null;
+        roster_status?: string | null;
+        teamStartDate?: string | null;
+        teamEndDate?: string | null;
+        team_start_date?: string | null;
+        team_end_date?: string | null;
+      }
+    | null
+    | undefined,
+  weekStartISO: string,
+  weekEndISO: string
+): boolean {
+  if (!athlete) return false;
+  const weekStart = normalizeDateOnly(weekStartISO);
+  const weekEnd = normalizeDateOnly(weekEndISO);
+  if (!weekStart || !weekEnd) return false;
+
+  const activeByStatus =
+    typeof athlete.isActive === "boolean"
+      ? athlete.isActive
+      : isRosterStatusActive(athlete.roster_status);
+  if (!activeByStatus) return false;
+
+  const start = normalizeDateOnly(
+    athlete && "teamStartDate" in athlete
+      ? athlete.teamStartDate
+      : athlete && "team_start_date" in athlete
+        ? athlete.team_start_date
+        : null
+  );
+  const end = normalizeDateOnly(
+    athlete && "teamEndDate" in athlete
+      ? athlete.teamEndDate
+      : athlete && "team_end_date" in athlete
+        ? athlete.team_end_date
+        : null
+  );
+
+  if (start && start > weekEnd) return false;
+  if (end && end < weekStart) return false;
+  return true;
+}
+
+export function isAthleteEligibleForPlanningDate(input: {
+  athlete:
+    | {
+        id?: string | null;
+        isActive?: boolean | null;
+        roster_status?: string | null;
+        teamStartDate?: string | null;
+        teamEndDate?: string | null;
+        team_start_date?: string | null;
+        team_end_date?: string | null;
+      }
+    | null
+    | undefined;
+  dateISO: string;
+  selectedSeason?:
+    | {
+        id?: string | null;
+        start_date?: string | null;
+        end_date?: string | null;
+      }
+    | null
+    | undefined;
+  athleteSeasonOverride?: { start_date?: string | null; end_date?: string | null } | null | undefined;
+  selectedTrainingGroupIds?: string[] | null | undefined;
+  trainingGroupMemberships?:
+    | Array<{
+        group_id?: string | null;
+        athlete_profile_id?: string | null;
+        ends_on?: string | null;
+      }>
+    | null
+    | undefined;
+  isAthleteExcludedFromSeason?: ((athleteId: string, seasonId: string) => boolean) | null;
+}): boolean {
+  const athlete = input.athlete;
+  const dateISO = String(input.dateISO ?? "").trim();
+  if (!athlete) return false;
+  if (!isAthleteEligibleOnDate(athlete, dateISO)) return false;
+
+  const athleteId = String(athlete.id ?? "").trim();
+  const selectedGroupIds = Array.isArray(input.selectedTrainingGroupIds)
+    ? input.selectedTrainingGroupIds.map((value) => String(value ?? "").trim()).filter(Boolean)
+    : [];
+  if (selectedGroupIds.length > 0) {
+    if (!athleteId) return false;
+    const groupSet = new Set(selectedGroupIds);
+    const inSelectedGroup = (Array.isArray(input.trainingGroupMemberships) ? input.trainingGroupMemberships : []).some(
+      (membership) =>
+        membership?.ends_on == null &&
+        groupSet.has(String(membership?.group_id ?? "").trim()) &&
+        String(membership?.athlete_profile_id ?? "").trim() === athleteId
+    );
+    if (!inSelectedGroup) return false;
+  }
+
+  const selectedSeason = input.selectedSeason ?? null;
+  const seasonId = String(selectedSeason?.id ?? "").trim();
+  if (!selectedSeason || !seasonId) return true;
+
+  if (athleteId && input.isAthleteExcludedFromSeason?.(athleteId, seasonId)) return false;
+
+  const resolved = resolveAthleteSeasonWindowWithTenure(athlete, selectedSeason, input.athleteSeasonOverride ?? null);
+  const start = normalizeDateOnly(resolved.start_date);
+  const end = normalizeDateOnly(resolved.end_date);
+  if (!start || !end) return true;
+  if (start > end) return false;
+  return dateISO >= start && dateISO <= end;
+}
+
 export function compareRosterAthletesByName(a: TeamRosterAthlete, b: TeamRosterAthlete): number {
   return a.sortableName.localeCompare(b.sortableName);
 }

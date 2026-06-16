@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
+import { requireTeamPermission } from "./teamPermissions";
 
 const META_PREFIX = "training_app_sync_meta_v1";
 const DIRTY_PREFIX = "training_app_sync_dirty_team_v1";
@@ -71,6 +72,7 @@ function isRemoteNewer(local: SyncMeta, remote: SyncBlob) {
 async function uploadToTeam(key: string, version: number, updatedAt: string, payload: string) {
   const teamId = await getCurrentTeamId();
   if (!teamId) return;
+  await requireTeamPermission("training.edit", teamId);
 
   let parsed: unknown;
   try {
@@ -119,6 +121,9 @@ export async function saveJSONWithTeamCloudSync<T>(
   value: T,
   storage: StorageLike = AsyncStorage
 ) {
+  const teamId = await getCurrentTeamId();
+  await requireTeamPermission("training.edit", teamId);
+
   try {
     await storage.setItem(key, JSON.stringify(value));
   } catch (e) {

@@ -2,6 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { GridCellBinding } from "./GridTypes";
 
+const DEBUG_CATEGORY_SELECT = false;
+function debugCategorySelect(...args: unknown[]) {
+  if (DEBUG_CATEGORY_SELECT) console.log(...args);
+}
+
 function optionMatches(option: string, query: string) {
   const q = String(query ?? "").trim().toLowerCase();
   if (!q) return true;
@@ -85,11 +90,11 @@ export function CategorySelectCellEditor({
   }, [filteredOptions, highlightIndex, open]);
 
   useEffect(() => {
-    console.log("[CategorySelectCellEditor] loaded options", normalizedOptions);
+    debugCategorySelect("[CategorySelectCellEditor] loaded options", normalizedOptions);
   }, [normalizedOptions]);
 
   useEffect(() => {
-    console.log("[CategorySelectCellEditor] filtered options", filteredOptions);
+    debugCategorySelect("[CategorySelectCellEditor] filtered options", filteredOptions);
   }, [filteredOptions]);
 
   const close = () => {
@@ -107,7 +112,7 @@ export function CategorySelectCellEditor({
     setSelectedCategories(next);
     lastAppliedValueRef.current = JSON.stringify(next);
     onChange(next);
-    console.log("[CategorySelectCellEditor] selected after commit", next);
+    debugCategorySelect("[CategorySelectCellEditor] selected after commit", next);
     setQuery("");
     setHighlightIndex(0);
     return true;
@@ -123,7 +128,7 @@ export function CategorySelectCellEditor({
     setSelectedCategories([]);
     lastAppliedValueRef.current = JSON.stringify([]);
     onChange([]);
-    console.log("[CategorySelectCellEditor] selected after clear", []);
+    debugCategorySelect("[CategorySelectCellEditor] selected after clear", []);
     setQuery("");
     setOpen(false);
     onOpenChange?.(false);
@@ -136,7 +141,7 @@ export function CategorySelectCellEditor({
     setSelectedCategories(updated);
     lastAppliedValueRef.current = JSON.stringify(updated);
     onChange(updated);
-    console.log("[CategorySelectCellEditor] selected after remove", updated);
+    debugCategorySelect("[CategorySelectCellEditor] selected after remove", updated);
   };
 
   const removeLast = () => {
@@ -145,7 +150,7 @@ export function CategorySelectCellEditor({
     setSelectedCategories(updated);
     lastAppliedValueRef.current = JSON.stringify(updated);
     onChange(updated);
-    console.log("[CategorySelectCellEditor] selected after remove-last", updated);
+    debugCategorySelect("[CategorySelectCellEditor] selected after remove-last", updated);
   };
 
   return (
@@ -292,7 +297,7 @@ export function CategorySelectCellEditor({
                     e.preventDefault();
                     e.stopPropagation();
                     const didCommit = commitHighlightedOption();
-                    console.log("CATEGORY ENTER", {
+                    debugCategorySelect("CATEGORY ENTER", {
                       highlightedIndex: highlightIndex,
                       filteredOptions,
                       didCommit,

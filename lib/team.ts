@@ -1,4 +1,6 @@
 import { supabase } from "./supabase";
+import { getActiveAccountContext } from "./accountContexts";
+import { normalizeTeamRole, requireTeamPermission, type TeamRole } from "./teamPermissions";
 
 export async function getMyUserId(): Promise<string | null> {
   const { data } = await supabase.auth.getSession();
@@ -11,6 +13,9 @@ export async function getMyEmail(): Promise<string | null> {
 }
 
 export async function getCurrentTeamId(): Promise<string> {
+  const activeContext = await getActiveAccountContext();
+  if (activeContext?.teamId) return activeContext.teamId;
+
   const { data: userRes, error: userErr } = await supabase.auth.getUser();
   if (userErr) throw userErr;
 
@@ -150,6 +155,7 @@ export async function updateTeamAthlete(
 ) {
   const teamId = await getCurrentTeamId();
   if (!teamId) throw new Error("No current team");
+  await requireTeamPermission("roster.edit", teamId);
 
   const payload: {
     updated_at: string;
@@ -181,6 +187,7 @@ export async function updateTeamAthlete(
 export async function deleteTeamAthlete(id: string) {
   const teamId = await getCurrentTeamId();
   if (!teamId) throw new Error("No current team");
+  await requireTeamPermission("roster.edit", teamId);
 
   const { error } = await supabase
     .from("team_athletes")
@@ -196,6 +203,7 @@ export async function createTeamAthlete(first_name: string, last_name: string, e
   // IMPORTANT: ensure team exists on *this device/session*
   const teamId = (await ensureCoachTeam("My Team")) ?? (await getCurrentTeamId());
   if (!teamId) throw new Error("No current team");
+  await requireTeamPermission("roster.edit", teamId);
 
   const fn = first_name.trim();
   const ln = last_name.trim();
@@ -223,6 +231,7 @@ export async function createClaimInvite(athlete_profile_id: string, email: strin
   const teamId = await getCurrentTeamId();
   if (!userId) throw new Error("Not signed in");
   if (!teamId) throw new Error("No current team");
+  await requireTeamPermission("roster.edit", teamId);
 
   const expires = new Date(Date.now() + daysValid * 24 * 60 * 60 * 1000).toISOString();
 
@@ -243,11 +252,216 @@ export async function createClaimInvite(athlete_profile_id: string, email: strin
   return data.token as string;
 }
 
+export type AthleteLoginLinkStatus =
+  | "linked"
+  | "no_user_found"
+  | "duplicate_claim"
+  | "unauthorized"
+  | "unlinked";
+
+export type AthleteLoginLinkResult = {
+  status: AthleteLoginLinkStatus;
+  athlete_id: string | null;
+  linked_user_id: string | null;
+  linked_email: string | null;
+  message: string;
+};
+
+function normalizeAthleteLoginLinkResult(data: any): AthleteLoginLinkResult {
+  return {
+    status: String(data?.status ?? "unauthorized") as AthleteLoginLinkStatus,
+    athlete_id: data?.athlete_id == null ? null : String(data.athlete_id),
+    linked_user_id: data?.linked_user_id == null ? null : String(data.linked_user_id),
+    linked_email: data?.linked_email == null ? null : String(data.linked_email),
+    message: String(data?.message ?? "Could not update athlete login access."),
+  };
+}
+
+export async function linkTeamAthleteToExistingUserEmail(
+  teamId: string,
+  athleteId: string,
+  email: string
+): Promise<AthleteLoginLinkResult> {
+  await requireTeamPermission("roster.edit", teamId);
+  const { data, error } = await supabase.rpc("link_team_athlete_to_existing_user_email", {
+    p_team_id: teamId,
+    p_athlete_id: athleteId,
+    p_email: email,
+  });
+  if (error) throw error;
+  return normalizeAthleteLoginLinkResult(data);
+}
+
+export async function unlinkTeamAthleteLogin(teamId: string, athleteId: string): Promise<AthleteLoginLinkResult> {
+  await requireTeamPermission("roster.edit", teamId);
+  const { data, error } = await supabase.rpc("unlink_team_athlete_login", {
+    p_team_id: teamId,
+    p_athlete_id: athleteId,
+  });
+  if (error) throw error;
+  return normalizeAthleteLoginLinkResult(data);
+}
+
+export type CoachInviteRole = Extract<TeamRole, "editor" | "viewer">;
+
+export type TeamCoachInvite = {
+  token: string;
+  email: string | null;
+  role: CoachInviteRole;
+  expires_at: string | null;
+  created_at: string | null;
+};
+
+export type TeamStaffMember = {
+  team_id: string;
+  user_id: string;
+  role: TeamRole;
+  raw_role: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  is_owner: boolean;
+};
+
+export async function createCoachInvite(email: string, role: CoachInviteRole, daysValid = 14) {
+  await requireTeamPermission("coaches.manage");
+  const userId = await getMyUserId();
+  const teamId = await getCurrentTeamId();
+  if (!userId) throw new Error("Not signed in");
+  if (!teamId) throw new Error("No current team");
+
+  const normalizedRole = role === "viewer" ? "viewer" : "editor";
+  const cleanEmail = String(email ?? "").trim().toLowerCase();
+  if (!cleanEmail) throw new Error("Coach email is required.");
+  const expires = new Date(Date.now() + daysValid * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from("team_invites")
+    .insert({
+      team_id: teamId,
+      email: cleanEmail,
+      role: normalizedRole,
+      athlete_profile_id: null,
+      expires_at: expires,
+      created_by: userId,
+    })
+    .select("token")
+    .single();
+
+  if (error) throw error;
+  return data.token as string;
+}
+
+export async function listTeamStaffMembers(): Promise<TeamStaffMember[]> {
+  const teamId = await getCurrentTeamId();
+  if (!teamId) throw new Error("No current team");
+  await requireTeamPermission("team.view", teamId);
+
+  const [{ data: team, error: teamError }, { data: members, error: membersError }] = await Promise.all([
+    supabase.from("teams").select("owner_id").eq("id", teamId).maybeSingle(),
+    supabase
+      .from("team_members")
+      .select("team_id,user_id,role,created_at,updated_at")
+      .eq("team_id", teamId)
+      .order("created_at", { ascending: true }),
+  ]);
+
+  if (teamError) throw teamError;
+  if (membersError) throw membersError;
+
+  const ownerId = String(team?.owner_id ?? "");
+  return ((members ?? []) as Array<Record<string, unknown>>).map((row) => {
+    const rawRole = row.role == null ? null : String(row.role);
+    const userId = String(row.user_id ?? "");
+    const isOwner = ownerId !== "" && userId === ownerId;
+    return {
+      team_id: String(row.team_id ?? teamId),
+      user_id: userId,
+      role: isOwner ? "owner" : normalizeTeamRole(rawRole),
+      raw_role: rawRole,
+      created_at: row.created_at == null ? null : String(row.created_at),
+      updated_at: row.updated_at == null ? null : String(row.updated_at),
+      is_owner: isOwner,
+    };
+  });
+}
+
+export async function listCoachInvites(): Promise<TeamCoachInvite[]> {
+  const teamId = await getCurrentTeamId();
+  if (!teamId) throw new Error("No current team");
+  await requireTeamPermission("coaches.manage", teamId);
+
+  const { data, error } = await supabase
+    .from("team_invites")
+    .select("token,email,role,expires_at,created_at")
+    .eq("team_id", teamId)
+    .in("role", ["editor", "viewer"])
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>).map((row) => ({
+    token: String(row.token ?? ""),
+    email: row.email == null ? null : String(row.email),
+    role: normalizeTeamRole(row.role as string | null) === "viewer" ? "viewer" : "editor",
+    expires_at: row.expires_at == null ? null : String(row.expires_at),
+    created_at: row.created_at == null ? null : String(row.created_at),
+  }));
+}
+
+export async function updateTeamStaffRole(userId: string, role: CoachInviteRole): Promise<void> {
+  const teamId = await getCurrentTeamId();
+  if (!teamId) throw new Error("No current team");
+  await requireTeamPermission("coaches.manage", teamId);
+  const cleanUserId = String(userId ?? "").trim();
+  if (!cleanUserId) throw new Error("Missing staff user id.");
+
+  const { data: team, error: teamError } = await supabase
+    .from("teams")
+    .select("owner_id")
+    .eq("id", teamId)
+    .maybeSingle();
+  if (teamError) throw teamError;
+  if (String(team?.owner_id ?? "") === cleanUserId) {
+    throw new Error("The team owner role cannot be changed.");
+  }
+
+  const { error } = await supabase
+    .from("team_members")
+    .update({ role: role === "viewer" ? "viewer" : "editor" })
+    .eq("team_id", teamId)
+    .eq("user_id", cleanUserId);
+  if (error) throw error;
+}
+
+export async function removeTeamStaffMember(userId: string): Promise<void> {
+  const teamId = await getCurrentTeamId();
+  if (!teamId) throw new Error("No current team");
+  await requireTeamPermission("coaches.manage", teamId);
+  const cleanUserId = String(userId ?? "").trim();
+  if (!cleanUserId) throw new Error("Missing staff user id.");
+
+  const { data: team, error: teamError } = await supabase
+    .from("teams")
+    .select("owner_id")
+    .eq("id", teamId)
+    .maybeSingle();
+  if (teamError) throw teamError;
+  if (String(team?.owner_id ?? "") === cleanUserId) {
+    throw new Error("The team owner cannot be removed.");
+  }
+
+  const { error } = await supabase
+    .from("team_members")
+    .delete()
+    .eq("team_id", teamId)
+    .eq("user_id", cleanUserId);
+  if (error) throw error;
+}
+
 export type AcceptInviteResult =
   | string
   | {
       team_id?: string | null;
       athlete_profile_id?: string | null;
+      role?: string | null;
     };
 
 export async function acceptInvite(token: string) {

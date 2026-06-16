@@ -1,13 +1,13 @@
 import { Redirect } from "expo-router";
 import { useEffect, useState } from "react";
-import { getMyProfileFull } from "../lib/profile";
+import { resolveStartupAccountContext, routeForAccountContext } from "../lib/accountContexts";
 import { supabase } from "../lib/supabase";
 
 type IndexTarget =
   | "/(auth)/login"
-  | "/(auth)/join"
-  | "/(coach)/(tabs)/calendar"
-  | "/(athlete)";
+  | "/(auth)/choose-account"
+  | "/(coach)/(tabs)/calendar?view=monthly"
+  | "/(athlete)/dashboard";
 
 export default function Index() {
   const [target, setTarget] = useState<IndexTarget | null>(null);
@@ -25,25 +25,16 @@ export default function Index() {
           return;
         }
 
-        const profile = await getMyProfileFull();
-
-        if (profile?.role === "coach") {
-          if (!cancelled) setTarget("/(coach)/(tabs)/calendar");
+        const resolution = await resolveStartupAccountContext();
+        if (resolution.status === "ready") {
+          if (!cancelled) setTarget(routeForAccountContext(resolution.context));
           return;
         }
 
-        if (profile?.role === "athlete") {
-          if (!profile.current_team_id) {
-            if (!cancelled) setTarget("/(auth)/join");
-            return;
-          }
-          if (!cancelled) setTarget("/(athlete)");
-          return;
-        }
-
-        if (!cancelled) setTarget("/(auth)/login");
-      } catch {
-        if (!cancelled) setTarget("/(auth)/login");
+        if (!cancelled) setTarget("/(auth)/choose-account");
+      } catch (error) {
+        console.error("Startup account routing failed", error);
+        if (!cancelled) setTarget("/(auth)/choose-account");
       }
     }
 

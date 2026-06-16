@@ -2,6 +2,9 @@ export const TEAM_KEYS = [
   // Shared team data
   "training_app_categories_v1",
   "training_app_workout_templates_v1",
+  "training_app_workout_plan_builder_drafts_v1",
+  "training_app_mileage_feedback_v1",
+  "training_app_athlete_daily_log_entries_v1",
 
   // Shared settings (coach-defined)
   "training_app_week_start_v1",
@@ -29,7 +32,6 @@ export const USER_KEYS = [
   "training_app_migrations_v1",
 
   // Optional: keep these user-level for now
-  "training_app_mileage_feedback_v1",
   "training_app_athlete_pace_seconds_per_unit_v1",
 ] as const;
 

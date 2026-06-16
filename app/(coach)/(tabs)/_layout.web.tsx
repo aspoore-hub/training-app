@@ -32,6 +32,12 @@ export default function CoachTabs() {
         }}
       />
       <Tabs.Screen
+        name="plan-builder"
+        options={{
+          href: null,
+        }}
+      />
+      <Tabs.Screen
         name="calendar"
         options={{
           title: "Calendar",

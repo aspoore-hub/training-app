@@ -36,6 +36,7 @@ import {
   splitIntoPairs,
   type TeamWorkoutLegacyNameRow,
 } from "../../../lib/teamWorkoutEditorHelpers";
+import { canEditTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
 
 const IOS_ACCESSORY_ID = "edit-workout-accessory";
 
@@ -63,6 +64,8 @@ export default function EditWorkoutCloud() {
   const [groupDraftByWorkoutId, setGroupDraftByWorkoutId] = useState<Record<string, string>>({});
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [loading, setLoading] = useState(true);
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const readOnlyTraining = !canEditTraining(currentTeamRole);
 
   const [rosterNameById, setRosterNameById] = useState<RosterMap>(new Map());
 
@@ -79,8 +82,9 @@ export default function EditWorkoutCloud() {
       try {
         setLoading(true);
 
-        const [settings] = await Promise.all([
+        const [settings, role] = await Promise.all([
           loadCoreCoachSettings(),
+          getCurrentTeamRole(),
         ]);
 
         const teamId = await getCurrentTeamId();
@@ -88,6 +92,7 @@ export default function EditWorkoutCloud() {
 
         const found = await getTeamWorkoutById(id);
         if (!mounted) return;
+        setCurrentTeamRole(role);
 
         if (!found) {
           setCategories(getCategoryOptions(settings));
@@ -141,6 +146,10 @@ export default function EditWorkoutCloud() {
 
   async function saveChanges() {
     if (!workout) return;
+    if (readOnlyTraining) {
+      Alert.alert("Viewer access", "Viewer access: editing is disabled.");
+      return;
+    }
 
     const selectedCategoryNames =
       Array.isArray(workout.categories) && workout.categories.length > 0
@@ -169,6 +178,7 @@ export default function EditWorkoutCloud() {
   }
 
   function applyGrouping(groups: TeamWorkoutRow[][]) {
+    if (readOnlyTraining) return;
     const assignments: Record<string, string> = {};
     groups.forEach((group, idx) => {
       const label = String(idx + 1);
@@ -181,6 +191,10 @@ export default function EditWorkoutCloud() {
 
   async function saveGroupUpdates() {
     if (!workout?.batch_id) return;
+    if (readOnlyTraining) {
+      Alert.alert("Viewer access", "Viewer access: editing is disabled.");
+      return;
+    }
 
     try {
       // Update all batch rows one by one (simple + reliable for now)
@@ -204,6 +218,10 @@ export default function EditWorkoutCloud() {
 
   async function saveCurrentAsTemplate() {
     if (!workout) return;
+    if (readOnlyTraining) {
+      Alert.alert("Viewer access", "Viewer access: editing is disabled.");
+      return;
+    }
 
     await createWorkoutTemplateFromSource({
       title: String(workout.title ?? "").trim() || "Workout",
@@ -219,6 +237,10 @@ export default function EditWorkoutCloud() {
 
   async function removeWorkout() {
     if (!workout) return;
+    if (readOnlyTraining) {
+      Alert.alert("Viewer access", "Viewer access: editing is disabled.");
+      return;
+    }
 
     Alert.alert("Delete workout?", "This will permanently remove this assigned workout.", [
       { text: "Cancel", style: "cancel" },
@@ -289,6 +311,21 @@ export default function EditWorkoutCloud() {
                 : workout.primary_category) ?? "Other"}
             </Text>
 
+            {readOnlyTraining ? (
+              <View
+                style={{
+                  marginBottom: 14,
+                  borderWidth: 1,
+                  borderColor: "#cbd5e1",
+                  backgroundColor: "#f8fafc",
+                  borderRadius: 12,
+                  padding: 12,
+                }}
+              >
+                <Text style={{ color: "#475569", fontWeight: "800" }}>Viewer access: editing is disabled.</Text>
+              </View>
+            ) : null}
+
             {workout.batch_id && sortedBatchWorkouts.length > 0 ? (
               <View
                 style={{
@@ -305,57 +342,59 @@ export default function EditWorkoutCloud() {
                   {sortedBatchWorkouts.length} athletes
                 </Text>
 
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10, marginBottom: 8 }}>
-                  <Pressable
-                    onPress={() => applyGrouping(splitIntoPairs(sortedBatchWorkouts))}
-                    style={{
-                      borderWidth: 1,
-                      borderColor: "#ddd",
-                      borderRadius: 10,
-                      paddingVertical: 8,
-                      paddingHorizontal: 10,
-                      backgroundColor: "white",
-                    }}
-                  >
-                    <Text style={{ fontWeight: "700" }}>Split into pairs</Text>
-                  </Pressable>
+                {!readOnlyTraining ? (
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10, marginBottom: 8 }}>
+                    <Pressable
+                      onPress={() => applyGrouping(splitIntoPairs(sortedBatchWorkouts))}
+                      style={{
+                        borderWidth: 1,
+                        borderColor: "#ddd",
+                        borderRadius: 10,
+                        paddingVertical: 8,
+                        paddingHorizontal: 10,
+                        backgroundColor: "white",
+                      }}
+                    >
+                      <Text style={{ fontWeight: "700" }}>Split into pairs</Text>
+                    </Pressable>
 
-                  <Pressable
-                    onPress={() => applyGrouping(splitIntoKGroups(sortedBatchWorkouts, 3))}
-                    style={{
-                      borderWidth: 1,
-                      borderColor: "#ddd",
-                      borderRadius: 10,
-                      paddingVertical: 8,
-                      paddingHorizontal: 10,
-                      backgroundColor: "white",
-                    }}
-                  >
-                    <Text style={{ fontWeight: "700" }}>Split into 3 groups</Text>
-                  </Pressable>
+                    <Pressable
+                      onPress={() => applyGrouping(splitIntoKGroups(sortedBatchWorkouts, 3))}
+                      style={{
+                        borderWidth: 1,
+                        borderColor: "#ddd",
+                        borderRadius: 10,
+                        paddingVertical: 8,
+                        paddingHorizontal: 10,
+                        backgroundColor: "white",
+                      }}
+                    >
+                      <Text style={{ fontWeight: "700" }}>Split into 3 groups</Text>
+                    </Pressable>
 
-                  <Pressable
-                    onPress={() =>
-                      setGroupDraftByWorkoutId((prev) => {
-                        const next = { ...prev };
-                        sortedBatchWorkouts.forEach((item) => {
-                          next[item.id] = "1";
-                        });
-                        return next;
-                      })
-                    }
-                    style={{
-                      borderWidth: 1,
-                      borderColor: "#ddd",
-                      borderRadius: 10,
-                      paddingVertical: 8,
-                      paddingHorizontal: 10,
-                      backgroundColor: "white",
-                    }}
-                  >
-                    <Text style={{ fontWeight: "700" }}>Clear groups</Text>
-                  </Pressable>
-                </View>
+                    <Pressable
+                      onPress={() =>
+                        setGroupDraftByWorkoutId((prev) => {
+                          const next = { ...prev };
+                          sortedBatchWorkouts.forEach((item) => {
+                            next[item.id] = "1";
+                          });
+                          return next;
+                        })
+                      }
+                      style={{
+                        borderWidth: 1,
+                        borderColor: "#ddd",
+                        borderRadius: 10,
+                        paddingVertical: 8,
+                        paddingHorizontal: 10,
+                        backgroundColor: "white",
+                      }}
+                    >
+                      <Text style={{ fontWeight: "700" }}>Clear groups</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
 
                 {sortedBatchWorkouts.map((item) => {
                   const displayName = resolveWorkoutAthleteName(item as TeamWorkoutLegacyNameRow, rosterNameById);
@@ -378,18 +417,20 @@ export default function EditWorkoutCloud() {
                   );
                 })}
 
-                <Pressable
-                  onPress={saveGroupUpdates}
-                  style={{
-                    marginTop: 12,
-                    backgroundColor: "#111",
-                    borderRadius: 10,
-                    paddingVertical: 10,
-                    alignItems: "center",
-                  }}
-                >
-                  <Text style={{ color: "white", fontWeight: "800" }}>Save Group Updates</Text>
-                </Pressable>
+                {!readOnlyTraining ? (
+                  <Pressable
+                    onPress={saveGroupUpdates}
+                    style={{
+                      marginTop: 12,
+                      backgroundColor: "#111",
+                      borderRadius: 10,
+                      paddingVertical: 10,
+                      alignItems: "center",
+                    }}
+                  >
+                    <Text style={{ color: "white", fontWeight: "800" }}>Save Group Updates</Text>
+                  </Pressable>
+                ) : null}
               </View>
             ) : null}
 
@@ -399,7 +440,11 @@ export default function EditWorkoutCloud() {
                 return (
                   <Pressable
                     key={s}
-                    onPress={() => setSession(s)}
+                    disabled={readOnlyTraining}
+                    onPress={() => {
+                      if (readOnlyTraining) return;
+                      setSession(s);
+                    }}
                     style={{
                       flex: 1,
                       paddingVertical: 10,
@@ -421,6 +466,7 @@ export default function EditWorkoutCloud() {
               ref={titleRef}
               value={workout.title ?? ""}
               onChangeText={(text) => setWorkout({ ...workout, title: text })}
+              editable={!readOnlyTraining}
               returnKeyType="done"
               blurOnSubmit
               onSubmitEditing={dismissKeyboard}
@@ -440,6 +486,7 @@ export default function EditWorkoutCloud() {
               ref={detailsRef}
               value={workout.details ?? ""}
               onChangeText={(text) => setWorkout({ ...workout, details: text })}
+              editable={!readOnlyTraining}
               multiline
               returnKeyType="done"
               blurOnSubmit
@@ -461,6 +508,7 @@ export default function EditWorkoutCloud() {
             <TextInput
               value={workout.time_text ?? ""}
               onChangeText={(text) => setWorkout({ ...workout, time_text: text })}
+              editable={!readOnlyTraining}
               placeholder="e.g., 12:00 PM"
               returnKeyType="done"
               blurOnSubmit
@@ -487,7 +535,9 @@ export default function EditWorkoutCloud() {
                 return (
                   <Pressable
                     key={`edit-cat-${cat.id}`}
+                    disabled={readOnlyTraining}
                     onPress={() => {
+                      if (readOnlyTraining) return;
                       const next = active
                         ? selected.filter((name) => name !== cat.name)
                         : [...selected, cat.name];
@@ -519,50 +569,54 @@ export default function EditWorkoutCloud() {
                 Your team_workouts schema does not currently include completedMiles/feedback fields.
                 We'll add an athlete_feedback table later if you want this back on the coach screen. */}
 
-            <Pressable
-              onPress={saveCurrentAsTemplate}
-              style={{
-                marginBottom: 10,
-                borderWidth: 1,
-                borderColor: "#111",
-                backgroundColor: "#fff",
-                paddingVertical: 12,
-                borderRadius: 12,
-                alignItems: "center",
-              }}
-            >
-              <Text style={{ color: "#111", fontWeight: "700" }}>Save As Template</Text>
-            </Pressable>
+            {!readOnlyTraining ? (
+              <>
+                <Pressable
+                  onPress={saveCurrentAsTemplate}
+                  style={{
+                    marginBottom: 10,
+                    borderWidth: 1,
+                    borderColor: "#111",
+                    backgroundColor: "#fff",
+                    paddingVertical: 12,
+                    borderRadius: 12,
+                    alignItems: "center",
+                  }}
+                >
+                  <Text style={{ color: "#111", fontWeight: "700" }}>Save As Template</Text>
+                </Pressable>
 
-            <Pressable
-              onPress={async () => {
-                dismissKeyboard();
-                await saveChanges();
-              }}
-              style={{
-                backgroundColor: "black",
-                paddingVertical: 14,
-                borderRadius: 12,
-                alignItems: "center",
-              }}
-            >
-              <Text style={{ color: "white", fontWeight: "700" }}>Save Changes</Text>
-            </Pressable>
+                <Pressable
+                  onPress={async () => {
+                    dismissKeyboard();
+                    await saveChanges();
+                  }}
+                  style={{
+                    backgroundColor: "black",
+                    paddingVertical: 14,
+                    borderRadius: 12,
+                    alignItems: "center",
+                  }}
+                >
+                  <Text style={{ color: "white", fontWeight: "700" }}>Save Changes</Text>
+                </Pressable>
 
-            <Pressable
-              onPress={removeWorkout}
-              style={{
-                marginTop: 10,
-                borderWidth: 1,
-                borderColor: "#cc0000",
-                backgroundColor: "white",
-                paddingVertical: 12,
-                borderRadius: 12,
-                alignItems: "center",
-              }}
-            >
-              <Text style={{ color: "#cc0000", fontWeight: "700" }}>Delete Workout</Text>
-            </Pressable>
+                <Pressable
+                  onPress={removeWorkout}
+                  style={{
+                    marginTop: 10,
+                    borderWidth: 1,
+                    borderColor: "#cc0000",
+                    backgroundColor: "white",
+                    paddingVertical: 12,
+                    borderRadius: 12,
+                    alignItems: "center",
+                  }}
+                >
+                  <Text style={{ color: "#cc0000", fontWeight: "700" }}>Delete Workout</Text>
+                </Pressable>
+              </>
+            ) : null}
           </ScrollView>
         </KeyboardAvoidingView>
       </TouchableWithoutFeedback>

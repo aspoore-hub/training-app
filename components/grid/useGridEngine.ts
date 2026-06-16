@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform } from "react-native";
-import { parseTsv } from "../../lib/grid/tsv";
+import { parseTsv, toTsv } from "../../lib/grid/tsv";
 import type { GridCellBinding, GridCoord, GridEngineOptions, GridSelectionRect } from "./GridTypes";
 
 type GridChange<RowId extends string, ColKey extends string> = {
@@ -244,7 +244,7 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
   const copySelectionToClipboard = useCallback(async () => {
     const rect = selectionRect;
     if (!rect) return "";
-    const lines: string[] = [];
+    const rows: string[][] = [];
     for (let r = rect.r1; r <= rect.r2; r += 1) {
       const vals: string[] = [];
       for (let c = rect.c1; c <= rect.c2; c += 1) {
@@ -254,9 +254,9 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
         }
         vals.push(getValue(rowIds[r], colKeys[c]));
       }
-      lines.push(vals.join("\t"));
+      rows.push(vals);
     }
-    const text = lines.join("\n");
+    const text = toTsv(rows);
     setClipboardText(text);
     if (Platform.OS === "web" && typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
       try {
@@ -409,6 +409,7 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
       const key = String(e?.key ?? "");
       const shift = !!e?.shiftKey;
       const ctrlMeta = !!(e?.ctrlKey || e?.metaKey);
+      const editorIsMultiline = !!(e as any)?.__gridEditorMultiline;
       const isPrintable = key.length === 1;
       const activeRowId = active ? rowIds[active.rowIndex] : rowIds[0] ?? null;
       const activeColKey = active ? colKeys[active.colIndex] : colKeys[0] ?? null;
@@ -433,8 +434,9 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
         }
 
         if (key === "Enter") {
+          if (shift && editorIsMultiline) return false;
           e.preventDefault?.();
-          exitEditAndMove(0, shift ? -1 : 1);
+          exitEditAndMove(0, 1);
           return true;
         }
 
@@ -494,7 +496,7 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
 
       if (key === "Enter") {
         e.preventDefault?.();
-        moveActiveBy(0, shift ? -1 : 1);
+        moveActiveBy(0, 1);
         return true;
       }
 
@@ -614,6 +616,31 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
     ]
   );
 
+  const bindingVersion = useMemo(
+    () =>
+      [
+        enabled ? "1" : "0",
+        active ? `${active.rowIndex}:${active.colIndex}` : "",
+        anchor ? `${anchor.rowIndex}:${anchor.colIndex}` : "",
+        selection ? `${selection.r1}:${selection.c1}:${selection.r2}:${selection.c2}` : "",
+        editingCell ? `${editingCell.rowId}:${String(editingCell.colKey)}` : "",
+        clipboardText,
+      ].join("|"),
+    [
+      active,
+      anchor,
+      clipboardText,
+      copySelectionToClipboard,
+      editingCell,
+      enabled,
+      getValue,
+      handleKeyDown,
+      onActivate,
+      pasteTextAtSelection,
+      selection,
+    ]
+  );
+
   const bindCell = useCallback(
     (rowId: RowId, colKey: ColKey): GridCellBinding => {
       const cellId = makeCellId(rowId, colKey);
@@ -712,6 +739,7 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
 
       return {
         cellId,
+        version: bindingVersion,
         ref: (el: any) => {
           refs.current[cellId] = el;
         },
@@ -737,6 +765,7 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
       selection,
       stopEditing,
       active,
+      bindingVersion,
     ]
   );
 

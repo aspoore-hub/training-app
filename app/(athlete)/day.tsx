@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, Pressable, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from "react-native-reanimated";
 import { loadJSON, saveJSON } from "../../lib/storage";
@@ -11,8 +11,8 @@ import type { AthleteWorkout, MileageValue, WeekStartDay } from "../../lib/types
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import { ATHLETE_CALENDAR_VIEW_STATE_KEY, type AthleteCalendarViewState } from "../../lib/athleteCalendarView";
 import { loadRosterNameMapForTeam } from "../../lib/rosterNameMap";
-import { listAthleteWorkoutsInRange, listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
-import { teamDataStore } from "../../lib/teamDataStore";
+import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
+import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import {
   getWeekStartISO,
   getWeekIndex,
@@ -98,6 +98,12 @@ function isISODateOnly(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value ?? "").trim());
 }
 
+function appendRouteParam(parts: string[], key: string, value: unknown) {
+  const clean = String(value ?? "").trim();
+  if (!clean) return;
+  parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(clean)}`);
+}
+
 export default function AthleteDayScreen() {
   const router = useRouter();
   const store = teamDataStore.use();
@@ -125,11 +131,12 @@ export default function AthleteDayScreen() {
     if (!currentDateISO || !selectedAthleteId) return null;
 
     const weekStartISO = getWeekStartISO(String(currentDateISO), weekStartsOn);
+    const visibleMileageKey = visibleMileageAthleteWeekKey(selectedAthleteId, weekStartISO);
     const idx = getWeekIndex(String(currentDateISO), weekStartISO);
     if (idx < 0 || idx > 6) return null;
 
-    const cells = store.mileageCellsByWeek[weekStartISO] ?? [];
-    const flags = store.mileageFlagsByWeek[weekStartISO] ?? [];
+    const cells = store.visibleMileageCellsByAthleteWeek[visibleMileageKey] ?? [];
+    const flags = store.visibleMileageFlagsByAthleteWeek[visibleMileageKey] ?? [];
 
     const am = toMileageValue(
       cells.find(
@@ -165,7 +172,7 @@ export default function AthleteDayScreen() {
       ncaaOff,
       total,
     };
-  }, [currentDateISO, paceSecPerMile, selectedAthleteId, store.mileageCellsByWeek, store.mileageFlagsByWeek, weekStartsOn]);
+  }, [currentDateISO, paceSecPerMile, selectedAthleteId, store.visibleMileageCellsByAthleteWeek, store.visibleMileageFlagsByAthleteWeek, weekStartsOn]);
 
   const groupMatesByWorkoutId = useMemo(() => {
     const out = new Map<string, string[]>();
@@ -225,12 +232,12 @@ export default function AthleteDayScreen() {
     [amWorkouts, plannedAm, plannedPm, pmWorkouts]
   );
 
-  useEffect(() => {
-    async function load() {
+  const loadDayData = useCallback(
+    async (force = false) => {
       if (inFlightRef.current) return;
       const loadKey = String(currentDateISO);
       const now = Date.now();
-      if (lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
+      if (!force && lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
         return;
       }
       activeLoadKeyRef.current = loadKey;
@@ -261,7 +268,7 @@ export default function AthleteDayScreen() {
         setSelectedAthleteId(resolvedId);
 
         const weekStartISO = getWeekStartISO(String(currentDateISO), resolvedWeekStart);
-        void teamDataStore.actions.loadMileageWeek(weekStartISO);
+        if (resolvedId) void teamDataStore.actions.loadVisibleMileageWeekForAthlete(resolvedId, weekStartISO);
 
         if (!currentDateISO || !resolvedId) {
           setAllWorkouts([]);
@@ -269,7 +276,7 @@ export default function AthleteDayScreen() {
           return;
         }
 
-        const athleteRows = await listAthleteWorkoutsInRange(String(resolvedId), String(currentDateISO), String(currentDateISO));
+        const athleteRows = await listVisibleAthleteWorkoutsInRange(String(resolvedId), String(currentDateISO), String(currentDateISO));
         if (activeLoadKeyRef.current !== loadKey) return;
 
         const athleteMapped = athleteRows.map((row) => toAthleteWorkout(row, new Map()));
@@ -285,24 +292,29 @@ export default function AthleteDayScreen() {
         setWorkouts(athleteFiltered);
         lastLoadRef.current = { key: loadKey, ts: Date.now() };
 
-        // Hydrate roster + team rows in background for group-mate context and names.
+        // Hydrate roster names in background without loading hidden team rows.
         void (async () => {
           const rosterMap = await loadRosterNameMapForTeam(athleteSession.teamId);
           if (activeLoadKeyRef.current !== loadKey) return;
           setRosterNameById(rosterMap);
-          const allRows = await listTeamWorkoutsInRange(String(currentDateISO), String(currentDateISO));
-          if (activeLoadKeyRef.current !== loadKey) return;
-          const mapped = allRows.map((row) => toAthleteWorkout(row, rosterMap));
-          setAllWorkouts(mapped);
         })();
       } finally {
         setLoadingContext(false);
         inFlightRef.current = false;
       }
-    }
+    },
+    [currentDateISO]
+  );
 
-    void load();
-  }, [currentDateISO]);
+  useEffect(() => {
+    void loadDayData(false);
+  }, [loadDayData]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadDayData(true);
+    }, [loadDayData])
+  );
 
   useEffect(() => {
     const routeDate = String(date ?? "").trim();
@@ -377,6 +389,14 @@ export default function AthleteDayScreen() {
     });
   }
 
+  function buildWorkoutReturnTo(dateISO: string) {
+    const params: string[] = [];
+    appendRouteParam(params, "date", dateISO);
+    appendRouteParam(params, "returnView", returnView);
+    appendRouteParam(params, "returnDate", returnDate);
+    return `/(athlete)/day?${params.join("&")}`;
+  }
+
   const translateX = useSharedValue(0);
   const pan = Gesture.Pan()
     .maxPointers(1)
@@ -414,7 +434,7 @@ export default function AthleteDayScreen() {
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", padding: 20 }}>
         <Text style={{ fontSize: 16, fontWeight: "700", marginBottom: 10 }}>No athlete selected</Text>
         <Text style={{ opacity: 0.7, textAlign: "center", marginBottom: 16 }}>
-          Select an athlete to view workouts and submit feedback.
+          Select an athlete to view workouts and submit logs.
         </Text>
 
         <Pressable
@@ -547,6 +567,7 @@ export default function AthleteDayScreen() {
                         prescribed: item.prescribed,
                         athleteId: selectedAthleteId ?? "",
                         name: selectedAthleteName,
+                        returnTo: buildWorkoutReturnTo(String(currentDateISO)),
                       },
                     })
                   }
@@ -559,7 +580,7 @@ export default function AthleteDayScreen() {
                     alignItems: "center",
                   }}
                 >
-                  <Text style={{ fontWeight: "800", color: "#0f172a" }}>Open feedback</Text>
+                  <Text style={{ fontWeight: "800", color: "#0f172a" }}>Open log</Text>
                 </Pressable>
               </View>
             ) : (
@@ -578,7 +599,11 @@ export default function AthleteDayScreen() {
                       onPress={() =>
                         router.push({
                           pathname: "/(athlete)/workout/[id]",
-                          params: { id: workout.id, name: selectedAthleteName },
+                          params: {
+                            id: workout.id,
+                            name: selectedAthleteName,
+                            returnTo: buildWorkoutReturnTo(String(currentDateISO)),
+                          },
                         })
                       }
                       style={{

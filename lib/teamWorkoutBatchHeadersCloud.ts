@@ -1,6 +1,7 @@
 import type { PostgrestError } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
+import { requireTeamPermission } from "./teamPermissions";
 
 export type TeamWorkoutBatchHeaderRow = {
   id: string;
@@ -85,6 +86,7 @@ export async function saveTeamWorkoutBatchHeaderNotes(input: {
   header_notes: string | null;
 }): Promise<{ handledRowPropagation: boolean }> {
   const teamId = await getCurrentTeamId();
+  await requireTeamPermission("training.edit", teamId);
   const batchId = String(input.batch_id ?? "").trim();
   const dateISO = String(input.date_iso ?? "").trim();
   const session = normalizeSession(input.session);

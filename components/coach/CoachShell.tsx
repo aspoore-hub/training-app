@@ -2,6 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { usePathname, useRouter } from "expo-router";
 import { type ReactNode, useMemo, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
+import { AccountContextSelector } from "../account/AccountContextSelector";
 import { resolveCoachTitle } from "../../lib/coachNav";
 import { CoachDrawer } from "./CoachDrawer";
 import { CoachSidebar } from "./CoachSidebar";
@@ -81,7 +82,10 @@ export function CoachShell({ children, title, subtitle, statusText }: CoachShell
             </View>
           </View>
 
-          <Text style={{ fontSize: 11, fontWeight: "800", color: "#516179" }}>{statusText ?? "Ready"}</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <AccountContextSelector compact />
+            <Text style={{ fontSize: 11, fontWeight: "800", color: "#516179" }}>{statusText ?? "Ready"}</Text>
+          </View>
         </View>
 
         <View

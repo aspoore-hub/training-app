@@ -46,7 +46,7 @@ import {
 } from "../../../lib/categoryRoutineDefaults";
 import {
   compareAthleteDisplayNamesByLastName,
-  isAthleteEligibleOnDate,
+  isAthleteEligibleForPlanningDate,
   normalizeTeamRosterAthlete,
   searchRoster,
   sortRosterByName,
@@ -58,6 +58,7 @@ import {
   teamDataStore,
 } from "../../../lib/teamDataStore";
 import { useAppRuntime } from "../../../lib/appState";
+import { canEditTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
 
 import type { WorkoutCategory } from "../../../lib/types";
 
@@ -383,6 +384,7 @@ export default function PlannerScreen() {
   const [creating, setCreating] = useState(false);
   const [submitDebug, setSubmitDebug] = useState("idle");
   const [createFooterStatus, setCreateFooterStatus] = useState<CreateFooterStatus>({ status: "idle" });
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
   const [weekStartSetting, setWeekStartSetting] = useState<WeekStartSetting>("monday");
 
   const [roster, setRoster] = useState<TeamRosterAthlete[]>([]);
@@ -457,6 +459,7 @@ export default function PlannerScreen() {
   const isDirtyRef = useRef(false);
   const suppressPromptRef = useRef(false);
   const [suppressPrompt, setSuppressPrompt] = useState(false);
+  const readOnlyTraining = !canEditTraining(currentTeamRole);
 
   const snapshot = useMemo(
     () =>
@@ -476,6 +479,21 @@ export default function PlannerScreen() {
   );
 
   const isDirty = baselineRef.current !== "" && baselineRef.current !== snapshot;
+
+  useEffect(() => {
+    let active = true;
+    getCurrentTeamRole()
+      .then((role) => {
+        if (active) setCurrentTeamRole(role);
+      })
+      .catch((error) => {
+        console.warn("[planner] role load failed", error);
+        if (active) setCurrentTeamRole(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     isDirtyRef.current = isDirty;
@@ -511,12 +529,8 @@ export default function PlannerScreen() {
             normalized: "monday" as WeekStartSetting,
           }));
           const ws = weekStartResult.normalized;
-          console.log("[planner] week start loaded via shared helper", {
-            raw: weekStartResult.raw,
-            normalized: ws,
-          });
 
-          await teamDataStore.actions.refreshRoster({ force: true }).catch((error) => {
+          await teamDataStore.actions.refreshRoster().catch((error) => {
             console.warn("[planner] teamDataStore refreshRoster failed", error);
           });
 
@@ -565,9 +579,7 @@ export default function PlannerScreen() {
 
           if (!mounted) return;
 
-          console.log("[planner] roster from teamDataStore", rosterResult.length, rosterResult);
           const plannerCategories = Array.isArray(savedCoreSettings?.categories) ? savedCoreSettings.categories : [];
-          console.log("[planner] categories from coach settings", plannerCategories.length, plannerCategories);
 
           setWeekStartSetting(ws);
           setRoster(rosterResult);
@@ -603,21 +615,6 @@ export default function PlannerScreen() {
             : null;
           const sharedHasActiveFilters = sharedGroupIds.length > 0 || !!selectedSeason;
 
-          const activeGroupAthleteIds = new Set<string>();
-          if (sharedGroupIds.length > 0) {
-            const selectedGroupSet = new Set(sharedGroupIds);
-            (Array.isArray(storeSnapshot.trainingGroupMemberships) ? storeSnapshot.trainingGroupMemberships : []).forEach(
-              (membership) => {
-                if (!isActiveTrainingGroupMembership(membership)) return;
-                const groupId = String(membership?.group_id ?? "").trim();
-                const athleteId = String(membership?.athlete_profile_id ?? "").trim();
-                if (!groupId || !athleteId) return;
-                if (!selectedGroupSet.has(groupId)) return;
-                activeGroupAthleteIds.add(athleteId);
-              }
-            );
-          }
-
           const overrideLookup = new Map<string, (typeof storeSnapshot.athleteSeasonOverrides)[number]>();
           (Array.isArray(storeSnapshot.athleteSeasonOverrides) ? storeSnapshot.athleteSeasonOverrides : []).forEach(
             (override) => {
@@ -629,28 +626,26 @@ export default function PlannerScreen() {
           );
 
           const sharedDefaultAthleteIds = rosterResult
-            .filter((athlete) => isAthleteEligibleOnDate(athlete, dateISO))
+            .filter((athlete) =>
+              isAthleteEligibleForPlanningDate({
+                athlete,
+                dateISO,
+                selectedSeason,
+                athleteSeasonOverride:
+                  overrideLookup.get(`${String(selectedSeason?.id ?? "").trim()}:${String(athlete?.id ?? "").trim()}`) ??
+                  null,
+                selectedTrainingGroupIds: sharedGroupIds,
+                trainingGroupMemberships: storeSnapshot.trainingGroupMemberships,
+                isAthleteExcludedFromSeason: (athleteId, seasonId) =>
+                  isAthleteExcludedFromSeason(
+                    athleteId,
+                    seasonId,
+                    storeSnapshot.athleteSeasonOverrides
+                  ),
+              })
+            )
             .map((athlete) => String(athlete.id ?? "").trim())
-            .filter(Boolean)
-            .filter((athleteId) => {
-              if (sharedGroupIds.length > 0 && !activeGroupAthleteIds.has(athleteId)) return false;
-              if (!selectedSeason) return true;
-              if (
-                isAthleteExcludedFromSeason(
-                  athleteId,
-                  String(selectedSeason.id ?? "").trim(),
-                  storeSnapshot.athleteSeasonOverrides
-                )
-              ) {
-                return false;
-              }
-              const override = overrideLookup.get(`${String(selectedSeason.id ?? "").trim()}:${athleteId}`) ?? null;
-              const resolved = teamDataStore.resolveAthleteSeasonWindow(selectedSeason, override);
-              const start = String(resolved?.start_date ?? "").trim();
-              const end = String(resolved?.end_date ?? "").trim();
-              if (!start || !end) return true;
-              return dateISO >= start && dateISO <= end;
-            });
+            .filter(Boolean);
 
           const nextSelectedAthletes = sharedHasActiveFilters ? sharedDefaultAthleteIds : cleaned;
           const defaultsForDate = resolveDefaultSessionSlotAndTimeForDate(dateISO, savedPracticeDefaults, "AM", "");
@@ -942,23 +937,6 @@ export default function PlannerScreen() {
   }, [store.sharedSelectedSeasonId, store.teamSeasons]);
 
   const sharedDefaultAthleteIdsForDate = useMemo(() => {
-    const activeRosterIds = rosterSorted
-      .filter((athlete) => isAthleteEligibleOnDate(athlete, dateISO))
-      .map((athlete) => String(athlete.id ?? "").trim())
-      .filter(Boolean);
-    const candidateGroupIds = new Set<string>();
-    if (sharedGroupIds.length > 0) {
-      const selectedGroupSet = new Set(sharedGroupIds);
-      (Array.isArray(store.trainingGroupMemberships) ? store.trainingGroupMemberships : []).forEach((membership) => {
-        if (!isActiveTrainingGroupMembership(membership)) return;
-        const groupId = String(membership?.group_id ?? "").trim();
-        const athleteId = String(membership?.athlete_profile_id ?? "").trim();
-        if (!groupId || !athleteId) return;
-        if (!selectedGroupSet.has(groupId)) return;
-        candidateGroupIds.add(athleteId);
-      });
-    }
-
     const overrideLookup = new Map<string, (typeof store.athleteSeasonOverrides)[number]>();
     (Array.isArray(store.athleteSeasonOverrides) ? store.athleteSeasonOverrides : []).forEach((override) => {
       const seasonId = String(override?.season_id ?? "").trim();
@@ -967,26 +945,22 @@ export default function PlannerScreen() {
       overrideLookup.set(`${seasonId}:${athleteId}`, override);
     });
 
-    return activeRosterIds.filter((athleteId) => {
-      if (sharedGroupIds.length > 0 && !candidateGroupIds.has(athleteId)) return false;
-      if (!sharedSeason) return true;
-      if (
-        isAthleteExcludedFromSeason(
-          athleteId,
-          String(sharedSeason.id ?? "").trim(),
-          store.athleteSeasonOverrides
-        )
-      ) {
-        return false;
-      }
-      const override =
-        overrideLookup.get(`${String(sharedSeason.id ?? "").trim()}:${athleteId}`) ?? null;
-      const resolved = teamDataStore.resolveAthleteSeasonWindow(sharedSeason, override);
-      const start = String(resolved?.start_date ?? "").trim();
-      const end = String(resolved?.end_date ?? "").trim();
-      if (!start || !end) return true;
-      return dateISO >= start && dateISO <= end;
-    });
+    return rosterSorted
+      .filter((athlete) =>
+        isAthleteEligibleForPlanningDate({
+          athlete,
+          dateISO,
+          selectedSeason: sharedSeason,
+          athleteSeasonOverride:
+            overrideLookup.get(`${String(sharedSeason?.id ?? "").trim()}:${String(athlete?.id ?? "").trim()}`) ?? null,
+          selectedTrainingGroupIds: sharedGroupIds,
+          trainingGroupMemberships: store.trainingGroupMemberships,
+          isAthleteExcludedFromSeason: (athleteId, seasonId) =>
+            isAthleteExcludedFromSeason(athleteId, seasonId, store.athleteSeasonOverrides),
+        })
+      )
+      .map((athlete) => String(athlete.id ?? "").trim())
+      .filter(Boolean);
   }, [
     dateISO,
     rosterSorted,
@@ -999,14 +973,10 @@ export default function PlannerScreen() {
   const hasSharedGroupSeasonContext = sharedGroupIds.length > 0 || !!sharedSeason;
 
   const rosterForPicker = useMemo(() => {
-    return searchRoster(rosterSorted, athleteSearch);
-  }, [athleteSearch, rosterSorted]);
-
-  useEffect(() => {
-    console.log("[planner] rendered roster length", roster.length);
-    console.log("[planner] rendered rosterForPicker length", rosterForPicker.length);
-    console.log("[planner] rendered categories length", categories.length);
-  }, [roster, rosterForPicker, categories]);
+    const eligibleIds = new Set(sharedDefaultAthleteIdsForDate);
+    const eligibleRoster = rosterSorted.filter((athlete) => eligibleIds.has(String(athlete.id ?? "").trim()));
+    return searchRoster(eligibleRoster, athleteSearch);
+  }, [athleteSearch, rosterSorted, sharedDefaultAthleteIdsForDate]);
 
   const categoriesForPicker = useMemo(() => {
     const q = String(categorySearch ?? "").trim().toLowerCase();
@@ -1633,6 +1603,24 @@ export default function PlannerScreen() {
         paddingTop: 14,
         paddingBottom: 20,
       } as const);
+
+  if (readOnlyTraining) {
+    return (
+      <Screen padded={false} style={{ flex: 1 }}>
+        <View style={{ padding: 18, gap: 10 }}>
+          <AppText variant="title">Create Session</AppText>
+          <View style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 12, backgroundColor: "#f8fafc", padding: 14 }}>
+            <Text style={{ fontSize: 14, fontWeight: "900", color: "#334155" }}>
+              Viewer access: editing is disabled.
+            </Text>
+            <Text style={{ marginTop: 4, fontSize: 12, fontWeight: "700", color: "#64748b" }}>
+              Session creation is available to Owners and Editors.
+            </Text>
+          </View>
+        </View>
+      </Screen>
+    );
+  }
 
   return (
     <Screen padded={false} style={{ flex: 1 }}>
@@ -2630,7 +2618,7 @@ export default function PlannerScreen() {
                     />
                     <Pressable
                       onPress={async () => {
-                        const next = rosterSorted.map((a) => a.id);
+                        const next = sharedDefaultAthleteIdsForDate;
                         setSelectedAthleteIds(next);
                         await saveJSON(KEY_PLANNER_SELECTED_ATHLETES, next);
                       }}
@@ -2707,7 +2695,9 @@ export default function PlannerScreen() {
 
                       {rosterForPicker.length === 0 ? (
                         <Text style={{ padding: 10, color: "#64748b", fontWeight: "700", fontSize: 12 }}>
-                          No athletes found.
+                          {hasSharedGroupSeasonContext
+                            ? "No active athletes match the selected group/season for this date."
+                            : "No athletes found."}
                         </Text>
                       ) : null}
                     </ScrollView>

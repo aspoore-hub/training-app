@@ -1,10 +1,24 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { View, Text, TextInput, Pressable, Alert, Platform } from "react-native";
 import { useRouter } from "expo-router";
 import { supabase } from "../../lib/supabase";
 import { bootstrapSyncOnce } from "../../lib/bootstrapSync";
-import { ensureProfile, getMyProfileFull, setMyRole, type UserRole } from "../../lib/profile";
-import { ensureCoachTeam } from "../../lib/team";
+import { AccountContextLoadError, resolveStartupAccountContext, routeForAccountContext } from "../../lib/accountContexts";
+
+const DEBUG_LOGIN_ROUTING = false;
+
+function debugLoginRouting(...args: unknown[]) {
+  if (DEBUG_LOGIN_ROUTING) console.log("[login-routing]", ...args);
+}
+
+function contextErrorMessage(error: unknown) {
+  const base = "Signed in, but we couldn't load your team access. Please try again.";
+  if (typeof __DEV__ === "undefined" || !__DEV__) return base;
+  if (error instanceof AccountContextLoadError) {
+    return `${base}\n\nDebug: ${error.failures.map((failure) => `${failure.area}: ${failure.message}`).join("; ")}`;
+  }
+  return base;
+}
 
 export default function Login() {
   const router = useRouter();
@@ -12,10 +26,7 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-
-  // role choice shown only when needed
-  const [needsRole, setNeedsRole] = useState(false);
-  const [pendingRole, setPendingRole] = useState<UserRole>("coach");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const canSubmit = useMemo(() => email.trim().length > 3 && password.length >= 6 && !busy, [
     email,
@@ -34,50 +45,79 @@ export default function Login() {
     }
   }
 
-  async function goToRole(role: UserRole) {
-    if (role === "coach") {
-      try {
-        await ensureCoachTeam("My Team");
-      } catch (e: any) {
-        console.warn("Coach team setup failed", e);
-        Alert.alert(
-          "Team setup issue",
-          "We could not fully initialize your team yet. You can continue and try again."
-        );
-      }
-      router.replace("/(coach)/(tabs)/calendar");
-      return;
-    }
-    router.replace("/(athlete)");
-  }
-
-  async function afterAuth() {
+  async function routeAfterAuth() {
     // 1) one-time bootstrap sync (cloud/local align)
     await runBootstrapBestEffort();
 
-    // 2) ensure profile exists
-    const profile = await getMyProfileFull();
-    const role = profile?.role ?? null;
-    if (!role) {
-      setNeedsRole(true);
+    const resolution = await resolveStartupAccountContext();
+    debugLoginRouting("context resolution", {
+      status: resolution.status,
+      count: resolution.contexts.length,
+      selectedId: resolution.status === "ready" ? resolution.context.id : null,
+      selectedKind: resolution.status === "ready" ? resolution.context.kind : null,
+    });
+
+    if (resolution.status === "ready") {
+      const route = routeForAccountContext(resolution.context);
+      debugLoginRouting("router.replace", route);
+      router.replace(route);
       return;
     }
 
-    await goToRole(role);
+    debugLoginRouting("router.replace", "/(auth)/choose-account");
+    router.replace("/(auth)/choose-account");
   }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function routeExistingSession() {
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        if (!data.session || cancelled) return;
+
+        setBusy(true);
+        setErrorMessage(null);
+        debugLoginRouting("existing session", { userId: data.session.user.id });
+        await routeAfterAuth();
+      } catch (error) {
+        if (cancelled) return;
+        console.error("Signed-in account routing failed", error);
+        setErrorMessage(contextErrorMessage(error));
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    }
+
+    void routeExistingSession();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function signIn() {
     setBusy(true);
+    setErrorMessage(null);
     try {
-      const { error } = await supabase.auth.signInWithPassword({
+      const { data, error } = await supabase.auth.signInWithPassword({
         email: email.trim(),
         password,
       });
-      if (error) return Alert.alert("Sign in failed", error.message);
+      debugLoginRouting("signInWithPassword result", {
+        success: !error,
+        userId: data.user?.id ?? null,
+        session: !!data.session,
+      });
+      if (error) {
+        setErrorMessage(error.message);
+        return Alert.alert("Sign in failed", error.message);
+      }
 
-      await afterAuth();
+      await routeAfterAuth();
     } catch (e: any) {
-      Alert.alert("Error", e?.message ?? "Unknown error");
+      console.error("Signed-in account routing failed", e);
+      setErrorMessage(contextErrorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -85,6 +125,7 @@ export default function Login() {
 
   async function signUp() {
     setBusy(true);
+    setErrorMessage(null);
     try {
       const { error } = await supabase.auth.signUp({
         email: email.trim(),
@@ -105,76 +146,6 @@ export default function Login() {
     } finally {
       setBusy(false);
     }
-  }
-
-  async function saveRoleAndContinue() {
-    setBusy(true);
-    try {
-      // Create/update profile role
-      await setMyRole(pendingRole);
-
-      // If profile was missing, create it now
-      await ensureProfile(pendingRole);
-
-      await goToRole(pendingRole);
-    } catch (e: any) {
-      Alert.alert("Error", e?.message ?? "Unknown error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // If we need role selection, show that screen
-  if (needsRole) {
-    return (
-      <View style={{ flex: 1, justifyContent: "center", padding: 24, gap: 12 }}>
-        <Text style={{ fontSize: 26, fontWeight: "600" }}>Choose your role</Text>
-        <Text style={{ fontSize: 16, opacity: 0.7 }}>
-          You can change this later. It just decides which screens you see.
-        </Text>
-
-        <Pressable
-          onPress={() => setPendingRole("coach")}
-          style={{
-            backgroundColor: pendingRole === "coach" ? "black" : "#444",
-            padding: 14,
-            borderRadius: 12,
-            alignItems: "center",
-          }}
-        >
-          <Text style={{ color: "white", fontSize: 16, fontWeight: "600" }}>Coach</Text>
-        </Pressable>
-
-        <Pressable
-          onPress={() => setPendingRole("athlete")}
-          style={{
-            backgroundColor: pendingRole === "athlete" ? "black" : "#444",
-            padding: 14,
-            borderRadius: 12,
-            alignItems: "center",
-          }}
-        >
-          <Text style={{ color: "white", fontSize: 16, fontWeight: "600" }}>Athlete</Text>
-        </Pressable>
-
-        <Pressable
-          onPress={saveRoleAndContinue}
-          disabled={busy}
-          style={{
-            backgroundColor: "#0a7",
-            padding: 14,
-            borderRadius: 12,
-            alignItems: "center",
-            marginTop: 8,
-            opacity: busy ? 0.7 : 1,
-          }}
-        >
-          <Text style={{ color: "white", fontSize: 16, fontWeight: "600" }}>
-            {busy ? "Saving..." : "Continue"}
-          </Text>
-        </Pressable>
-      </View>
-    );
   }
 
   // Normal login UI
@@ -218,6 +189,22 @@ export default function Login() {
           {busy ? "Signing in..." : "Sign In"}
         </Text>
       </Pressable>
+
+      {errorMessage ? (
+        <View
+          style={{
+            borderWidth: 1,
+            borderColor: "#fecaca",
+            backgroundColor: "#fef2f2",
+            borderRadius: 12,
+            padding: 12,
+          }}
+        >
+          <Text selectable style={{ color: "#991b1b", fontWeight: "700", lineHeight: 20 }}>
+            {errorMessage}
+          </Text>
+        </View>
+      ) : null}
 
       <Pressable
         onPress={signUp}

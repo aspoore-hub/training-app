@@ -20,12 +20,12 @@ import {
   deleteTeamWorkout,
   deleteWorkoutBatch,
   listTeamWorkoutsInRange,
+  setWorkoutVisibilityByDateRange,
   updateTeamWorkoutById,
   updateTeamWorkoutsByBatchId,
   type TeamWorkoutRow,
 } from "../../../lib/teamWorkoutsCloud";
 import {
-  listTeamWorkoutBatchHeadersForDate,
   listTeamWorkoutBatchHeadersInRange,
   saveTeamWorkoutBatchHeaderNotes,
 } from "../../../lib/teamWorkoutBatchHeadersCloud";
@@ -41,13 +41,17 @@ import {
   compareAthleteDisplayNamesByLastName,
   getRosterMapById,
   loadTeamRoster,
+  resolveAthleteSeasonWindowWithTenure,
   resolveAthleteDisplayName,
 } from "../../../lib/teamRoster";
 import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
 import { loadJSON, saveJSON } from "../../../lib/storage";
 import { normalizeWorkoutTimeInput } from "../../../lib/time";
+import { formatMileageForSheet, getWeekIndex, getWeekStartISO } from "../../../lib/mileagePlan";
 import { getWeekLabelTone, getWeekLabelToneText } from "../../../lib/weekLabelStyle";
-import { isActiveTrainingGroupMembership, teamDataStore } from "../../../lib/teamDataStore";
+import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../../lib/teamDataStore";
+import { setMileageVisibilityByDateRange } from "../../../lib/mileageCloud";
+import { canEditTraining, canExport, canPublishTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
 
 const SCREEN_W = Dimensions.get("window").width;
 const COACH_CALENDAR_VIEW_PREFS_KEY = "coach_calendar_view_prefs_v1";
@@ -55,6 +59,11 @@ const COACH_CALENDAR_WORKOUTS_CACHE_KEY = "coach_calendar_workouts_cache_v1";
 const COACH_CALENDAR_ATHLETE_FILTER_KEY = "coach_calendar_selected_athlete_filter_v1";
 const COACH_TRAINING_PLAN_EXPORT_RANGE_KEY = "coach_training_plan_export_range_v1";
 const MAX_TRAINING_PLAN_EXPORT_RANGE_DAYS = 112;
+const DEBUG_CALENDAR = false;
+
+function debugCalendar(...args: unknown[]) {
+  if (DEBUG_CALENDAR) console.log(...args);
+}
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -64,6 +73,7 @@ type CoachCalendarWorkout = AthleteWorkout & {
   categoryName?: string;
   date?: string;
   createdAt?: number;
+  athleteVisible?: boolean;
 };
 
 type MonthCell = {
@@ -99,6 +109,9 @@ type WeeklyWorkoutSection = {
   athleteCount: number;
   groupCount: number;
   groups: WeeklyGroupSection[];
+  suggestedMileageText?: string;
+  suggestedMileageOnly?: boolean;
+  visibilityStatus?: WeekWorkoutVisibilityStatus;
 };
 
 type WeeklyDaySection = {
@@ -135,6 +148,11 @@ type WeeklySaveState = {
   status: "idle" | "saving" | "saved" | "error";
   message?: string;
 };
+
+type TrainingVisibilityAction = "publish" | "hide";
+type TrainingVisibilityContent = "workouts" | "mileage" | "both";
+type TrainingVisibilityRange = "week" | "custom" | "season";
+type WeekWorkoutVisibilityStatus = "empty" | "hidden" | "published" | "mixed";
 
 type ParsedWeeklyBatchKey = {
   isBatch: boolean;
@@ -533,8 +551,11 @@ function buildTrainingPlanRangeHtml(args: {
                     const title = String(workout.title ?? "").trim();
                     const batchNotes = String(workout.details ?? "").trim();
                     const showBatchNotes = batchNotes.length > 0 && batchNotes.toLowerCase() !== "no notes";
+                    const suggestedMileageText = String(workout.suggestedMileageText ?? "").trim();
                     const accentColors = normalizeWorkoutAccentColors(workout.categories, args.categories);
-                    const accentBackground = buildVerticalAccentBackground(accentColors);
+                    const accentBackground = workout.suggestedMileageOnly
+                      ? "#0f766e"
+                      : buildVerticalAccentBackground(accentColors);
                     const dotsHtml = (Array.isArray(workout.categories) ? workout.categories : [])
                       .map((cat) => {
                         const color = categoryColorByName(args.categories, cat);
@@ -571,6 +592,7 @@ function buildTrainingPlanRangeHtml(args: {
                           </div>
                           ${dotsHtml ? `<div class="workout-categories-row">${dotsHtml}</div>` : ""}
                           ${title ? `<div class="workout-title">${escapePdfHtml(title)}</div>` : ""}
+                          ${suggestedMileageText ? `<div class="workout-mileage">Mileage: ${escapePdfHtml(suggestedMileageText)}</div>` : ""}
                           ${showBatchNotes ? `<div class="workout-batch-notes">${escapePdfHtml(batchNotes)}</div>` : ""}
                           ${groups}
                         </div>
@@ -636,6 +658,7 @@ function buildTrainingPlanRangeHtml(args: {
       .workout-dot { width: 6px; height: 6px; border-radius: 999px; display: inline-block; border: 0.5px solid rgba(0,0,0,0.18); }
       .workout-category-label { font-size: 7px; font-weight: 700; color: #334155; line-height: 1.15; }
       .workout-title { font-size: 8px; font-weight: 700; line-height: 1.2; margin: 0 0 2px 0; white-space: normal; word-break: break-word; }
+      .workout-mileage { font-size: 7.5px; font-weight: 800; line-height: 1.2; margin: 0 0 2px 0; color: #0f766e; white-space: normal; word-break: break-word; }
       .workout-batch-notes { font-size: 7.5px; line-height: 1.2; margin: 0 0 2px 0; color: #334155; white-space: normal; word-break: break-word; }
       .group-details { font-size: 7.5px; line-height: 1.2; margin: 0 0 1px 0; white-space: normal; word-break: break-word; }
       .group-athletes { font-size: 7px; font-style: italic; color: #4b5563; line-height: 1.2; margin: 0 0 2px 0; white-space: normal; word-break: break-word; }
@@ -863,6 +886,72 @@ function applyHeaderNotesToWeeklySections(
   }));
 }
 
+function trainingPlanMileageSessionKey(dateISO: string, session: string): string {
+  return `${String(dateISO ?? "").trim()}::${normalizeSession(session)}`;
+}
+
+function buildTrainingPlanMileageOnlySection(
+  dateISO: string,
+  session: "AM" | "PM",
+  mileageText: string
+): WeeklyWorkoutSection {
+  return {
+    key: `mileage:${dateISO}:${session}`,
+    saveKey: `mileage:${dateISO}:${session}`,
+    dateISO,
+    title: "Suggested Mileage",
+    session,
+    categories: [],
+    preRoutineIds: [],
+    postRoutineIds: [],
+    categoryColor: "#0f766e",
+    athleteCount: 1,
+    groupCount: 0,
+    groups: [],
+    suggestedMileageText: mileageText,
+    suggestedMileageOnly: true,
+  };
+}
+
+function applySuggestedMileageToTrainingPlanWeeks(
+  weeks: TrainingPlanWeekSection[],
+  suggestedMileageByDateSession: Map<string, string>
+): TrainingPlanWeekSection[] {
+  if (suggestedMileageByDateSession.size === 0) return weeks;
+
+  return weeks.map((week) => ({
+    ...week,
+    days: week.days.map((day) => {
+      const mileageRenderedBySession = new Set<string>();
+      const workoutsWithMileage = day.workouts.map((workout) => {
+        const session = normalizeSession(workout.session);
+        const mileageText = suggestedMileageByDateSession.get(trainingPlanMileageSessionKey(day.dateISO, session));
+        if (!mileageText || mileageRenderedBySession.has(session)) return workout;
+        mileageRenderedBySession.add(session);
+        return {
+          ...workout,
+          suggestedMileageText: mileageText,
+        };
+      });
+
+      const mileageOnlyWorkouts: WeeklyWorkoutSection[] = (["AM", "PM"] as const)
+        .map((session) => {
+          if (mileageRenderedBySession.has(session)) return null;
+          const mileageText = suggestedMileageByDateSession.get(trainingPlanMileageSessionKey(day.dateISO, session));
+          if (!mileageText) return null;
+          mileageRenderedBySession.add(session);
+          return buildTrainingPlanMileageOnlySection(day.dateISO, session, mileageText);
+        })
+        .filter((value): value is WeeklyWorkoutSection => !!value);
+
+      return {
+        ...day,
+        workouts: sortWeeklyDayWorkoutsForDisplay([...workoutsWithMileage, ...mileageOnlyWorkouts]),
+      };
+    }),
+  }));
+}
+
 function summarizeWeeklySectionDetails(days: WeeklyDaySection[]) {
   return (Array.isArray(days) ? days : []).flatMap((day) =>
     (Array.isArray(day.workouts) ? day.workouts : []).map((workout) => {
@@ -1073,6 +1162,14 @@ function sortWeeklyDayWorkoutsForDisplay(workouts: WeeklyWorkoutSection[]): Week
   return [...workouts].sort(compareWeeklyWorkoutSections);
 }
 
+function getWeekWorkoutVisibilityStatus(workouts: CoachCalendarWorkout[]): WeekWorkoutVisibilityStatus {
+  if (workouts.length === 0) return "empty";
+  const visibleCount = workouts.filter((workout) => workout.athleteVisible !== false).length;
+  if (visibleCount === 0) return "hidden";
+  if (visibleCount === workouts.length) return "published";
+  return "mixed";
+}
+
 function athleteLastNamePreview(workout: WeeklyWorkoutSection): string {
   const lastNames = new Set<string>();
   workout.groups.forEach((group) => {
@@ -1281,6 +1378,7 @@ function toLegacyWorkout(row: TeamWorkoutRow): CoachCalendarWorkout {
     preRoutineIds: row.pre_routine_ids ?? undefined,
     postRoutineIds: row.post_routine_ids ?? undefined,
     createdAt: row.created_at ? new Date(row.created_at).getTime() : undefined,
+    athleteVisible: row.athlete_visible !== false,
   };
 }
 
@@ -1288,7 +1386,7 @@ export default function CoachCalendarMonth() {
   const teamStore = teamDataStore.use();
   const router = useRouter();
   const { height: windowHeight } = useWindowDimensions();
-  const { saved } = useLocalSearchParams<{ saved?: string | string[] }>();
+  const { saved, view } = useLocalSearchParams<{ saved?: string | string[]; view?: string | string[] }>();
 
   const [calendarMode, setCalendarMode] = useState<"month" | "week">("month");
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
@@ -1317,6 +1415,15 @@ export default function CoachCalendarMonth() {
   const [copySourceDateInput, setCopySourceDateInput] = useState(() => toISODate(addDays(startOfWeek(new Date(), 1), -7)));
   const [copyWeekError, setCopyWeekError] = useState<string | null>(null);
   const [clearingWeek, setClearingWeek] = useState(false);
+  const [weekVisibilityBusy, setWeekVisibilityBusy] = useState(false);
+  const [trainingVisibilityOpen, setTrainingVisibilityOpen] = useState(false);
+  const [trainingVisibilityAction, setTrainingVisibilityAction] = useState<TrainingVisibilityAction>("publish");
+  const [trainingVisibilityContent, setTrainingVisibilityContent] = useState<TrainingVisibilityContent>("workouts");
+  const [trainingVisibilityRange, setTrainingVisibilityRange] = useState<TrainingVisibilityRange>("week");
+  const [trainingVisibilityStartISO, setTrainingVisibilityStartISO] = useState(() => toISODate(startOfWeek(new Date(), 1)));
+  const [trainingVisibilityEndISO, setTrainingVisibilityEndISO] = useState(() => toISODate(addDays(startOfWeek(new Date(), 1), 6)));
+  const [trainingVisibilityApplying, setTrainingVisibilityApplying] = useState(false);
+  const [trainingVisibilityError, setTrainingVisibilityError] = useState<string | null>(null);
   const [jumpToWeekOpen, setJumpToWeekOpen] = useState(false);
   const [jumpDateInput, setJumpDateInput] = useState(() => toISODate(new Date()));
   const [weekLabelsByStart, setWeekLabelsByStart] = useState<Record<string, string>>({});
@@ -1330,6 +1437,7 @@ export default function CoachCalendarMonth() {
   const [weeklyBatchDirtyFields, setWeeklyBatchDirtyFields] = useState<
     Record<string, Partial<Record<WeeklyBatchEditableField, boolean>>>
   >({});
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
 
   const weeklyBatchDraftsRef = useRef<Record<string, WeeklyBatchDraft>>({});
   const weeklyBatchDirtyFieldsRef = useRef<Record<string, Partial<Record<WeeklyBatchEditableField, boolean>>>>({});
@@ -1346,9 +1454,27 @@ export default function CoachCalendarMonth() {
   const inFlightCalendarFetchKeyRef = useRef<string | null>(null);
 
   const isWebDesktop = Platform.OS === "web";
+  const canEditCalendarTraining = canEditTraining(currentTeamRole);
+  const canPublishCalendarTraining = canPublishTraining(currentTeamRole);
+  const canExportCalendar = canExport(currentTeamRole);
   const todayISO = useMemo(() => toISODate(new Date()), []);
   const selectedTrainingGroupIds = teamStore.sharedSelectedTrainingGroupIds;
   const selectedSeasonId = teamStore.sharedSelectedSeasonId;
+
+  useEffect(() => {
+    let active = true;
+    getCurrentTeamRole()
+      .then((role) => {
+        if (active) setCurrentTeamRole(role);
+      })
+      .catch((error) => {
+        console.warn("[coach-calendar] role load failed", error);
+        if (active) setCurrentTeamRole(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -1360,7 +1486,9 @@ export default function CoachCalendarMonth() {
           weekStartISO?: string;
         }>(COACH_CALENDAR_VIEW_PREFS_KEY, {});
         if (!active) return;
-        const mode = prefs?.mode === "week" ? "week" : prefs?.mode === "month" ? "month" : null;
+        const requestedView = Array.isArray(view) ? view[0] : view;
+        const forceMonthlyView = requestedView === "monthly" || requestedView === "month";
+        const mode = forceMonthlyView ? "month" : prefs?.mode === "week" ? "week" : prefs?.mode === "month" ? "month" : null;
         if (mode) setCalendarMode(mode);
         if (typeof prefs?.monthISO === "string" && /^\d{4}-\d{2}-\d{2}$/.test(prefs.monthISO)) {
           setAnchorMonth(monthStart(new Date(`${prefs.monthISO}T00:00:00`)));
@@ -1377,7 +1505,7 @@ export default function CoachCalendarMonth() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [view]);
 
   useEffect(() => {
     let active = true;
@@ -1444,7 +1572,7 @@ export default function CoachCalendarMonth() {
   const loadCalendarWeekStartSetting = useCallback(async () => {
     const weekStartResult = await loadWeekStartSetting();
     const normalized: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
-    console.log("[coach-calendar] week start loaded via shared helper", {
+    debugCalendar("[coach-calendar] week start loaded via shared helper", {
       raw: weekStartResult.raw,
       normalized,
     });
@@ -1499,7 +1627,7 @@ export default function CoachCalendarMonth() {
       );
 
       const workoutRows = await workoutsPromise;
-      console.log("[coach-calendar] workouts fetch", {
+      debugCalendar("[coach-calendar] workouts fetch", {
         start: fetchStartISO,
         end: fetchEndISO,
         count: workoutRows?.length ?? 0,
@@ -1771,6 +1899,241 @@ export default function CoachCalendarMonth() {
   }, [anchorWeekStart]);
   const weekDateISOs = useMemo(() => weekDates.map((d) => toISODate(d)), [weekDates]);
   const currentWeekStartISO = weekDateISOs[0] ?? toISODate(anchorWeekStart);
+  const currentWeekEndISO = weekDateISOs[6] ?? currentWeekStartISO;
+  const displayedWeekWorkouts = useMemo(
+    () => filteredWorkouts.filter((workout) => {
+      const dateISO = getWorkoutDateISO(workout);
+      return dateISO >= currentWeekStartISO && dateISO <= currentWeekEndISO;
+    }),
+    [currentWeekEndISO, currentWeekStartISO, filteredWorkouts]
+  );
+  const calendarWeekVisibilityStatus = useMemo(
+    () => getWeekWorkoutVisibilityStatus(displayedWeekWorkouts),
+    [displayedWeekWorkouts]
+  );
+  const calendarWeekVisibilityLabel = useMemo(() => {
+    switch (calendarWeekVisibilityStatus) {
+      case "empty":
+        return "No workouts";
+      case "hidden":
+        return "Hidden from athletes";
+      case "mixed":
+        return "Mixed visibility";
+      case "published":
+      default:
+        return "Published";
+    }
+  }, [calendarWeekVisibilityStatus]);
+  const setCalendarWeekVisibility = useCallback(async (visible: boolean) => {
+    setWeekVisibilityBusy(true);
+    try {
+      const athleteIds = Array.from(new Set(displayedWeekWorkouts.map((workout) => String(workout.athleteId ?? "").trim()).filter(Boolean)));
+      await setWorkoutVisibilityByDateRange({
+        startISO: currentWeekStartISO,
+        endISO: currentWeekEndISO,
+        athleteIds,
+        visible,
+      });
+      await loadCalendarData({ force: true });
+    } catch (error: any) {
+      Alert.alert("Visibility update failed", String(error?.message ?? error ?? "Could not update workout visibility."));
+    } finally {
+      setWeekVisibilityBusy(false);
+    }
+  }, [currentWeekEndISO, currentWeekStartISO, displayedWeekWorkouts, loadCalendarData]);
+
+  const calendarBulkAthleteIds = useMemo(() => {
+    const activeRoster = (teamStore.roster ?? []).filter((athlete) => {
+      const status = String(athlete?.roster_status ?? "active").trim().toLowerCase();
+      return !status || status === "active";
+    });
+    const selectedSet = new Set(selectedAthleteIds.map((id) => String(id ?? "").trim()).filter(Boolean));
+    return activeRoster
+      .filter((athlete) => {
+        const athleteId = String(athlete?.id ?? "").trim();
+        if (!athleteId) return false;
+        if (selectedSet.size > 0 && !selectedSet.has(athleteId)) return false;
+        if (selectedTrainingGroupIds.length > 0 && !selectedTrainingGroupAthleteIds.has(athleteId)) return false;
+        return true;
+      })
+      .map((athlete) => String(athlete.id ?? "").trim())
+      .filter(Boolean);
+  }, [selectedAthleteIds, selectedTrainingGroupAthleteIds, selectedTrainingGroupIds.length, teamStore.roster]);
+
+  const openTrainingVisibilityModal = useCallback((content: TrainingVisibilityContent = "workouts") => {
+    setTrainingVisibilityContent(content);
+    setTrainingVisibilityRange("week");
+    setTrainingVisibilityStartISO(currentWeekStartISO);
+    setTrainingVisibilityEndISO(currentWeekEndISO);
+    setTrainingVisibilityError(null);
+    setTrainingVisibilityOpen(true);
+  }, [currentWeekEndISO, currentWeekStartISO]);
+
+  const applyTrainingVisibilityNow = useCallback(async () => {
+    const visible = trainingVisibilityAction === "publish";
+    const includeWorkouts = trainingVisibilityContent === "workouts" || trainingVisibilityContent === "both";
+    const includeMileage = trainingVisibilityContent === "mileage" || trainingVisibilityContent === "both";
+    const weekStartsOnForMileage = weekStartsOn === 0 ? 0 : 1;
+    const athleteIds = calendarBulkAthleteIds;
+    setTrainingVisibilityError(null);
+
+    const showValidation = (title: string, message: string) => {
+      setTrainingVisibilityError(message);
+      Alert.alert(title, message);
+    };
+
+    if (!includeWorkouts && !includeMileage) {
+      showValidation("Choose training", "Select workouts, mileage, or both.");
+      return;
+    }
+    if (athleteIds.length === 0) {
+      showValidation("No athletes", "There are no athletes in the current visibility scope.");
+      return;
+    }
+
+    const customStart = String(trainingVisibilityStartISO ?? "").trim();
+    const customEnd = String(trainingVisibilityEndISO ?? "").trim();
+    if (trainingVisibilityRange === "custom" && (!isValidISODate(customStart) || !isValidISODate(customEnd) || customStart > customEnd)) {
+      showValidation("Invalid range", "Enter a valid start and end date.");
+      return;
+    }
+    if (trainingVisibilityRange === "season" && !selectedSeason) {
+      showValidation("No season selected", "Select a season before applying visibility.");
+      return;
+    }
+
+    const seasonWindows: Array<{ athleteId: string; startISO: string; endISO: string }> = [];
+    let targetAthleteCount = athleteIds.length;
+    if (trainingVisibilityRange === "season" && selectedSeason) {
+      const seasonId = String(selectedSeason.id ?? "").trim();
+      if (!seasonId) {
+        showValidation("No season selected", "Select a season before applying visibility.");
+        return;
+      }
+      const rosterById = new Map((teamStore.roster ?? []).map((athlete) => [String(athlete?.id ?? "").trim(), athlete]));
+      for (const athleteId of athleteIds) {
+        if (isAthleteExcludedFromSeason(athleteId, seasonId, teamStore.athleteSeasonOverrides ?? [])) continue;
+        const athlete = rosterById.get(athleteId) ?? null;
+        const override = athleteSeasonOverridesBySeasonAndAthlete.get(`${seasonId}:${athleteId}`) ?? null;
+        const resolved = resolveAthleteSeasonWindowWithTenure(athlete as any, selectedSeason as any, override as any);
+        const startISO = String(resolved.start_date ?? "").trim();
+        const endISO = String(resolved.end_date ?? "").trim();
+        if (!isValidISODate(startISO) || !isValidISODate(endISO) || startISO > endISO) continue;
+        seasonWindows.push({ athleteId, startISO, endISO });
+      }
+      targetAthleteCount = seasonWindows.length;
+      if (seasonWindows.length === 0) {
+        showValidation("No eligible athletes", "No eligible athletes found for this season.");
+        return;
+      }
+    }
+
+    const run = async () => {
+      setTrainingVisibilityApplying(true);
+      try {
+        let workoutRows = 0;
+        let mileageRows = 0;
+        if (trainingVisibilityRange === "season" && selectedSeason) {
+          for (const { athleteId, startISO, endISO } of seasonWindows) {
+            if (includeWorkouts) {
+              workoutRows += await setWorkoutVisibilityByDateRange({ startISO, endISO, athleteIds: [athleteId], visible });
+            }
+            if (includeMileage) {
+              const result = await setMileageVisibilityByDateRange({
+                athleteIds: [athleteId],
+                startISO,
+                endISO,
+                visible,
+                weekStartsOn: weekStartsOnForMileage,
+              });
+              mileageRows += result.rowCount;
+            }
+          }
+        } else {
+          const startISO = trainingVisibilityRange === "week" ? currentWeekStartISO : customStart;
+          const endISO = trainingVisibilityRange === "week" ? currentWeekEndISO : customEnd;
+          if (includeWorkouts) {
+            workoutRows = await setWorkoutVisibilityByDateRange({ startISO, endISO, athleteIds, visible });
+          }
+          if (includeMileage) {
+            const result = await setMileageVisibilityByDateRange({
+              athleteIds,
+              startISO,
+              endISO,
+              visible,
+              weekStartsOn: weekStartsOnForMileage,
+            });
+            mileageRows = result.rowCount;
+          }
+        }
+
+        if ((includeWorkouts ? workoutRows : 0) === 0 && (includeMileage ? mileageRows : 0) === 0) {
+          const message =
+            trainingVisibilityRange === "season"
+              ? "No matching workouts or mileage weeks were found for this season."
+              : "No matching workouts or mileage weeks were found for this range.";
+          setTrainingVisibilityError(message);
+          Alert.alert("Nothing found", message);
+          return;
+        }
+
+        await loadCalendarData({ force: true });
+        setTrainingVisibilityOpen(false);
+        const verb = visible ? "Published" : "Hid";
+        const updatedParts = [
+          includeWorkouts ? `${workoutRows} workout${workoutRows === 1 ? "" : "s"}` : "",
+          includeMileage ? `${mileageRows} mileage week row${mileageRows === 1 ? "" : "s"}` : "",
+        ].filter(Boolean);
+        Alert.alert(
+          "Visibility updated",
+          `${verb} ${includeWorkouts ? "workouts" : ""}${includeWorkouts && includeMileage ? " and " : ""}${includeMileage ? "mileage" : ""} for ${targetAthleteCount} athlete${targetAthleteCount === 1 ? "" : "s"}. Updated ${updatedParts.join(" and ")}.`
+        );
+      } catch (error: any) {
+        const message = String(error?.message ?? error ?? "Could not update training visibility.");
+        console.error("[coach-calendar] training visibility apply failed", {
+          rangeMode: trainingVisibilityRange,
+          content: trainingVisibilityContent,
+          action: trainingVisibilityAction,
+          selectedSeasonId: selectedSeason ? String(selectedSeason.id ?? "") : null,
+          athleteCount: athleteIds.length,
+          error,
+        });
+        setTrainingVisibilityError(message);
+        Alert.alert("Visibility update failed", message);
+      } finally {
+        setTrainingVisibilityApplying(false);
+      }
+    };
+
+    const actionText = visible ? "Publish training to athletes?" : "Hide training from athletes?";
+    const body = visible
+      ? "Athletes will be able to see this training and submit feedback."
+      : "Coaches will still see this training. Hidden training will not appear on athlete Dashboard, Calendar, or Log.";
+    const confirmMessage = `${body}\n\nMileage visibility is week-based. Any week touched by this range will be affected.`;
+    if (Platform.OS === "web" && typeof window !== "undefined" && typeof window.confirm === "function") {
+      if (window.confirm(`${actionText}\n\n${confirmMessage}`)) void run();
+      return;
+    }
+    Alert.alert(actionText, confirmMessage, [
+      { text: "Cancel", style: "cancel" },
+      { text: visible ? "Publish" : "Hide", style: visible ? "default" : "destructive", onPress: () => void run() },
+    ]);
+  }, [
+    athleteSeasonOverridesBySeasonAndAthlete,
+    calendarBulkAthleteIds,
+    currentWeekEndISO,
+    currentWeekStartISO,
+    loadCalendarData,
+    selectedSeason,
+    teamStore.athleteSeasonOverrides,
+    teamStore.roster,
+    trainingVisibilityAction,
+    trainingVisibilityContent,
+    trainingVisibilityEndISO,
+    trainingVisibilityRange,
+    trainingVisibilityStartISO,
+    weekStartsOn,
+  ]);
   const copyTargetWeekLabel = useMemo(() => formatWeekRangeFromStartISO(currentWeekStartISO), [currentWeekStartISO]);
   const copySourceWeekStartISO = useMemo(() => {
     const raw = String(copySourceDateInput ?? "").trim();
@@ -1786,15 +2149,15 @@ export default function CoachCalendarMonth() {
     let active = true;
     (async () => {
       try {
-        const rowsByDate = await Promise.all(
-          weekDateISOs.map((dateISO) =>
-            listTeamWorkoutBatchHeadersForDate(dateISO).catch(() => [])
-          )
-        );
+        const startISO = weekDateISOs[0] ?? "";
+        const endISO = weekDateISOs[6] ?? startISO;
+        const rowsByDate = startISO
+          ? await listTeamWorkoutBatchHeadersInRange(startISO, endISO).catch(() => [])
+          : [];
         if (!active) return;
         const next: Record<string, string> = {};
         const nextBase: Record<string, string> = {};
-        rowsByDate.flat().forEach((row) => {
+        rowsByDate.forEach((row) => {
           const batchId = String(row.batch_id ?? "").trim();
           if (!batchId) return;
           const key = toWorkoutBatchHeaderNotesKey(row.date_iso, batchId, row.session);
@@ -2130,6 +2493,7 @@ export default function CoachCalendarMonth() {
             athleteCount: athleteIds.size || (rows.length > 0 ? 1 : 0),
             groupCount: groupIds.size || 1,
             groups,
+            visibilityStatus: getWeekWorkoutVisibilityStatus(rows),
           };
         })
         .sort(compareWeeklyWorkoutSections);
@@ -2327,6 +2691,146 @@ export default function CoachCalendarMonth() {
     Alert.alert(String(routine.title ?? "Routine"), String(routine.details ?? "").trim() || "No details");
   }, [auxiliaryRoutineById]);
 
+  const renderWeeklyExpandedWorkout = useCallback((workout: WeeklyWorkoutSection) => {
+    const batchDetails = normalizeDetailsText(workout.details);
+    const showBatchDetails = !!batchDetails && batchDetails.toLowerCase() !== "no notes";
+    const visibilityStatus = workout.visibilityStatus ?? "published";
+    const visibilityText =
+      visibilityStatus === "hidden"
+        ? "Hidden"
+        : visibilityStatus === "mixed"
+          ? "Mixed"
+          : visibilityStatus === "published"
+            ? "Published"
+            : "";
+    const visibilityStyle =
+      visibilityStatus === "hidden"
+        ? [styles.weekWorkoutVisibilityBadge, styles.weekWorkoutVisibilityBadgeHidden]
+        : visibilityStatus === "mixed"
+          ? [styles.weekWorkoutVisibilityBadge, styles.weekWorkoutVisibilityBadgeMixed]
+          : [styles.weekWorkoutVisibilityBadge, styles.weekWorkoutVisibilityBadgePublished];
+    const visibilityTextStyle =
+      visibilityStatus === "hidden"
+        ? [styles.weekWorkoutVisibilityBadgeText, styles.weekWorkoutVisibilityBadgeTextHidden]
+        : visibilityStatus === "mixed"
+          ? [styles.weekWorkoutVisibilityBadgeText, styles.weekWorkoutVisibilityBadgeTextMixed]
+          : [styles.weekWorkoutVisibilityBadgeText, styles.weekWorkoutVisibilityBadgeTextPublished];
+
+    const renderRoutineBlock = (label: string, ids: string[], keyPrefix: string) => {
+      if (ids.length === 0) return null;
+      return (
+        <View style={styles.weekRoutineBlock}>
+          <Text style={styles.weekExpandedSectionLabel}>{label}</Text>
+          <View style={styles.weekRoutineList}>
+            {ids.map((routineId) => {
+              const routine = auxiliaryRoutineById.get(routineId);
+              if (!routine) return null;
+              return (
+                <Pressable
+                  key={`${workout.key}-${keyPrefix}-${routineId}`}
+                  onPress={() => openRoutineDetails(routineId)}
+                  style={styles.weekRoutinePill}
+                >
+                  <Text style={styles.weekRoutinePillText}>{routine.title}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      );
+    };
+
+    const hasGroupContent = workout.groups.some((group) =>
+      group.lines.some((line) => line.athleteNames.length > 0 || !!String(line.individualNotes ?? "").trim())
+    );
+    const hasAnyDetails =
+      showBatchDetails ||
+      workout.preRoutineIds.length > 0 ||
+      workout.postRoutineIds.length > 0 ||
+      hasGroupContent;
+
+    return (
+      <View style={styles.weekExpandedBody}>
+        <View style={styles.weekExpandedHeaderRow}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.weekExpandedTitle}>{workout.title}</Text>
+            <Text style={styles.weekExpandedMeta}>
+              {[workout.time || workout.session, workout.location ? `@ ${workout.location}` : ""].filter(Boolean).join(" ")}
+            </Text>
+          </View>
+          {visibilityText ? (
+            <View style={visibilityStyle}>
+              <Text style={visibilityTextStyle}>{visibilityText}</Text>
+            </View>
+          ) : null}
+        </View>
+
+        {showBatchDetails ? (
+          <View style={styles.weekExpandedSection}>
+            <Text style={styles.weekExpandedSectionLabel}>Workout details</Text>
+            <Text style={styles.weekExpandedDetailsText}>{batchDetails}</Text>
+          </View>
+        ) : null}
+
+        {renderRoutineBlock("Pre-run", workout.preRoutineIds, "pre")}
+        {renderRoutineBlock("Post-run", workout.postRoutineIds, "post")}
+
+        {workout.groups.length > 0 ? (
+          <View style={styles.weekExpandedSection}>
+            <Text style={styles.weekExpandedSectionLabel}>Groups</Text>
+            {workout.groups.map((group) => {
+              const groupAthletes = Array.from(
+                new Set(
+                  group.lines
+                    .flatMap((line) => line.athleteNames)
+                    .map((name) => String(name ?? "").trim())
+                    .filter(Boolean)
+                )
+              );
+              const noteLines = group.lines
+                .map((line) => ({
+                  athleteNames: line.athleteNames.map((name) => String(name ?? "").trim()).filter(Boolean),
+                  note: normalizeDetailsText(line.individualNotes),
+                }))
+                .filter((line) => line.athleteNames.length > 0 || !!line.note);
+              const linesWithNotes = noteLines.filter((line) => !!line.note);
+              const hasSharedNote = linesWithNotes.length === 1;
+              return (
+                <View key={group.key} style={styles.weekGroupDetailBlock}>
+                  <Text style={styles.weekGroupLabel}>{group.label}</Text>
+                  {groupAthletes.length > 0 ? (
+                    <Text style={styles.weekGroupAthletesText}>
+                      Athletes: {groupAthletes.join(", ")}
+                    </Text>
+                  ) : null}
+                  {hasSharedNote ? (
+                    <View style={styles.weekGroupNotesBlock}>
+                      <Text style={styles.weekGroupNotesLabel}>Notes</Text>
+                      <Text style={styles.weekGroupNoteText}>{linesWithNotes[0]?.note}</Text>
+                    </View>
+                  ) : linesWithNotes.length > 1 ? (
+                    <View style={styles.weekGroupNotesBlock}>
+                      {noteLines.map((line, idx) => (
+                        <Text key={`${group.key}-detail-${idx}`} style={line.note ? styles.weekGroupNoteText : styles.weekGroupNoNoteText}>
+                          {line.athleteNames.join(", ")}
+                          {line.note ? ` - ${line.note}` : ""}
+                        </Text>
+                      ))}
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
+
+        {!hasAnyDetails ? (
+          <Text style={styles.weekExpandedEmptyText}>No additional details for this workout.</Text>
+        ) : null}
+      </View>
+    );
+  }, [auxiliaryRoutineById, openRoutineDetails]);
+
   const shiftMonth = useCallback((delta: number) => {
     setAnchorMonth((prev) => addMonths(prev, delta));
   }, []);
@@ -2425,21 +2929,23 @@ export default function CoachCalendarMonth() {
 
   const handleExportWeekPdf = useCallback(async () => {
     if (calendarMode !== "week" || exportingPdf) return;
-    console.log("[weekly-pdf] export start", {
+    debugCalendar("[weekly-pdf] export start", {
       weekLabel,
       dayCount: weeklyDaySectionsForDisplay.length,
     });
-    console.log("[weekly-pdf] Print module keys", Object.keys(Print || {}));
+    debugCalendar("[weekly-pdf] Print module keys", Object.keys(Print || {}));
     setExportingPdf(true);
     try {
       const generatedAtLabel = new Date().toLocaleString();
-      const headerRowsByDate = await Promise.all(
-        weekDateISOs.map((dateISO) => listTeamWorkoutBatchHeadersForDate(dateISO).catch(() => []))
-      );
+      const exportHeaderStartISO = weekDateISOs[0] ?? "";
+      const exportHeaderEndISO = weekDateISOs[6] ?? exportHeaderStartISO;
+      const headerRowsByDate = exportHeaderStartISO
+        ? await listTeamWorkoutBatchHeadersInRange(exportHeaderStartISO, exportHeaderEndISO).catch(() => [])
+        : [];
       const exportHeaderByKey: Record<string, string> = {};
       const exportHeaderByBaseKey: Record<string, string> = {};
       const exportHeaderByBatchId: Record<string, string> = {};
-      headerRowsByDate.flat().forEach((row) => {
+      headerRowsByDate.forEach((row) => {
         const batchId = String(row.batch_id ?? "").trim();
         if (!batchId) return;
         const value = String(row.header_notes ?? "").trim();
@@ -2459,14 +2965,14 @@ export default function CoachCalendarMonth() {
         exportHeaderByBatchId
       );
       if ((weekDateISOs[0] ?? "") === "2026-11-09") {
-        console.log("[weekly-pdf][debug:2026-11-09] map-keys", {
+        debugCalendar("[weekly-pdf][debug:2026-11-09] map-keys", {
           exactCount: Object.keys(exportHeaderByKey).length,
           baseCount: Object.keys(exportHeaderByBaseKey).length,
           batchCount: Object.keys(exportHeaderByBatchId).length,
           exactKeysSample: Object.keys(exportHeaderByKey).slice(0, 30),
         });
-        console.log("[weekly-pdf][debug:2026-11-09] sections-before", summarizeWeeklySectionDetails(weeklyDaySectionsForDisplay));
-        console.log("[weekly-pdf][debug:2026-11-09] sections-after", summarizeWeeklySectionDetails(exportDays));
+        debugCalendar("[weekly-pdf][debug:2026-11-09] sections-before", summarizeWeeklySectionDetails(weeklyDaySectionsForDisplay));
+        debugCalendar("[weekly-pdf][debug:2026-11-09] sections-after", summarizeWeeklySectionDetails(exportDays));
       }
       const html = buildWeeklyHandoutHtml({
         weekLabel,
@@ -2476,19 +2982,19 @@ export default function CoachCalendarMonth() {
         days: exportDays,
         categories,
       });
-      console.log("[weekly-pdf] using handout html builder");
-      console.log("[weekly-pdf] html preview", html.slice(0, 400));
-      console.log("[weekly-pdf] html built", { length: html.length });
+      debugCalendar("[weekly-pdf] using handout html builder");
+      debugCalendar("[weekly-pdf] html preview", html.slice(0, 400));
+      debugCalendar("[weekly-pdf] html built", { length: html.length });
 
       if (Platform.OS === "web") {
         printHtmlInWebWindow(html);
-        console.log("[weekly-pdf] web print window opened");
+        debugCalendar("[weekly-pdf] web print window opened");
         Alert.alert("Export PDF", "Print dialog opened.");
       } else {
         const result = await Print.printToFileAsync({ html });
-        console.log("[weekly-pdf] print result", result);
+        debugCalendar("[weekly-pdf] print result", result);
         const canShare = await Sharing.isAvailableAsync();
-        console.log("[weekly-pdf] sharing available", canShare);
+        debugCalendar("[weekly-pdf] sharing available", canShare);
 
         if (canShare) {
           await Sharing.shareAsync(result.uri);
@@ -2497,7 +3003,7 @@ export default function CoachCalendarMonth() {
         }
       }
     } catch (e: any) {
-      console.log("[weekly-pdf] export error", e);
+      debugCalendar("[weekly-pdf] export error", e);
       Alert.alert("Export failed", String(e?.message ?? "Could not export weekly PDF."));
     } finally {
       setExportingPdf(false);
@@ -2612,12 +3118,12 @@ export default function CoachCalendarMonth() {
           return acc;
         }, {});
       const rawRows = Array.isArray(rows) ? rows : [];
-      console.log("[training-plan-pdf] fetched raw rows", {
+      debugCalendar("[training-plan-pdf] fetched raw rows", {
         count: rawRows.length,
         uniqueDates: Array.from(new Set(rawRows.map((row) => String(row.date_iso ?? "").trim()))).sort(),
         countsByDate: countRowsByDate(rawRows.map((row) => ({ dateISO: String(row.date_iso ?? "").trim() }))),
       });
-      console.log(
+      debugCalendar(
         "[training-plan-pdf] fetched raw rows detail (May 13-17)",
         rawRows
           .filter((row) => debugDateSet.has(String(row.date_iso ?? "").trim()) && String(row.date_iso ?? "").trim() >= "2026-05-13")
@@ -2636,12 +3142,12 @@ export default function CoachCalendarMonth() {
       const [startY, startM, startD] = startISO.split("-").map(Number);
       const [endY, endM, endD] = endISO.split("-").map(Number);
 
-      console.log("[training-plan-pdf] export range", {
+      debugCalendar("[training-plan-pdf] export range", {
         exportStartDateISO: startISO,
         exportEndDateISO: endISO,
         dayCountInclusive: diffISODateDays(startISO, endISO) + 1,
       });
-      console.log("[training-plan-pdf] fetched workouts", {
+      debugCalendar("[training-plan-pdf] fetched workouts", {
         count: workoutsInRange.length,
         countsByDate: countRowsByDate(
           workoutsInRange.map((workout) => ({ dateISO: String(getWorkoutDateISO(workout) ?? "").trim() }))
@@ -2699,7 +3205,7 @@ export default function CoachCalendarMonth() {
         }
         return finalPass;
       });
-      console.log("[training-plan-pdf] filtered workouts", {
+      debugCalendar("[training-plan-pdf] filtered workouts", {
         count: filteredRangeWorkouts.length,
         uniqueDates: Array.from(new Set(filteredRangeWorkouts.map((w) => getWorkoutDateISO(w)))).sort(),
         countsByDate: countRowsByDate(
@@ -2709,10 +3215,10 @@ export default function CoachCalendarMonth() {
         selectedTrainingGroupIds,
         selectedSeasonId: selectedSeason ? String(selectedSeason.id ?? "") : null,
       });
-      console.log("[training-plan-pdf] final-week filter drops", debugFilterDrops);
+      debugCalendar("[training-plan-pdf] final-week filter drops", debugFilterDrops);
       Array.from(debugDateSet.values()).forEach((dateISO) => {
         const count = filteredRangeWorkouts.filter((w) => getWorkoutDateISO(w) === dateISO).length;
-        console.log("[training-plan-pdf] date workout count", { dateISO, count });
+        debugCalendar("[training-plan-pdf] date workout count", { dateISO, count });
       });
 
       const startDate = new Date(startY, startM - 1, startD);
@@ -2723,11 +3229,50 @@ export default function CoachCalendarMonth() {
       for (let cursorISO = firstWeekStartISO; cursorISO <= lastWeekStartISO; cursorISO = shiftISODateByDays(cursorISO, 7)) {
         weekStartISOs.push(cursorISO);
       }
-      console.log("[training-plan-pdf] weeks", {
+      debugCalendar("[training-plan-pdf] weeks", {
         firstWeekStartISO,
         lastWeekStartISO,
         generatedWeekStarts: weekStartISOs,
       });
+
+      const singleAthleteMileageId =
+        selectedAthleteIds.length === 1 ? String(selectedAthleteIds[0] ?? "").trim() : "";
+      const suggestedMileageByDateSession = new Map<string, string>();
+      if (singleAthleteMileageId) {
+        const mileageFirstWeekStartISO = getWeekStartISO(startISO, weekStartsOn);
+        const mileageLastWeekStartISO = getWeekStartISO(endISO, weekStartsOn);
+        const mileageWeekStarts: string[] = [];
+        for (
+          let cursorISO = mileageFirstWeekStartISO;
+          cursorISO <= mileageLastWeekStartISO;
+          cursorISO = shiftISODateByDays(cursorISO, 7)
+        ) {
+          mileageWeekStarts.push(cursorISO);
+        }
+
+        await Promise.all(mileageWeekStarts.map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO).catch(() => {})));
+        const mileageState = teamDataStore.getState();
+        mileageWeekStarts.forEach((weekStartISO) => {
+          const weekCells = Array.isArray(mileageState.mileageCellsByWeek[weekStartISO])
+            ? mileageState.mileageCellsByWeek[weekStartISO]
+            : [];
+          weekCells.forEach((cell) => {
+            const athleteId = String(cell?.athlete_profile_id ?? "").trim();
+            if (athleteId !== singleAthleteMileageId) return;
+            const dayIdx = Number(cell?.day_idx);
+            if (!Number.isInteger(dayIdx) || dayIdx < 0 || dayIdx > 6) return;
+            const dateISO = shiftISODateByDays(weekStartISO, dayIdx);
+            if (dateISO < startISO || dateISO > endISO) return;
+            const resolvedWeekStartISO = getWeekStartISO(dateISO, weekStartsOn);
+            const resolvedDayIdx = getWeekIndex(dateISO, resolvedWeekStartISO);
+            if (resolvedWeekStartISO !== weekStartISO || resolvedDayIdx !== dayIdx) return;
+            const session = normalizeSession(String(cell?.session ?? "PM"));
+            const mileageText = String(formatMileageForSheet(cell?.value as any) ?? "").trim();
+            if (!mileageText) return;
+            suggestedMileageByDateSession.set(trainingPlanMileageSessionKey(dateISO, session), mileageText);
+          });
+        });
+      }
 
       const rangeFetchStartISO = weekStartISOs[0] ?? startISO;
       const rangeFetchEndISO = weekStartISOs.length > 0
@@ -2767,7 +3312,7 @@ export default function CoachCalendarMonth() {
           headerByBatchId: exportHeaderByBatchId,
         });
         if (weekStartISO === "2026-11-09" || weekStartISO === "2026-11-16") {
-          console.log("[training-plan-pdf][debug] map-keys", {
+          debugCalendar("[training-plan-pdf][debug] map-keys", {
             weekStartISO,
             exactCount: Object.keys(exportHeaderByKey).length,
             baseCount: Object.keys(exportHeaderByBaseKey).length,
@@ -2776,7 +3321,7 @@ export default function CoachCalendarMonth() {
               .filter((key) => key.startsWith("2026-11-"))
               .slice(0, 50),
           });
-          console.log("[training-plan-pdf][debug] sections-before", {
+          debugCalendar("[training-plan-pdf][debug] sections-before", {
             weekStartISO,
             sections: summarizeWeeklySectionDetails(days),
           });
@@ -2788,7 +3333,7 @@ export default function CoachCalendarMonth() {
           exportHeaderByBatchId
         );
         if (weekStartISO === "2026-11-09" || weekStartISO === "2026-11-16") {
-          console.log("[training-plan-pdf][debug] sections-after", {
+          debugCalendar("[training-plan-pdf][debug] sections-after", {
             weekStartISO,
             sections: summarizeWeeklySectionDetails(daysWithHeaderOverrides),
           });
@@ -2804,7 +3349,7 @@ export default function CoachCalendarMonth() {
         };
       });
       const may11Week = sectionsByWeek.find((week) => week.weekStartISO === "2026-05-11");
-      console.log("[training-plan-pdf] bucket counts week of May 11", {
+      debugCalendar("[training-plan-pdf] bucket counts week of May 11", {
         weekFound: !!may11Week,
         countsByDate: may11Week
           ? may11Week.days.reduce<Record<string, number>>((acc, day) => {
@@ -2814,11 +3359,14 @@ export default function CoachCalendarMonth() {
           : null,
       });
 
-      const exportWeeks: TrainingPlanWeekSection[] = sectionsByWeek.map((week) => ({
+      const exportWeeksBase: TrainingPlanWeekSection[] = sectionsByWeek.map((week) => ({
         weekStartISO: week.weekStartISO,
         weekLabel: week.weekLabel,
         days: week.days,
       }));
+      const exportWeeks = singleAthleteMileageId
+        ? applySuggestedMileageToTrainingPlanWeeks(exportWeeksBase, suggestedMileageByDateSession)
+        : exportWeeksBase;
 
       const generatedAtLabel = new Date().toLocaleString();
       const html = buildTrainingPlanRangeHtml({
@@ -2933,13 +3481,13 @@ export default function CoachCalendarMonth() {
       Alert.alert("Copy Week", "Please choose a valid source week.");
       return;
     }
-    console.log("[coach-calendar] runCopyWeekFromSource start");
+    debugCalendar("[coach-calendar] runCopyWeekFromSource start");
     setCopyingWeek(true);
     try {
       const currentWeekStartISO = toISODate(anchorWeekStart);
       const sourceWeekEndISO = toISODate(addDays(parseISODate(normalizedSourceWeekStartISO), 6));
       const sourceWeekRows = await listTeamWorkoutsInRange(normalizedSourceWeekStartISO, sourceWeekEndISO);
-      console.log("[coach-calendar] copy week range", {
+      debugCalendar("[coach-calendar] copy week range", {
         currentWeekStartISO,
         sourceWeekStartISO: normalizedSourceWeekStartISO,
         sourceWeekEndISO,
@@ -2950,16 +3498,13 @@ export default function CoachCalendarMonth() {
         return;
       }
 
-      const sourceWeekDateISOs = Array.from(
-        new Set(sourceWeekRows.map((row) => String(row.date_iso ?? "").trim()).filter(Boolean))
-      );
-      const sourceHeaderRowsByDate = await Promise.all(
-        sourceWeekDateISOs.map((dateISO) => listTeamWorkoutBatchHeadersForDate(dateISO).catch(() => []))
-      );
+      const sourceHeaderRows = await listTeamWorkoutBatchHeadersInRange(
+        normalizedSourceWeekStartISO,
+        sourceWeekEndISO
+      ).catch(() => []);
       const sourceMainNotesByBatchId = new Map<string, string>();
       const sourceMainNotesByBatchAndDate = new Map<string, string>();
-      sourceHeaderRowsByDate.forEach((headerRows) => {
-        (Array.isArray(headerRows) ? headerRows : []).forEach((headerRow) => {
+      sourceHeaderRows.forEach((headerRow) => {
           const batchId = String(headerRow.batch_id ?? "").trim();
           const dateISO = String(headerRow.date_iso ?? "").trim();
           const notes = String(headerRow.header_notes ?? "").trim();
@@ -2969,9 +3514,8 @@ export default function CoachCalendarMonth() {
           if (!prevByDate || notes.length > prevByDate.length) sourceMainNotesByBatchAndDate.set(byDateKey, notes);
           const prevByBatch = String(sourceMainNotesByBatchId.get(batchId) ?? "").trim();
           if (!prevByBatch || notes.length > prevByBatch.length) sourceMainNotesByBatchId.set(batchId, notes);
-        });
       });
-      console.log(
+      debugCalendar(
         "[coach-calendar] copy week source dates",
         sourceWeekRows.slice(0, 6).map((row) => String(row.date_iso ?? ""))
       );
@@ -3033,9 +3577,9 @@ export default function CoachCalendarMonth() {
             row.planned_distance_unit === "mi" || row.planned_distance_unit === "km" ? row.planned_distance_unit : null,
         };
       });
-      console.log("[coach-calendar] copy week mapped dates", mappedDateSamples);
-      console.log("[coach-calendar] copy week insert count", { count: insertRows.length });
-      console.log("[coach-calendar] copy week notes save keys", {
+      debugCalendar("[coach-calendar] copy week mapped dates", mappedDateSamples);
+      debugCalendar("[coach-calendar] copy week insert count", { count: insertRows.length });
+      debugCalendar("[coach-calendar] copy week notes save keys", {
         count: copiedHeaderNotesByBatchDateKey.size,
         sample: Array.from(copiedHeaderNotesByBatchDateKey.values())
           .slice(0, 8)
@@ -3124,7 +3668,7 @@ export default function CoachCalendarMonth() {
 
   const runClearThisWeek = useCallback(async () => {
     if (copyingWeek || clearingWeek) return;
-    console.log("[coach-calendar] runClearThisWeek start");
+    debugCalendar("[coach-calendar] runClearThisWeek start");
     setClearingWeek(true);
     try {
       const currentWeekStartISO = toISODate(anchorWeekStart);
@@ -3201,6 +3745,7 @@ export default function CoachCalendarMonth() {
                   autoCorrect={false}
                   onFocus={handleWeekLabelFocus}
                   onBlur={handleWeekLabelBlur}
+                  editable={canEditCalendarTraining}
                   style={[styles.weekLabelInlineInput, { borderColor: activeWeekToneColors.border }]}
                 />
                 <Text style={styles.weekLabelSaveText}>
@@ -3267,20 +3812,61 @@ export default function CoachCalendarMonth() {
           </View>
 
           <View style={styles.headerRight}>
-            <Pressable
-              onPress={() =>
-                router.push({
-                  pathname: "/(coach)/(tabs)/planner",
-                  params: { date: quickNewSessionDateISO, returnTo: "calendar" },
-                })
-              }
-              style={styles.createSessionTopBtn}
-            >
-              <Ionicons name="create-outline" size={12} color="#fff" />
-              <Text style={styles.createSessionTopBtnText}>Create Session</Text>
-            </Pressable>
+            {canEditCalendarTraining ? (
+              <Pressable
+                onPress={() =>
+                  router.push({
+                    pathname: "/(coach)/(tabs)/planner",
+                    params: { date: quickNewSessionDateISO, returnTo: "calendar" },
+                  })
+                }
+                style={styles.createSessionTopBtn}
+              >
+                <Ionicons name="create-outline" size={12} color="#fff" />
+                <Text style={styles.createSessionTopBtnText}>Create Session</Text>
+              </Pressable>
+            ) : null}
             {calendarMode === "week" ? (
               <>
+                {canPublishCalendarTraining ? (
+                  <View style={styles.visibilityControl}>
+                  {calendarWeekVisibilityStatus === "mixed" ? (
+                    <View style={[styles.weekVisibilityBadge, styles.weekVisibilityBadgeMixed]}>
+                      <Text style={[styles.weekVisibilityBadgeText, styles.weekVisibilityBadgeTextMixed]}>
+                        Mixed visibility
+                      </Text>
+                    </View>
+                  ) : calendarWeekVisibilityStatus === "published" ? (
+                    <View style={[styles.weekVisibilityBadge, styles.weekVisibilityBadgePublished]}>
+                      <Text style={[styles.weekVisibilityBadgeText, styles.weekVisibilityBadgeTextPublished]}>
+                        Published
+                      </Text>
+                    </View>
+                  ) : calendarWeekVisibilityStatus === "empty" ? (
+                    <Text style={styles.visibilityText}>{calendarWeekVisibilityLabel}</Text>
+                  ) : null}
+                  <Pressable
+                    onPress={() => openTrainingVisibilityModal("workouts")}
+                    style={styles.visibilityBtn}
+                  >
+                    <Text style={styles.visibilityBtnText}>Visibility</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => void setCalendarWeekVisibility(true)}
+                    disabled={weekVisibilityBusy || displayedWeekWorkouts.length === 0}
+                    style={[styles.visibilityBtn, (weekVisibilityBusy || displayedWeekWorkouts.length === 0) && styles.visibilityBtnDisabled]}
+                  >
+                    <Text style={styles.visibilityBtnText}>Publish Week</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => void setCalendarWeekVisibility(false)}
+                    disabled={weekVisibilityBusy || displayedWeekWorkouts.length === 0}
+                    style={[styles.visibilityBtn, (weekVisibilityBusy || displayedWeekWorkouts.length === 0) && styles.visibilityBtnDisabled]}
+                  >
+                    <Text style={styles.visibilityBtnText}>Hide Week</Text>
+                  </Pressable>
+                  </View>
+                ) : null}
                 <Pressable onPress={goToToday} style={styles.todayBtn}>
                   <Text style={styles.todayBtnText}>Current Week</Text>
                 </Pressable>
@@ -3324,20 +3910,55 @@ export default function CoachCalendarMonth() {
           </View>
         ) : null}
 
+        {calendarMode === "week" && calendarWeekVisibilityStatus === "hidden" ? (
+          <View style={styles.weekHiddenBanner}>
+            <View style={styles.weekHiddenBannerIcon}>
+              <Ionicons name="eye-off-outline" size={16} color="#991b1b" />
+            </View>
+            <View style={styles.weekHiddenBannerCopy}>
+              <Text style={styles.weekHiddenBannerTitle}>Hidden from athletes</Text>
+              <Text style={styles.weekHiddenBannerText}>Coaches can still view and edit this week.</Text>
+            </View>
+          </View>
+        ) : calendarMode === "week" && calendarWeekVisibilityStatus === "mixed" ? (
+          <View style={styles.weekMixedNotice}>
+            <View style={[styles.weekVisibilityBadge, styles.weekVisibilityBadgeMixed]}>
+              <Text style={[styles.weekVisibilityBadgeText, styles.weekVisibilityBadgeTextMixed]}>
+                Mixed visibility
+              </Text>
+            </View>
+            <Text style={styles.weekMixedNoticeText}>Some workouts are hidden from athletes.</Text>
+          </View>
+        ) : null}
+
+        {calendarMode === "week" && !canEditCalendarTraining ? (
+          <View style={styles.readOnlyNotice}>
+            <Text style={styles.readOnlyNoticeText}>Viewer access: editing is disabled.</Text>
+          </View>
+        ) : null}
+
         {calendarMode === "week" ? (
           <View style={styles.weekActionsRow}>
-            <Pressable onPress={openCopyWeekModal} style={styles.todayBtn} disabled={copyingWeek || clearingWeek}>
-              <Text style={styles.todayBtnText}>{copyingWeek ? "Copying..." : "Copy Week..."}</Text>
-            </Pressable>
-            <Pressable onPress={handleClearThisWeek} style={styles.todayBtn} disabled={copyingWeek || clearingWeek}>
-              <Text style={styles.todayBtnText}>{clearingWeek ? "Clearing..." : "Clear This Week"}</Text>
-            </Pressable>
-            <Pressable onPress={() => void handleExportWeekPdf()} style={styles.todayBtn} disabled={exportingPdf || copyingWeek || clearingWeek}>
-              <Text style={styles.todayBtnText}>{exportingPdf ? "Exporting..." : "Export PDF"}</Text>
-            </Pressable>
-            <Pressable onPress={openTrainingPlanExport} style={styles.todayBtn} disabled={exportingTrainingPlanPdf || copyingWeek || clearingWeek}>
-              <Text style={styles.todayBtnText}>{exportingTrainingPlanPdf ? "Exporting..." : "Export Training Plan"}</Text>
-            </Pressable>
+            {canEditCalendarTraining ? (
+              <>
+                <Pressable onPress={openCopyWeekModal} style={styles.todayBtn} disabled={copyingWeek || clearingWeek}>
+                  <Text style={styles.todayBtnText}>{copyingWeek ? "Copying..." : "Copy Week..."}</Text>
+                </Pressable>
+                <Pressable onPress={handleClearThisWeek} style={styles.todayBtn} disabled={copyingWeek || clearingWeek}>
+                  <Text style={styles.todayBtnText}>{clearingWeek ? "Clearing..." : "Clear This Week"}</Text>
+                </Pressable>
+              </>
+            ) : null}
+            {canExportCalendar ? (
+              <>
+                <Pressable onPress={() => void handleExportWeekPdf()} style={styles.todayBtn} disabled={exportingPdf || copyingWeek || clearingWeek}>
+                  <Text style={styles.todayBtnText}>{exportingPdf ? "Exporting..." : "Export PDF"}</Text>
+                </Pressable>
+                <Pressable onPress={openTrainingPlanExport} style={styles.todayBtn} disabled={exportingTrainingPlanPdf || copyingWeek || clearingWeek}>
+                  <Text style={styles.todayBtnText}>{exportingTrainingPlanPdf ? "Exporting..." : "Export Training Plan"}</Text>
+                </Pressable>
+              </>
+            ) : null}
           </View>
         ) : null}
       </View>
@@ -3693,7 +4314,14 @@ export default function CoachCalendarMonth() {
           </>
         )
       ) : isWebDesktop ? (
-        <ScrollView horizontal style={styles.weekPlannerScrollX} contentContainerStyle={styles.weekPlannerScrollXContent}>
+        <ScrollView
+          horizontal
+          style={[
+            styles.weekPlannerScrollX,
+            calendarWeekVisibilityStatus === "hidden" && styles.weekBoardMuted,
+          ]}
+          contentContainerStyle={styles.weekPlannerScrollXContent}
+        >
           <View style={styles.weekPlannerGrid}>
             {weeklyDaySectionsForDisplay.map((day) => {
               const isToday = day.dateISO === todayISO;
@@ -3810,62 +4438,7 @@ export default function CoachCalendarMonth() {
                                   </View>
                                 </View>
 
-                                {expanded ? (
-                                  <View style={styles.weekExpandedBody}>
-                                    {workout.preRoutineIds.length > 0 ? (
-                                      <View style={styles.weekRoutineBlock}>
-                                        <Text style={styles.weekRoutineHeader}>Pre-run</Text>
-                                        <View style={styles.weekRoutineList}>
-                                          {workout.preRoutineIds.map((routineId) => {
-                                            const routine = auxiliaryRoutineById.get(routineId);
-                                            if (!routine) return null;
-                                            return (
-                                              <Pressable
-                                                key={`${workout.key}-pre-${routineId}`}
-                                                onPress={() => openRoutineDetails(routineId)}
-                                                style={styles.weekRoutinePill}
-                                              >
-                                                <Text style={styles.weekRoutinePillText}>{routine.title}</Text>
-                                              </Pressable>
-                                            );
-                                          })}
-                                        </View>
-                                      </View>
-                                    ) : null}
-
-                                    {workout.groups.map((group) => (
-                                      <View key={group.key} style={styles.weekGroupBlock}>
-                                        <Text style={styles.weekGroupLabel}>{group.label}</Text>
-                                        {group.lines.map((line, idx) => (
-                                          <Text key={`${group.key}-${idx}`} style={styles.weekGroupLineText}>
-                                            {line.athleteNames.join(", ")}{line.individualNotes ? ` — ${line.individualNotes}` : ""}
-                                          </Text>
-                                        ))}
-                                      </View>
-                                    ))}
-
-                                    {workout.postRoutineIds.length > 0 ? (
-                                      <View style={styles.weekRoutineBlock}>
-                                        <Text style={styles.weekRoutineHeader}>Post-run</Text>
-                                        <View style={styles.weekRoutineList}>
-                                          {workout.postRoutineIds.map((routineId) => {
-                                            const routine = auxiliaryRoutineById.get(routineId);
-                                            if (!routine) return null;
-                                            return (
-                                              <Pressable
-                                                key={`${workout.key}-post-${routineId}`}
-                                                onPress={() => openRoutineDetails(routineId)}
-                                                style={styles.weekRoutinePill}
-                                              >
-                                                <Text style={styles.weekRoutinePillText}>{routine.title}</Text>
-                                              </Pressable>
-                                            );
-                                          })}
-                                        </View>
-                                      </View>
-                                    ) : null}
-                                  </View>
-                                ) : null}
+                                {expanded ? renderWeeklyExpandedWorkout(workout) : null}
                               </View>
                             </View>
                           </View>
@@ -3880,7 +4453,12 @@ export default function CoachCalendarMonth() {
         </ScrollView>
       ) : (
         <GestureDetector gesture={pan}>
-          <Animated.View style={animatedStyle}>
+          <Animated.View
+            style={[
+              animatedStyle,
+              calendarWeekVisibilityStatus === "hidden" && styles.weekBoardMuted,
+            ]}
+          >
             <ScrollView style={styles.weekScroll} contentContainerStyle={styles.weekScrollContent}>
               {weeklyDaySectionsForDisplay.map((day) => {
                 const isToday = day.dateISO === todayISO;
@@ -3947,20 +4525,7 @@ export default function CoachCalendarMonth() {
                                   <Text style={styles.weekExpandChevron}>{expanded ? "▾" : "▸"}</Text>
                                 </Pressable>
 
-                                {expanded ? (
-                                  <View style={styles.weekExpandedBody}>
-                                    {workout.groups.map((group) => (
-                                      <View key={group.key} style={styles.weekGroupBlock}>
-                                        <Text style={styles.weekGroupLabel}>{group.label}</Text>
-                                        {group.lines.map((line, idx) => (
-                                          <Text key={`${group.key}-${idx}`} style={styles.weekGroupLineText}>
-                                            {line.athleteNames.join(", ")}{line.individualNotes ? ` — ${line.individualNotes}` : ""}
-                                          </Text>
-                                        ))}
-                                      </View>
-                                    ))}
-                                  </View>
-                                ) : null}
+                                {expanded ? renderWeeklyExpandedWorkout(workout) : null}
                               </View>
                             </View>
                           </View>
@@ -3980,6 +4545,121 @@ export default function CoachCalendarMonth() {
           <Text style={styles.savedBannerText}>Training session saved</Text>
         </View>
       ) : null}
+
+      <Modal
+        visible={trainingVisibilityOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setTrainingVisibilityOpen(false)}
+      >
+        <Pressable style={styles.exportModalBackdrop} onPress={() => setTrainingVisibilityOpen(false)}>
+          <Pressable style={styles.exportModalCard} onPress={() => {}}>
+            <Text style={styles.exportModalTitle}>Training Visibility</Text>
+            <Text style={styles.exportModalHint}>
+              Current scope: {calendarBulkAthleteIds.length} athlete{calendarBulkAthleteIds.length === 1 ? "" : "s"} from current filters.
+            </Text>
+
+            <View style={styles.exportModalField}>
+              <Text style={styles.exportModalLabel}>Action</Text>
+              <View style={styles.visibilityChoiceRow}>
+                {(["publish", "hide"] as TrainingVisibilityAction[]).map((value) => (
+                  <Pressable
+                    key={`visibility-action-${value}`}
+                    onPress={() => setTrainingVisibilityAction(value)}
+                    style={[styles.visibilityChoice, trainingVisibilityAction === value && styles.visibilityChoiceSelected]}
+                  >
+                    <Text style={styles.visibilityChoiceText}>{value === "publish" ? "Publish to athletes" : "Hide from athletes"}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.exportModalField}>
+              <Text style={styles.exportModalLabel}>Content</Text>
+              <View style={styles.visibilityChoiceRow}>
+                {([
+                  ["workouts", "Workouts only"],
+                  ["mileage", "Mileage only"],
+                  ["both", "Workouts + Mileage"],
+                ] as Array<[TrainingVisibilityContent, string]>).map(([value, label]) => (
+                  <Pressable
+                    key={`visibility-content-${value}`}
+                    onPress={() => setTrainingVisibilityContent(value)}
+                    style={[styles.visibilityChoice, trainingVisibilityContent === value && styles.visibilityChoiceSelected]}
+                  >
+                    <Text style={styles.visibilityChoiceText}>{label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.exportModalField}>
+              <Text style={styles.exportModalLabel}>Range</Text>
+              <View style={styles.visibilityChoiceRow}>
+                {([
+                  ["week", "Current week"],
+                  ["custom", "Custom range"],
+                  ["season", "Selected season"],
+                ] as Array<[TrainingVisibilityRange, string]>).map(([value, label]) => (
+                  <Pressable
+                    key={`visibility-range-${value}`}
+                    onPress={() => setTrainingVisibilityRange(value)}
+                    style={[styles.visibilityChoice, trainingVisibilityRange === value && styles.visibilityChoiceSelected]}
+                  >
+                    <Text style={styles.visibilityChoiceText}>{label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              {trainingVisibilityRange === "season" ? (
+                <Text style={styles.exportModalHint}>Season: {selectedSeasonLabel}</Text>
+              ) : null}
+            </View>
+
+            {trainingVisibilityRange === "custom" ? (
+              <>
+                <View style={styles.exportModalField}>
+                  <Text style={styles.exportModalLabel}>Start date</Text>
+                  <TextInput
+                    value={trainingVisibilityStartISO}
+                    onChangeText={setTrainingVisibilityStartISO}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    placeholder="YYYY-MM-DD"
+                    style={styles.exportModalInput}
+                  />
+                </View>
+                <View style={styles.exportModalField}>
+                  <Text style={styles.exportModalLabel}>End date</Text>
+                  <TextInput
+                    value={trainingVisibilityEndISO}
+                    onChangeText={setTrainingVisibilityEndISO}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    placeholder="YYYY-MM-DD"
+                    style={styles.exportModalInput}
+                  />
+                </View>
+              </>
+            ) : null}
+
+            <Text style={styles.exportModalHint}>
+              Mileage visibility is week-based. Any week touched by this range will be affected.
+            </Text>
+            {trainingVisibilityError ? (
+              <Text style={styles.trainingVisibilityError}>{trainingVisibilityError}</Text>
+            ) : null}
+
+            <View style={styles.exportModalActions}>
+              <Pressable style={styles.todayBtn} onPress={() => setTrainingVisibilityOpen(false)} disabled={trainingVisibilityApplying}>
+                <Text style={styles.todayBtnText}>Cancel</Text>
+              </Pressable>
+              <Pressable style={styles.todayBtn} onPress={() => void applyTrainingVisibilityNow()} disabled={trainingVisibilityApplying}>
+                <Text style={styles.todayBtnText}>{trainingVisibilityApplying ? "Applying..." : "Apply"}</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal
         visible={trainingPlanExportOpen}
@@ -4936,6 +5616,75 @@ const styles = StyleSheet.create({
     borderTopColor: "#e8eef7",
     backgroundColor: "#fcfdff",
   },
+  weekExpandedHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    marginBottom: 8,
+  },
+  weekExpandedTitle: {
+    fontSize: 11,
+    fontWeight: "900",
+    color: "#172033",
+  },
+  weekExpandedMeta: {
+    marginTop: 2,
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#64748b",
+  },
+  weekWorkoutVisibilityBadge: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  weekWorkoutVisibilityBadgeText: {
+    fontSize: 9,
+    fontWeight: "900",
+  },
+  weekWorkoutVisibilityBadgeHidden: {
+    borderColor: "#fecaca",
+    backgroundColor: "#fee2e2",
+  },
+  weekWorkoutVisibilityBadgeTextHidden: {
+    color: "#991b1b",
+  },
+  weekWorkoutVisibilityBadgeMixed: {
+    borderColor: "rgba(245,158,11,0.42)",
+    backgroundColor: "rgba(245,158,11,0.14)",
+  },
+  weekWorkoutVisibilityBadgeTextMixed: {
+    color: "#92400e",
+  },
+  weekWorkoutVisibilityBadgePublished: {
+    borderColor: "rgba(22,163,74,0.28)",
+    backgroundColor: "rgba(22,163,74,0.09)",
+  },
+  weekWorkoutVisibilityBadgeTextPublished: {
+    color: "#166534",
+  },
+  weekExpandedSection: {
+    marginBottom: 8,
+  },
+  weekExpandedSectionLabel: {
+    fontSize: 10,
+    fontWeight: "900",
+    color: "#51627b",
+    marginBottom: 4,
+    textTransform: "uppercase",
+  },
+  weekExpandedDetailsText: {
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: "700",
+    color: "#26364d",
+  },
+  weekExpandedEmptyText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#94a3b8",
+  },
   weekRoutineBlock: {
     marginBottom: 6,
   },
@@ -4966,11 +5715,48 @@ const styles = StyleSheet.create({
   weekGroupBlock: {
     paddingTop: 6,
   },
+  weekGroupDetailBlock: {
+    borderWidth: 1,
+    borderColor: "#e4ebf5",
+    borderRadius: 8,
+    backgroundColor: "#f8fbff",
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    marginBottom: 6,
+  },
   weekGroupLabel: {
     fontSize: 11,
     fontWeight: "900",
     color: "#22334c",
     marginBottom: 4,
+  },
+  weekGroupAthletesText: {
+    fontSize: 10,
+    lineHeight: 15,
+    fontWeight: "700",
+    color: "#475569",
+  },
+  weekGroupNotesBlock: {
+    marginTop: 5,
+    gap: 3,
+  },
+  weekGroupNotesLabel: {
+    fontSize: 9,
+    fontWeight: "900",
+    color: "#64748b",
+    textTransform: "uppercase",
+  },
+  weekGroupNoteText: {
+    fontSize: 10,
+    lineHeight: 15,
+    fontWeight: "800",
+    color: "#26364d",
+  },
+  weekGroupNoNoteText: {
+    fontSize: 10,
+    lineHeight: 15,
+    fontWeight: "700",
+    color: "#64748b",
   },
   weekGroupLineText: {
     fontSize: 11,
@@ -5031,6 +5817,16 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   savedBannerText: { color: "#fff", fontWeight: "900" },
+  readOnlyNotice: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    borderRadius: 10,
+    backgroundColor: "#f8fafc",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  readOnlyNoticeText: { fontSize: 12, fontWeight: "800", color: "#475569" },
   createSessionTopBtn: {
     height: 32,
     paddingHorizontal: 12,
@@ -5044,6 +5840,141 @@ const styles = StyleSheet.create({
     backgroundColor: "#0f172a",
   },
   createSessionTopBtnText: { fontSize: 12, fontWeight: "900", color: "#fff" },
+  visibilityControl: {
+    minHeight: 32,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+  },
+  visibilityText: {
+    fontSize: 11,
+    fontWeight: "900",
+    color: "#64748b",
+  },
+  weekVisibilityBadge: {
+    minHeight: 24,
+    paddingHorizontal: 9,
+    borderRadius: 999,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  weekVisibilityBadgeText: {
+    fontSize: 10,
+    fontWeight: "900",
+  },
+  weekVisibilityBadgePublished: {
+    borderColor: "rgba(22,163,74,0.32)",
+    backgroundColor: "rgba(22,163,74,0.1)",
+  },
+  weekVisibilityBadgeTextPublished: {
+    color: "#166534",
+  },
+  weekVisibilityBadgeMixed: {
+    borderColor: "rgba(245,158,11,0.42)",
+    backgroundColor: "rgba(245,158,11,0.14)",
+  },
+  weekVisibilityBadgeTextMixed: {
+    color: "#92400e",
+  },
+  weekHiddenBanner: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: "#fecaca",
+    borderRadius: 10,
+    backgroundColor: "#fef2f2",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  weekHiddenBannerIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: "#fecaca",
+    backgroundColor: "#fee2e2",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  weekHiddenBannerCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  weekHiddenBannerTitle: {
+    fontSize: 14,
+    fontWeight: "900",
+    color: "#991b1b",
+  },
+  weekHiddenBannerText: {
+    marginTop: 2,
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#7f1d1d",
+  },
+  weekMixedNotice: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  weekMixedNoticeText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#92400e",
+  },
+  weekBoardMuted: {
+    opacity: 0.78,
+    borderRadius: 12,
+    backgroundColor: "rgba(254,242,242,0.55)",
+  },
+  visibilityBtn: {
+    height: 30,
+    paddingHorizontal: 9,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  visibilityBtnDisabled: {
+    opacity: 0.5,
+  },
+  visibilityBtnText: {
+    fontSize: 11,
+    fontWeight: "900",
+    color: "#0f172a",
+  },
+  visibilityChoiceRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  visibilityChoice: {
+    minHeight: 32,
+    paddingHorizontal: 10,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  visibilityChoiceSelected: {
+    borderColor: "#2563eb",
+    backgroundColor: "rgba(37,99,235,0.12)",
+  },
+  visibilityChoiceText: {
+    fontSize: 11,
+    fontWeight: "900",
+    color: "#0f172a",
+  },
   exportModalBackdrop: {
     flex: 1,
     backgroundColor: "rgba(15,23,42,0.28)",
@@ -5070,6 +6001,11 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     color: "#64748b",
+  },
+  trainingVisibilityError: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#b91c1c",
   },
   exportModalField: {
     gap: 4,

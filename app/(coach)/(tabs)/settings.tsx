@@ -2,6 +2,22 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
 import { supabase } from "../../../lib/supabase";
+import {
+  createCoachInvite,
+  listCoachInvites,
+  listTeamStaffMembers,
+  removeTeamStaffMember,
+  updateTeamStaffRole,
+  type CoachInviteRole,
+  type TeamCoachInvite,
+  type TeamStaffMember,
+} from "../../../lib/team";
+import {
+  canManageCoaches,
+  getCurrentTeamRole,
+  normalizeTeamRole,
+  type TeamRole,
+} from "../../../lib/teamPermissions";
 import { CategoriesContent } from "./categories";
 import { formatPace, loadPaceSecondsPerMile, parsePace, savePaceSecondsPerMile } from "../../../lib/pace";
 import { loadJSON } from "../../../lib/storage";
@@ -124,6 +140,15 @@ export default function CoachSettingsTab() {
   const [feedbackWarningMode, setFeedbackWarningMode] = useState<FeedbackWarningMode>("all");
   const [feedbackStartDateText, setFeedbackStartDateText] = useState("");
   const [feedbackWindowMenuOpen, setFeedbackWindowMenuOpen] = useState(false);
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const settingsReadOnly = normalizeTeamRole(currentTeamRole) === "viewer";
+  const [staffMembers, setStaffMembers] = useState<TeamStaffMember[]>([]);
+  const [coachInvites, setCoachInvites] = useState<TeamCoachInvite[]>([]);
+  const [coachInviteEmail, setCoachInviteEmail] = useState("");
+  const [coachInviteRole, setCoachInviteRole] = useState<CoachInviteRole>("viewer");
+  const [staffBusy, setStaffBusy] = useState(false);
+  const [staffStatus, setStaffStatus] = useState<string | null>(null);
+  const [lastCoachInviteToken, setLastCoachInviteToken] = useState("");
 
   const [workoutTypesOpen, setWorkoutTypesOpen] = useState(false);
   const [categoryAutoRoutinesOpen, setCategoryAutoRoutinesOpen] = useState(false);
@@ -159,10 +184,34 @@ export default function CoachSettingsTab() {
   const [auxiliaryDetailsDraft, setAuxiliaryDetailsDraft] = useState("");
   const [auxiliaryPreCategoryNamesDraft, setAuxiliaryPreCategoryNamesDraft] = useState<string[]>([]);
   const [auxiliaryPostCategoryNamesDraft, setAuxiliaryPostCategoryNamesDraft] = useState<string[]>([]);
-  const [auxiliaryAutosaveStatus, setAuxiliaryAutosaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const auxiliaryAutosaveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [auxiliaryAutosaveStatus, setAuxiliaryAutosaveStatus] = useState<"idle" | "dirty" | "saving" | "saved" | "error">("idle");
   const lastAuxiliarySavedSnapshotRef = React.useRef("");
-  const suppressAuxiliaryAutosaveRef = React.useRef(false);
+  const auxiliarySaveSeqRef = React.useRef(0);
+  const auxiliaryCommitInFlightRef = React.useRef<Promise<boolean> | null>(null);
+  const selectedAuxiliaryRoutineIdRef = React.useRef<string | null>(null);
+  const auxiliaryTitleDraftRef = React.useRef("");
+  const auxiliaryDetailsDraftRef = React.useRef("");
+  const auxiliaryPreCategoryNamesDraftRef = React.useRef<string[]>([]);
+  const auxiliaryPostCategoryNamesDraftRef = React.useRef<string[]>([]);
+  const currentTeamRoleRef = React.useRef<TeamRole | null>(null);
+
+  const loadStaffAccess = useCallback(async () => {
+    const role = await getCurrentTeamRole();
+    setCurrentTeamRole(role);
+    if (!role) {
+      setStaffMembers([]);
+      setCoachInvites([]);
+      return;
+    }
+    const members = await listTeamStaffMembers();
+    setStaffMembers(members);
+    if (canManageCoaches(role)) {
+      const invites = await listCoachInvites();
+      setCoachInvites(invites);
+    } else {
+      setCoachInvites([]);
+    }
+  }, []);
 
   const loadSettingsScreenData = useCallback(
     async (isActive?: () => boolean) => {
@@ -206,6 +255,7 @@ export default function CoachSettingsTab() {
         setFeedbackFlagsEnabled(!!feedbackFlagSettings.enabled);
         setFeedbackWarningMode(feedbackFlagSettings.mode ?? "all");
         setFeedbackStartDateText(String(feedbackFlagSettings.startDateISO ?? ""));
+        await loadStaffAccess();
         setTrainingGroups(Array.isArray(teamDataStore.getState().trainingGroups) ? teamDataStore.getState().trainingGroups : []);
         setTeamSeasons(Array.isArray(teamDataStore.getState().teamSeasons) ? teamDataStore.getState().teamSeasons : []);
         setAthletePaceOverrides(loadedOverrides);
@@ -224,7 +274,7 @@ export default function CoachSettingsTab() {
         Alert.alert("Settings load failed", message);
       }
     },
-    []
+    [loadStaffAccess]
   );
 
   useEffect(() => {
@@ -241,6 +291,7 @@ export default function CoachSettingsTab() {
       void loadSettingsScreenData(() => !cancelled);
       return () => {
         cancelled = true;
+        void commitAuxiliaryRoutineDraft("screen-blur");
       };
     }, [loadSettingsScreenData])
   );
@@ -268,6 +319,24 @@ export default function CoachSettingsTab() {
   useEffect(() => {
     setTeamSeasons(Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []);
   }, [teamStore.teamSeasons]);
+
+  useEffect(() => {
+    currentTeamRoleRef.current = currentTeamRole;
+  }, [currentTeamRole]);
+
+  useEffect(() => {
+    selectedAuxiliaryRoutineIdRef.current = selectedAuxiliaryRoutineId;
+    auxiliaryTitleDraftRef.current = auxiliaryTitleDraft;
+    auxiliaryDetailsDraftRef.current = auxiliaryDetailsDraft;
+    auxiliaryPreCategoryNamesDraftRef.current = auxiliaryPreCategoryNamesDraft;
+    auxiliaryPostCategoryNamesDraftRef.current = auxiliaryPostCategoryNamesDraft;
+  }, [
+    selectedAuxiliaryRoutineId,
+    auxiliaryTitleDraft,
+    auxiliaryDetailsDraft,
+    auxiliaryPreCategoryNamesDraft,
+    auxiliaryPostCategoryNamesDraft,
+  ]);
 
   const sortedGroups = useMemo(() => {
     return [...trainingGroups].sort((a, b) => a.name.localeCompare(b.name));
@@ -314,19 +383,33 @@ export default function CoachSettingsTab() {
     [sortedAuxiliaryRoutines, selectedAuxiliaryRoutineId]
   );
 
-  function buildAuxiliaryDraftSnapshot() {
+  function buildAuxiliaryDraftSnapshotFrom(
+    id: string | null,
+    title: string,
+    details: string,
+    preCategoryNames: string[],
+    postCategoryNames: string[]
+  ) {
     return JSON.stringify({
-      id: selectedAuxiliaryRoutineId,
-      title: String(auxiliaryTitleDraft ?? "").trim(),
-      details: String(auxiliaryDetailsDraft ?? "").trim(),
-      pre: [...auxiliaryPreCategoryNamesDraft].sort(),
-      post: [...auxiliaryPostCategoryNamesDraft].sort(),
+      id,
+      title: String(title ?? "").trim(),
+      details: String(details ?? "").trim(),
+      pre: [...preCategoryNames].sort(),
+      post: [...postCategoryNames].sort(),
     });
   }
 
-  function loadAuxiliaryRoutineIntoDrafts(routine: AuxiliaryRoutine | null) {
-    suppressAuxiliaryAutosaveRef.current = true;
+  function buildAuxiliaryDraftSnapshot() {
+    return buildAuxiliaryDraftSnapshotFrom(
+      selectedAuxiliaryRoutineId,
+      auxiliaryTitleDraft,
+      auxiliaryDetailsDraft,
+      auxiliaryPreCategoryNamesDraft,
+      auxiliaryPostCategoryNamesDraft
+    );
+  }
 
+  function loadAuxiliaryRoutineIntoDrafts(routine: AuxiliaryRoutine | null) {
     if (!routine) {
       setAuxiliaryTitleDraft("");
       setAuxiliaryDetailsDraft("");
@@ -334,9 +417,6 @@ export default function CoachSettingsTab() {
       setAuxiliaryPostCategoryNamesDraft([]);
       lastAuxiliarySavedSnapshotRef.current = "";
       setAuxiliaryAutosaveStatus("idle");
-      setTimeout(() => {
-        suppressAuxiliaryAutosaveRef.current = false;
-      }, 0);
       return;
     }
     setAuxiliaryTitleDraft(String(routine.title ?? ""));
@@ -353,13 +433,12 @@ export default function CoachSettingsTab() {
     });
 
     setAuxiliaryAutosaveStatus("idle");
-
-    setTimeout(() => {
-      suppressAuxiliaryAutosaveRef.current = false;
-    }, 0);
   }
 
-  function selectAuxiliaryRoutineById(routineId: string | null) {
+  async function selectAuxiliaryRoutineById(routineId: string | null) {
+    if (routineId === selectedAuxiliaryRoutineIdRef.current) return;
+    const committed = await commitAuxiliaryRoutineDraft("routine-selection");
+    if (!committed) return;
     setSelectedAuxiliaryRoutineId(routineId);
     const routine = sortedAuxiliaryRoutines.find((item) => item.id === routineId) ?? null;
     loadAuxiliaryRoutineIntoDrafts(routine);
@@ -393,6 +472,8 @@ export default function CoachSettingsTab() {
   }
 
   async function createNewAuxiliaryRoutine() {
+    const committed = await commitAuxiliaryRoutineDraft("create-new-routine");
+    if (!committed) return;
     const created = await createAuxiliaryRoutine({
       title: "New Routine",
       details: "",
@@ -404,29 +485,111 @@ export default function CoachSettingsTab() {
     setCategoryAutoRoutinesOpen(true);
   }
 
+  async function toggleAuxiliaryRoutinesSection() {
+    if (categoryAutoRoutinesOpen) {
+      const committed = await commitAuxiliaryRoutineDraft("aux-section-collapse");
+      if (!committed) return;
+      setCategoryAutoRoutinesOpen(false);
+      return;
+    }
+    setCategoryAutoRoutinesOpen(true);
+  }
+
+  async function toggleSettingsSection(
+    reason: string,
+    setter: React.Dispatch<React.SetStateAction<boolean>>
+  ) {
+    const committed = await commitAuxiliaryRoutineDraft(reason);
+    if (!committed) return;
+    setter((prev) => !prev);
+  }
+
+  async function commitAuxiliaryRoutineDraft(reason: string, options?: { alertOnTitleRequired?: boolean }): Promise<boolean> {
+    if (!canManageCoaches(currentTeamRoleRef.current) && normalizeTeamRole(currentTeamRoleRef.current) === "viewer") {
+      return true;
+    }
+
+    if (auxiliaryCommitInFlightRef.current) {
+      await auxiliaryCommitInFlightRef.current.catch(() => false);
+    }
+
+    const routineId = selectedAuxiliaryRoutineIdRef.current;
+    if (!routineId) return true;
+
+    const titleDraft = auxiliaryTitleDraftRef.current;
+    const detailsDraft = auxiliaryDetailsDraftRef.current;
+    const preDraft = auxiliaryPreCategoryNamesDraftRef.current;
+    const postDraft = auxiliaryPostCategoryNamesDraftRef.current;
+    const savedSnapshot = buildAuxiliaryDraftSnapshotFrom(routineId, titleDraft, detailsDraft, preDraft, postDraft);
+    if (savedSnapshot === lastAuxiliarySavedSnapshotRef.current) return true;
+
+    const title = String(titleDraft ?? "").trim();
+    if (!title) {
+      setAuxiliaryAutosaveStatus("error");
+      if (options?.alertOnTitleRequired) {
+        Alert.alert("Title required", "Enter a routine title.");
+      }
+      return false;
+    }
+
+    const saveSeq = ++auxiliarySaveSeqRef.current;
+    const pre = Array.from(new Set(preDraft.map((name) => String(name ?? "").trim()).filter(Boolean)));
+    const post = Array.from(new Set(postDraft.map((name) => String(name ?? "").trim()).filter(Boolean)));
+    const details = String(detailsDraft ?? "").trim();
+
+    const commitPromise = (async () => {
+      setAuxiliaryAutosaveStatus("saving");
+      await updateAuxiliaryRoutine(routineId, {
+        title,
+        details,
+        preCategoryNames: pre,
+        postCategoryNames: post,
+        categoryNames: Array.from(new Set([...pre, ...post])),
+      });
+
+      const loaded = await loadAuxiliaryRoutines();
+      const sorted = [...loaded].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
+      setAuxiliaryRoutines(sorted);
+
+      const latestDraftSnapshot = buildAuxiliaryDraftSnapshotFrom(
+        selectedAuxiliaryRoutineIdRef.current,
+        auxiliaryTitleDraftRef.current,
+        auxiliaryDetailsDraftRef.current,
+        auxiliaryPreCategoryNamesDraftRef.current,
+        auxiliaryPostCategoryNamesDraftRef.current
+      );
+      const stillEditingSameRoutine = selectedAuxiliaryRoutineIdRef.current === routineId;
+      const localDraftUnchangedSinceSave = latestDraftSnapshot === savedSnapshot;
+      if (saveSeq === auxiliarySaveSeqRef.current && stillEditingSameRoutine && localDraftUnchangedSinceSave) {
+        lastAuxiliarySavedSnapshotRef.current = savedSnapshot;
+        setAuxiliaryAutosaveStatus("saved");
+      } else if (stillEditingSameRoutine) {
+        setAuxiliaryAutosaveStatus("dirty");
+      }
+      return true;
+    })();
+
+    auxiliaryCommitInFlightRef.current = commitPromise;
+    try {
+      return await commitPromise;
+    } catch (error: any) {
+      console.error("[settings-aux] save failed", { reason, error });
+      setAuxiliaryAutosaveStatus("error");
+      Alert.alert("Routine save failed", "Couldn't save routine. Your draft is still here.");
+      return false;
+    } finally {
+      if (auxiliaryCommitInFlightRef.current === commitPromise) {
+        auxiliaryCommitInFlightRef.current = null;
+      }
+    }
+  }
+
   async function saveSelectedAuxiliaryRoutine() {
-    if (!selectedAuxiliaryRoutineId) {
+    if (!selectedAuxiliaryRoutineIdRef.current) {
       Alert.alert("Select a routine", "Choose or create a routine to edit.");
       return;
     }
-
-    const title = String(auxiliaryTitleDraft ?? "").trim();
-    if (!title) {
-      Alert.alert("Title required", "Enter a routine title.");
-      return;
-    }
-
-    const pre = Array.from(new Set(auxiliaryPreCategoryNamesDraft.map((name) => String(name ?? "").trim()).filter(Boolean)));
-    const post = Array.from(new Set(auxiliaryPostCategoryNamesDraft.map((name) => String(name ?? "").trim()).filter(Boolean)));
-
-    await updateAuxiliaryRoutine(selectedAuxiliaryRoutineId, {
-      title,
-      details: String(auxiliaryDetailsDraft ?? "").trim(),
-      preCategoryNames: pre,
-      postCategoryNames: post,
-      categoryNames: Array.from(new Set([...pre, ...post])),
-    });
-    await reloadAuxiliaryRoutines(selectedAuxiliaryRoutineId);
+    await commitAuxiliaryRoutineDraft("explicit-save", { alertOnTitleRequired: true });
   }
 
   function confirmDeleteSelectedAuxiliaryRoutine() {
@@ -462,60 +625,17 @@ export default function CoachSettingsTab() {
 
   useEffect(() => {
     if (!selectedAuxiliaryRoutineId) return;
-    if (suppressAuxiliaryAutosaveRef.current) return;
-
-    const title = String(auxiliaryTitleDraft ?? "").trim();
-    if (!title) {
-      setAuxiliaryAutosaveStatus("idle");
-      return;
-    }
-
     const snapshot = buildAuxiliaryDraftSnapshot();
-    if (snapshot === lastAuxiliarySavedSnapshotRef.current) return;
-
-    if (auxiliaryAutosaveTimerRef.current) {
-      clearTimeout(auxiliaryAutosaveTimerRef.current);
+    if (snapshot !== lastAuxiliarySavedSnapshotRef.current && auxiliaryAutosaveStatus !== "saving") {
+      setAuxiliaryAutosaveStatus("dirty");
     }
-
-    setAuxiliaryAutosaveStatus("saving");
-
-    auxiliaryAutosaveTimerRef.current = setTimeout(async () => {
-      try {
-        const pre = Array.from(
-          new Set(auxiliaryPreCategoryNamesDraft.map((name) => String(name ?? "").trim()).filter(Boolean))
-        );
-        const post = Array.from(
-          new Set(auxiliaryPostCategoryNamesDraft.map((name) => String(name ?? "").trim()).filter(Boolean))
-        );
-
-        await updateAuxiliaryRoutine(selectedAuxiliaryRoutineId, {
-          title,
-          details: String(auxiliaryDetailsDraft ?? "").trim(),
-          preCategoryNames: pre,
-          postCategoryNames: post,
-          categoryNames: Array.from(new Set([...pre, ...post])),
-        });
-
-        lastAuxiliarySavedSnapshotRef.current = snapshot;
-        setAuxiliaryAutosaveStatus("saved");
-        await reloadAuxiliaryRoutines(selectedAuxiliaryRoutineId);
-      } catch (error) {
-        console.error("[settings-aux] autosave failed", error);
-        setAuxiliaryAutosaveStatus("error");
-      }
-    }, 500);
-
-    return () => {
-      if (auxiliaryAutosaveTimerRef.current) {
-        clearTimeout(auxiliaryAutosaveTimerRef.current);
-      }
-    };
   }, [
     selectedAuxiliaryRoutineId,
     auxiliaryTitleDraft,
     auxiliaryDetailsDraft,
     auxiliaryPreCategoryNamesDraft,
     auxiliaryPostCategoryNamesDraft,
+    auxiliaryAutosaveStatus,
   ]);
 
   async function switchDistanceUnit(nextUnit: DistanceUnit) {
@@ -991,9 +1111,159 @@ export default function CoachSettingsTab() {
     );
   }
 
+  async function inviteCoachAccount() {
+    const cleanEmail = coachInviteEmail.trim().toLowerCase();
+    if (!cleanEmail) {
+      Alert.alert("Email required", "Enter the coach email for this invite.");
+      return;
+    }
+    setStaffBusy(true);
+    setStaffStatus(null);
+    try {
+      const token = await createCoachInvite(cleanEmail, coachInviteRole);
+      setLastCoachInviteToken(token);
+      setCoachInviteEmail("");
+      setStaffStatus(`Invite created for ${cleanEmail}. Share the token with that coach.`);
+      await loadStaffAccess();
+      Alert.alert("Coach invite created", "Share the invite token with the coach.");
+    } catch (error: any) {
+      const message = getErrorMessage(error);
+      setStaffStatus(message);
+      Alert.alert("Invite failed", message);
+    } finally {
+      setStaffBusy(false);
+    }
+  }
+
+  async function changeStaffRole(userId: string, role: CoachInviteRole) {
+    setStaffBusy(true);
+    setStaffStatus(null);
+    try {
+      await updateTeamStaffRole(userId, role);
+      await loadStaffAccess();
+      setStaffStatus("Coach role updated.");
+    } catch (error: any) {
+      const message = getErrorMessage(error);
+      setStaffStatus(message);
+      Alert.alert("Role update failed", message);
+    } finally {
+      setStaffBusy(false);
+    }
+  }
+
+  function confirmRemoveStaffMember(member: TeamStaffMember) {
+    if (member.is_owner) {
+      Alert.alert("Owner cannot be removed", "Transfer ownership before removing the team owner.");
+      return;
+    }
+    Alert.alert("Remove coach?", "This removes coach workspace access for this account.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Remove",
+        style: "destructive",
+        onPress: async () => {
+          setStaffBusy(true);
+          setStaffStatus(null);
+          try {
+            await removeTeamStaffMember(member.user_id);
+            await loadStaffAccess();
+            setStaffStatus("Coach removed.");
+          } catch (error: any) {
+            const message = getErrorMessage(error);
+            setStaffStatus(message);
+            Alert.alert("Remove failed", message);
+          } finally {
+            setStaffBusy(false);
+          }
+        },
+      },
+    ]);
+  }
+
   async function signOut() {
     await supabase.auth.signOut();
     router.replace("/(auth)/login");
+  }
+
+  if (settingsReadOnly) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.pageHeader}>
+          <View style={styles.pageHeaderTextWrap}>
+            <Text style={styles.title}>Settings</Text>
+            <Text style={styles.subtitle}>View team access and account details.</Text>
+          </View>
+          <Pressable onPress={() => router.push("/(auth)/choose-account")} style={styles.utilityBtn}>
+            <Text style={styles.utilityBtnText}>Switch account/team</Text>
+          </Pressable>
+        </View>
+
+        <ScrollView
+          automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+          contentContainerStyle={styles.scrollContent}
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={isDesktopWeb ? styles.desktopWorkspace : undefined}>
+            <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}>
+              <Text style={styles.cardTitle}>Coach Accounts</Text>
+              <Text style={styles.cardHint}>Viewer access: editing is disabled.</Text>
+
+              <View style={styles.staffRoleSummary}>
+                <Text style={styles.staffRoleSummaryText}>
+                  Your access: {currentTeamRole ? currentTeamRole.toUpperCase() : "VIEWER"}
+                </Text>
+              </View>
+
+              <View style={styles.staffList}>
+                <Text style={styles.label}>Current staff</Text>
+                {staffMembers.length === 0 ? (
+                  <Text style={styles.cardHint}>No staff rows found for this team.</Text>
+                ) : (
+                  staffMembers.map((member) => {
+                    const normalizedRole = member.is_owner ? "owner" : normalizeTeamRole(member.raw_role);
+                    return (
+                      <View key={`${member.team_id}-${member.user_id}`} style={styles.staffRow}>
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={styles.staffName} numberOfLines={1}>
+                            {member.user_id}
+                          </Text>
+                          <Text style={styles.groupMeta}>
+                            {member.is_owner ? "Owner" : normalizedRole === "editor" ? "Editor" : "Viewer"}
+                            {member.raw_role && !member.is_owner ? ` - stored as ${member.raw_role}` : ""}
+                          </Text>
+                        </View>
+                      </View>
+                    );
+                  })
+                )}
+              </View>
+
+              {staffStatus ? <Text style={styles.successText}>{staffStatus}</Text> : null}
+            </View>
+
+            <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
+              <Text style={styles.cardTitle}>Team Settings</Text>
+              <Text style={styles.cardHint}>
+                Team defaults, categories, routines, training groups, and seasons are editable by Owners and Editors.
+              </Text>
+            </View>
+
+            <View style={styles.signOutWrap}>
+              <Pressable
+                onPress={signOut}
+                style={[
+                  styles.signOutBtn,
+                  isDesktopWeb ? styles.signOutBtnDesktop : null,
+                ]}
+              >
+                <Text style={styles.signOutBtnText}>Sign Out</Text>
+              </Pressable>
+            </View>
+          </View>
+        </ScrollView>
+      </View>
+    );
   }
 
   return (
@@ -1003,8 +1273,8 @@ export default function CoachSettingsTab() {
           <Text style={styles.title}>Settings</Text>
           <Text style={styles.subtitle}>Manage app preferences and coaching tools.</Text>
         </View>
-        <Pressable onPress={() => router.replace("/(auth)/login")} style={styles.utilityBtn}>
-          <Text style={styles.utilityBtnText}>Back to Role Select</Text>
+        <Pressable onPress={() => router.push("/(auth)/choose-account")} style={styles.utilityBtn}>
+          <Text style={styles.utilityBtnText}>Switch account/team</Text>
         </Pressable>
       </View>
 
@@ -1265,8 +1535,152 @@ export default function CoachSettingsTab() {
           </View>
         </View>
 
+        <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}>
+          <Text style={styles.cardTitle}>Coach Accounts</Text>
+          <Text style={styles.cardHint}>
+            {canManageCoaches(currentTeamRole)
+              ? "Invite staff and manage coach workspace permissions."
+              : "Only the team owner can manage coach accounts."}
+          </Text>
+
+          <View style={styles.staffRoleSummary}>
+            <Text style={styles.staffRoleSummaryText}>
+              Your access: {currentTeamRole ? currentTeamRole.toUpperCase() : "UNKNOWN"}
+            </Text>
+          </View>
+
+          {canManageCoaches(currentTeamRole) ? (
+            <View style={styles.staffInviteBox}>
+              <Text style={styles.label}>Invite coach by email</Text>
+              <TextInput
+                value={coachInviteEmail}
+                onChangeText={setCoachInviteEmail}
+                placeholder="coach@example.com"
+                style={styles.input}
+                autoCapitalize="none"
+                keyboardType="email-address"
+              />
+
+              <Text style={[styles.label, { marginTop: 10 }]}>Permission</Text>
+              <View style={styles.staffRoleToggle}>
+                {(["viewer", "editor"] as CoachInviteRole[]).map((role) => {
+                  const active = coachInviteRole === role;
+                  return (
+                    <Pressable
+                      key={`coach-invite-role-${role}`}
+                      disabled={staffBusy}
+                      onPress={() => setCoachInviteRole(role)}
+                      style={[styles.staffRoleBtn, active && styles.staffRoleBtnActive, staffBusy && styles.disabledBtn]}
+                    >
+                      <Text style={[styles.staffRoleBtnText, active && styles.staffRoleBtnTextActive]}>
+                        {role === "viewer" ? "Viewer" : "Editor"}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <Text style={styles.cardHint}>
+                Viewer is read-only. Editor can edit training, mileage, roster, catalog, and plans.
+              </Text>
+
+              <Pressable
+                disabled={staffBusy}
+                onPress={inviteCoachAccount}
+                style={[styles.saveBtn, staffBusy && styles.disabledBtn]}
+              >
+                <Text style={styles.saveBtnText}>{staffBusy ? "Working..." : "Create Coach Invite"}</Text>
+              </Pressable>
+
+              {lastCoachInviteToken ? (
+                <View style={styles.inviteTokenBox}>
+                  <Text style={styles.label}>Latest invite token</Text>
+                  <Text selectable style={styles.inviteTokenText}>{lastCoachInviteToken}</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+
+          <View style={styles.staffList}>
+            <Text style={styles.label}>Current staff</Text>
+            {staffMembers.length === 0 ? (
+              <Text style={styles.cardHint}>No staff rows found for this team.</Text>
+            ) : (
+              staffMembers.map((member) => {
+                const normalizedRole = member.is_owner ? "owner" : normalizeTeamRole(member.raw_role);
+                return (
+                  <View key={`${member.team_id}-${member.user_id}`} style={styles.staffRow}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.staffName} numberOfLines={1}>
+                        {member.user_id}
+                      </Text>
+                      <Text style={styles.groupMeta}>
+                        {member.is_owner ? "Owner" : normalizedRole === "editor" ? "Editor" : "Viewer"}
+                        {member.raw_role && !member.is_owner ? ` • stored as ${member.raw_role}` : ""}
+                      </Text>
+                    </View>
+                    {canManageCoaches(currentTeamRole) && !member.is_owner ? (
+                      <View style={styles.staffActions}>
+                        {(["viewer", "editor"] as CoachInviteRole[]).map((role) => {
+                          const active = normalizedRole === role;
+                          return (
+                            <Pressable
+                              key={`${member.user_id}-${role}`}
+                              disabled={staffBusy || active}
+                              onPress={() => changeStaffRole(member.user_id, role)}
+                              style={[styles.staffMiniBtn, active && styles.staffMiniBtnActive, staffBusy && styles.disabledBtn]}
+                            >
+                              <Text style={[styles.staffMiniBtnText, active && styles.staffMiniBtnTextActive]}>
+                                {role === "viewer" ? "Viewer" : "Editor"}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                        <Pressable
+                          disabled={staffBusy}
+                          onPress={() => confirmRemoveStaffMember(member)}
+                          style={[styles.groupDeleteBtn, staffBusy && styles.disabledBtn]}
+                        >
+                          <Text style={styles.groupDeleteBtnText}>Remove</Text>
+                        </Pressable>
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })
+            )}
+          </View>
+
+          {canManageCoaches(currentTeamRole) ? (
+            <View style={styles.staffList}>
+              <Text style={styles.label}>Recent coach invites</Text>
+              {coachInvites.length === 0 ? (
+                <Text style={styles.cardHint}>No coach invites yet.</Text>
+              ) : (
+                coachInvites.slice(0, 6).map((invite) => (
+                  <View key={invite.token} style={styles.inviteRow}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.staffName} numberOfLines={1}>{invite.email || "Coach invite"}</Text>
+                      <Text style={styles.groupMeta}>
+                        {invite.role === "viewer" ? "Viewer" : "Editor"}
+                        {invite.expires_at ? ` • expires ${invite.expires_at.slice(0, 10)}` : ""}
+                      </Text>
+                    </View>
+                    <Text selectable style={styles.inviteTokenInline}>{invite.token}</Text>
+                  </View>
+                ))
+              )}
+            </View>
+          ) : null}
+
+          {staffStatus ? <Text style={styles.successText}>{staffStatus}</Text> : null}
+        </View>
+
         <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}> 
-          <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setPracticeDefaultsOpen((prev) => !prev)}>
+          <Pressable
+            style={styles.sectionHeader}
+            hitSlop={10}
+            onPress={() => void toggleSettingsSection("practice-defaults-section-toggle", setPracticeDefaultsOpen)}
+          >
             <Text style={styles.cardTitle}>Default Practice Times</Text>
             <View style={styles.chevronTapTarget}>
               <Text style={styles.chev}>{practiceDefaultsOpen ? "▾" : "▸"}</Text>
@@ -1329,7 +1743,11 @@ export default function CoachSettingsTab() {
         </View>
 
         <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}> 
-          <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setWorkoutTypesOpen((prev) => !prev)}>
+          <Pressable
+            style={styles.sectionHeader}
+            hitSlop={10}
+            onPress={() => void toggleSettingsSection("workout-categories-section-toggle", setWorkoutTypesOpen)}
+          >
             <Text style={styles.cardTitle}>Workout Categories</Text>
             <View style={styles.chevronTapTarget}>
               <Text style={styles.chev}>{workoutTypesOpen ? "▾" : "▸"}</Text>
@@ -1361,7 +1779,7 @@ export default function CoachSettingsTab() {
           <Pressable
             style={styles.sectionHeader}
             hitSlop={10}
-            onPress={() => setCategoryAutoRoutinesOpen((prev) => !prev)}
+            onPress={() => void toggleAuxiliaryRoutinesSection()}
           >
             <Text style={styles.cardTitle}>Auxiliary Routines</Text>
             <View style={styles.chevronTapTarget}>
@@ -1392,7 +1810,7 @@ export default function CoachSettingsTab() {
                         return (
                           <Pressable
                             key={routine.id}
-                            onPress={() => selectAuxiliaryRoutineById(routine.id)}
+                            onPress={() => void selectAuxiliaryRoutineById(routine.id)}
                             style={[styles.auxListRow, active && styles.auxListRowActive]}
                           >
                             <Text style={[styles.auxListRowTitle, active && styles.auxListRowTitleActive]}>
@@ -1416,6 +1834,7 @@ export default function CoachSettingsTab() {
                       <TextInput
                         value={auxiliaryTitleDraft}
                         onChangeText={setAuxiliaryTitleDraft}
+                        onBlur={() => void commitAuxiliaryRoutineDraft("title-blur")}
                         placeholder="Routine name"
                         style={styles.input}
                       />
@@ -1424,6 +1843,7 @@ export default function CoachSettingsTab() {
                       <TextInput
                         value={auxiliaryDetailsDraft}
                         onChangeText={setAuxiliaryDetailsDraft}
+                        onBlur={() => void commitAuxiliaryRoutineDraft("details-blur")}
                         placeholder="Notes or instructions"
                         style={[styles.input, { minHeight: 90, textAlignVertical: "top" }]}
                         multiline
@@ -1479,20 +1899,48 @@ export default function CoachSettingsTab() {
                         <Text style={{ fontSize: 12, fontWeight: "800", color: auxiliaryAutosaveStatus === "error" ? "#b00020" : "#666" }}>
                           {auxiliaryAutosaveStatus === "saving"
                             ? "Saving..."
+                            : auxiliaryAutosaveStatus === "dirty"
+                            ? "Unsaved changes"
                             : auxiliaryAutosaveStatus === "saved"
                             ? "Saved"
                             : auxiliaryAutosaveStatus === "error"
-                            ? "Autosave failed"
-                            : "Autosave enabled"}
+                            ? "Save failed"
+                            : "Ready"}
                         </Text>
 
-                        <Pressable
-                          onPress={confirmDeleteSelectedAuxiliaryRoutine}
-                          style={[styles.groupDeleteBtn, { alignItems: "center", justifyContent: "center" }]}
-                        >
-                          <Text style={styles.groupDeleteBtnText}>Delete</Text>
-                        </Pressable>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                          <Pressable
+                            onPress={() => void saveSelectedAuxiliaryRoutine()}
+                            disabled={auxiliaryAutosaveStatus === "saving"}
+                            style={[
+                              styles.groupActionBtn,
+                              { alignItems: "center", justifyContent: "center" },
+                              auxiliaryAutosaveStatus === "saving" && styles.disabledBtn,
+                            ]}
+                          >
+                            <Text style={styles.groupActionBtnText}>
+                              {auxiliaryAutosaveStatus === "saving" ? "Saving..." : "Save Routine"}
+                            </Text>
+                          </Pressable>
+
+                          <Pressable
+                            onPress={confirmDeleteSelectedAuxiliaryRoutine}
+                            disabled={auxiliaryAutosaveStatus === "saving"}
+                            style={[
+                              styles.groupDeleteBtn,
+                              { alignItems: "center", justifyContent: "center" },
+                              auxiliaryAutosaveStatus === "saving" && styles.disabledBtn,
+                            ]}
+                          >
+                            <Text style={styles.groupDeleteBtnText}>Delete</Text>
+                          </Pressable>
+                        </View>
                       </View>
+                      {auxiliaryAutosaveStatus === "error" ? (
+                        <Text style={[styles.errorText, { marginTop: 8 }]}>
+                          Couldn't save routine. Your draft is still here.
+                        </Text>
+                      ) : null}
                     </>
                   ) : (
                     <View style={styles.auxEmpty}>
@@ -1510,7 +1958,11 @@ export default function CoachSettingsTab() {
         </View>
 
         <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}> 
-          <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setCustomGroupsOpen((prev) => !prev)}>
+          <Pressable
+            style={styles.sectionHeader}
+            hitSlop={10}
+            onPress={() => void toggleSettingsSection("training-groups-section-toggle", setCustomGroupsOpen)}
+          >
           <Text style={styles.cardTitle}>Training Groups</Text>
             <View style={styles.chevronTapTarget}>
               <Text style={styles.chev}>{customGroupsOpen ? "▾" : "▸"}</Text>
@@ -1661,7 +2113,11 @@ export default function CoachSettingsTab() {
         </View>
 
         <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
-          <Pressable style={styles.sectionHeader} hitSlop={10} onPress={() => setSeasonsOpen((prev) => !prev)}>
+          <Pressable
+            style={styles.sectionHeader}
+            hitSlop={10}
+            onPress={() => void toggleSettingsSection("seasons-section-toggle", setSeasonsOpen)}
+          >
             <Text style={styles.cardTitle}>Seasons</Text>
             <View style={styles.chevronTapTarget}>
               <Text style={styles.chev}>{seasonsOpen ? "▾" : "▸"}</Text>
@@ -2052,6 +2508,104 @@ const styles = StyleSheet.create({
     color: "#0a7a32",
     fontWeight: "700",
     fontSize: 12,
+  },
+  staffRoleSummary: {
+    alignSelf: "flex-start",
+    borderWidth: 1,
+    borderColor: "#dbe3f2",
+    borderRadius: 999,
+    backgroundColor: "#f7f9fc",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 10,
+  },
+  staffRoleSummaryText: { fontSize: 11, fontWeight: "900", color: "#1d2433" },
+  staffInviteBox: {
+    borderWidth: 1,
+    borderColor: "#e1e7f2",
+    borderRadius: 12,
+    backgroundColor: "#fbfcff",
+    padding: 10,
+    marginBottom: 10,
+  },
+  staffRoleToggle: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  staffRoleBtn: {
+    borderWidth: 1,
+    borderColor: "#d3dbe8",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: "#fff",
+  },
+  staffRoleBtnActive: {
+    borderColor: "#10131a",
+    backgroundColor: "#10131a",
+  },
+  staffRoleBtnText: { fontWeight: "900", color: "#1d2433" },
+  staffRoleBtnTextActive: { color: "#fff" },
+  inviteTokenBox: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: "#dbe3f2",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    padding: 10,
+  },
+  inviteTokenText: { fontSize: 12, fontWeight: "800", color: "#111" },
+  staffList: { marginTop: 8 },
+  staffRow: {
+    borderWidth: 1,
+    borderColor: "#e3e8f2",
+    borderRadius: 12,
+    padding: 10,
+    backgroundColor: "#fff",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 8,
+  },
+  staffName: { fontWeight: "900", color: "#111", fontSize: 13 },
+  staffActions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    gap: 6,
+    maxWidth: 260,
+  },
+  staffMiniBtn: {
+    borderWidth: 1,
+    borderColor: "#d3dbe8",
+    borderRadius: 10,
+    paddingHorizontal: 9,
+    paddingVertical: 8,
+    backgroundColor: "#f8faff",
+  },
+  staffMiniBtnActive: {
+    borderColor: "#10131a",
+    backgroundColor: "#10131a",
+  },
+  staffMiniBtnText: { fontSize: 12, fontWeight: "900", color: "#1d2433" },
+  staffMiniBtnTextActive: { color: "#fff" },
+  inviteRow: {
+    borderWidth: 1,
+    borderColor: "#e3e8f2",
+    borderRadius: 12,
+    padding: 10,
+    backgroundColor: "#fff",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 8,
+  },
+  inviteTokenInline: {
+    maxWidth: 180,
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#384054",
   },
 
   groupCard: {

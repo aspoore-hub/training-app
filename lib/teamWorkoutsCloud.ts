@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
+import { requireTeamPermission } from "./teamPermissions";
 
 // Authoritative workout source: team_workouts.
 // Do not add alternative workout read/write paths for this domain.
@@ -39,6 +40,10 @@ export type TeamWorkoutRow = {
   splits_or_pace: string | null;
   additional_feedback: string | null;
 
+  athlete_visible: boolean;
+  athlete_visible_updated_at: string | null;
+  published_at: string | null;
+
   created_at: string;
   updated_at: string;
 };
@@ -52,11 +57,17 @@ export type TeamWorkoutInsertRow = Omit<
   | "completed_time_text"
   | "splits_or_pace"
   | "additional_feedback"
+  | "athlete_visible"
+  | "athlete_visible_updated_at"
+  | "published_at"
 > & {
   completed_miles?: number | null;
   completed_time_text?: string | null;
   splits_or_pace?: string | null;
   additional_feedback?: string | null;
+  athlete_visible?: boolean;
+  athlete_visible_updated_at?: string | null;
+  published_at?: string | null;
 };
 export type TeamWorkoutInsertInput = Omit<TeamWorkoutInsertRow, "team_id"> & {
   team_id?: string;
@@ -148,6 +159,9 @@ export function buildTeamWorkoutInsertRows(params: TeamWorkoutInsertParams): Tea
     completed_time_text: null,
     splits_or_pace: null,
     additional_feedback: null,
+    athlete_visible: false,
+    athlete_visible_updated_at: new Date().toISOString(),
+    published_at: null,
   }));
 }
 
@@ -155,11 +169,15 @@ export async function createTeamWorkoutBatch(
   rows: TeamWorkoutInsertInput[]
 ): Promise<TeamWorkoutRow[]> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("training.edit", teamId);
   if (!Array.isArray(rows) || rows.length === 0) return [];
 
   const payload: TeamWorkoutInsertInput[] = rows.map((r) => ({
     ...r,
     team_id: r.team_id ?? teamId,
+    athlete_visible: r.athlete_visible ?? false,
+    athlete_visible_updated_at: r.athlete_visible_updated_at ?? new Date().toISOString(),
+    published_at: r.published_at ?? null,
   }));
 
   const { data, error } = await supabase
@@ -252,6 +270,118 @@ export async function listAthleteWorkoutsInRange(
   return (data ?? []) as TeamWorkoutRow[];
 }
 
+export async function listVisibleAthleteWorkoutsInRange(
+  athleteProfileId: string,
+  dateStartISO: string,
+  dateEndISO: string
+): Promise<TeamWorkoutRow[]> {
+  const teamId = await requireTeamId();
+
+  const { data, error } = await supabase
+    .from("team_workouts")
+    .select("*")
+    .eq("team_id", teamId)
+    .eq("athlete_profile_id", athleteProfileId)
+    .eq("athlete_visible", true)
+    .gte("date_iso", dateStartISO)
+    .lte("date_iso", dateEndISO)
+    .order("date_iso", { ascending: true })
+    .order("session", { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as TeamWorkoutRow[];
+}
+
+export async function getVisibleAthleteWorkoutById(
+  id: string,
+  athleteProfileId: string
+): Promise<TeamWorkoutRow | null> {
+  const teamId = await requireTeamId();
+
+  const { data, error } = await supabase
+    .from("team_workouts")
+    .select("*")
+    .eq("team_id", teamId)
+    .eq("id", id)
+    .eq("athlete_profile_id", athleteProfileId)
+    .eq("athlete_visible", true)
+    .maybeSingle();
+
+  if (error) throw error;
+  return (data ?? null) as TeamWorkoutRow | null;
+}
+
+export async function setWorkoutVisibilityByDateRange(input: {
+  teamId?: string | null;
+  startISO: string;
+  endISO: string;
+  athleteIds?: string[] | null;
+  visible: boolean;
+}): Promise<number> {
+  const teamId = input.teamId ?? await requireTeamId();
+  await requireTeamPermission("training.publish", teamId);
+  const now = new Date().toISOString();
+  let query = supabase
+    .from("team_workouts")
+    .update({
+      athlete_visible: !!input.visible,
+      athlete_visible_updated_at: now,
+      published_at: input.visible ? now : null,
+    })
+    .eq("team_id", teamId)
+    .gte("date_iso", input.startISO)
+    .lte("date_iso", input.endISO);
+
+  const athleteIds = Array.from(
+    new Set((input.athleteIds ?? []).map((id) => String(id ?? "").trim()).filter(Boolean))
+  );
+  if (athleteIds.length > 0) query = query.in("athlete_profile_id", athleteIds);
+
+  const { data, error } = await query.select("id");
+  if (error) throw error;
+  return Array.isArray(data) ? data.length : 0;
+}
+
+export async function setWorkoutVisibilityByBatch(input: {
+  teamId?: string | null;
+  batchId: string;
+  visible: boolean;
+}): Promise<void> {
+  const teamId = input.teamId ?? await requireTeamId();
+  await requireTeamPermission("training.publish", teamId);
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("team_workouts")
+    .update({
+      athlete_visible: !!input.visible,
+      athlete_visible_updated_at: now,
+      published_at: input.visible ? now : null,
+    })
+    .eq("team_id", teamId)
+    .eq("batch_id", input.batchId);
+
+  if (error) throw error;
+}
+
+export async function setWorkoutVisibilityByIds(ids: string[], visible: boolean): Promise<void> {
+  const teamId = await requireTeamId();
+  await requireTeamPermission("training.publish", teamId);
+  const cleanIds = Array.from(new Set((ids ?? []).map((id) => String(id ?? "").trim()).filter(Boolean)));
+  if (cleanIds.length === 0) return;
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("team_workouts")
+    .update({
+      athlete_visible: !!visible,
+      athlete_visible_updated_at: now,
+      published_at: visible ? now : null,
+    })
+    .eq("team_id", teamId)
+    .in("id", cleanIds);
+
+  if (error) throw error;
+}
+
 export async function updateTeamWorkout(
   id: string,
   patch: Partial<Omit<TeamWorkoutRow, "id" | "team_id" | "created_at" | "updated_at">>
@@ -264,6 +394,7 @@ export async function updateTeamWorkoutById(
   patch: Partial<TeamWorkoutRow>
 ): Promise<void> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("training.edit", teamId);
 
   const { error } = await supabase
     .from("team_workouts")
@@ -279,6 +410,7 @@ export async function updateTeamWorkoutsByBatchId(
   patch: Partial<TeamWorkoutRow>
 ): Promise<void> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("training.edit", teamId);
   const { error } = await supabase
     .from("team_workouts")
     .update(patch)
@@ -296,6 +428,7 @@ export async function bulkUpdateTeamWorkouts(
 
 export async function deleteTeamWorkout(id: string) {
   const teamId = await requireTeamId();
+  await requireTeamPermission("training.edit", teamId);
 
   const { error } = await supabase
     .from("team_workouts")
@@ -308,6 +441,7 @@ export async function deleteTeamWorkout(id: string) {
 
 export async function deleteTeamWorkoutsByIds(ids: string[]): Promise<number> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("training.edit", teamId);
   const cleanIds = Array.from(
     new Set((Array.isArray(ids) ? ids : []).map((id) => String(id ?? "").trim()).filter(Boolean))
   );
@@ -326,6 +460,7 @@ export async function deleteTeamWorkoutsByIds(ids: string[]): Promise<number> {
 
 export async function deleteWorkoutBatch(batchId: string): Promise<number> {
   const teamId = await requireTeamId();
+  await requireTeamPermission("training.edit", teamId);
   const cleanBatchId = String(batchId ?? "").trim();
   if (!cleanBatchId) throw new Error("Missing batchId");
 

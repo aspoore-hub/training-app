@@ -8,8 +8,10 @@ import {
   createTeamAthlete,
   getCurrentTeamId,
   getMyUserId,
+  linkTeamAthleteToExistingUserEmail,
 } from "../../lib/team";
 import { teamDataStore, type TeamAthlete } from "../../lib/teamDataStore";
+import { canEditRoster, getCurrentTeamRole, type TeamRole } from "../../lib/teamPermissions";
 import { supabase } from "../../lib/supabase";
 import { AppText } from "../ui/AppText";
 import { Button } from "../ui/Button";
@@ -52,6 +54,8 @@ export function RosterListPane() {
   const [email, setEmail] = useState("");
   const [lastInviteToken, setLastInviteToken] = useState("");
   const [rosterFilter, setRosterFilter] = useState<"active" | "all" | "inactive">("active");
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const readOnlyRoster = !canEditRoster(currentTeamRole);
 
   async function debugRLS() {
     if (!DEBUG_RLS) return;
@@ -82,6 +86,20 @@ export function RosterListPane() {
 
   useEffect(() => {
     debugRLS();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getCurrentTeamRole()
+      .then((role) => {
+        if (!cancelled) setCurrentTeamRole(role);
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentTeamRole(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useFocusEffect(
@@ -182,13 +200,31 @@ export function RosterListPane() {
       setBusy(true);
       setStatus("");
       try {
-        await createTeamAthlete(fn, ln, nextEmail || null);
+        const created = await createTeamAthlete(fn, ln, nextEmail || null);
+        if (nextEmail && created?.id) {
+          try {
+            const teamId = await getCurrentTeamId();
+            const linkResult = await linkTeamAthleteToExistingUserEmail(teamId, created.id, nextEmail);
+            if (linkResult.status === "linked") {
+              setStatus(`Athlete profile created. Login linked to ${linkResult.linked_email ?? nextEmail}.`);
+            } else if (linkResult.status === "no_user_found") {
+              setStatus("Athlete profile created. Email saved, but no login account exists yet.");
+            } else if (linkResult.status === "duplicate_claim") {
+              setStatus("Athlete profile created. That login is already linked to another athlete on this team.");
+            } else {
+              setStatus("Athlete profile created. Login access was not linked.");
+            }
+          } catch (linkError) {
+            console.warn("Create athlete login link failed", linkError);
+            setStatus("Athlete profile created. Login access was not linked.");
+          }
+        }
         await teamDataStore.actions.refreshRoster();
         setFirstName("");
         setLastName("");
         setEmail("");
-        if (Platform.OS === "web") setStatus("Athlete profile created.");
-        else Alert.alert("Created", "Athlete profile created.");
+        if (!nextEmail && Platform.OS === "web") setStatus("Athlete profile created.");
+        else if (Platform.OS !== "web") Alert.alert("Created", "Athlete profile created.");
       } catch (e: any) {
         console.warn("Create athlete failed", e);
         Alert.alert("Create failed", e?.message ?? "Could not create athlete profile.");
@@ -310,56 +346,67 @@ export function RosterListPane() {
           </Card>
         ) : null}
 
-        <Card style={{ ...sectionCardStyle, gap: 9, paddingVertical: 10 }}>
-          <View style={{ gap: 2 }}>
-            <AppText variant="headline">Add athlete</AppText>
-            <AppText variant="caption" color="mutedText">
-              Create a new roster profile.
+        {readOnlyRoster ? (
+          <Card style={{ ...sectionCardStyle, gap: 3, paddingVertical: 10, backgroundColor: "#f8fafc" }}>
+            <AppText variant="sub" style={{ color: "#475569", fontWeight: "800" }}>
+              Viewer access: editing is disabled.
             </AppText>
-          </View>
-          <View style={{ flexDirection: isDesktop ? "row" : "column", gap: 8 }}>
-            <TextField
-              label="First name"
-              value={firstName}
-              onChangeText={setFirstName}
-              placeholder="e.g. Amelia"
-              autoCapitalize="words"
-              style={isDesktop ? { flex: 1 } : undefined}
-            />
-            <TextField
-              label="Last name"
-              value={lastName}
-              onChangeText={setLastName}
-              placeholder="e.g. Dodds"
-              autoCapitalize="words"
-              style={isDesktop ? { flex: 1 } : undefined}
-            />
-            <TextField
-              label="Email (optional)"
-              value={email}
-              onChangeText={setEmail}
-              placeholder="e.g. jane@email.com"
-              keyboardType="email-address"
-              autoCapitalize="none"
-              style={isDesktop ? { flex: 1.2 } : undefined}
-            />
-          </View>
-          <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <Button
-              title={busy ? "Working..." : "Create Athlete"}
-              onPress={addAthlete}
-              disabled={busy}
-              style={{ height: 36 }}
-            />
-            <Button
-              title={s.loadingCount > 0 ? "Refreshing..." : "Refresh"}
-              variant="secondary"
-              onPress={() => void teamDataStore.actions.refreshRoster()}
-              disabled={busy || s.loadingCount > 0}
-              style={{ height: 36 }}
-            />
-          </View>
-        </Card>
+            <AppText variant="caption" color="mutedText">
+              Roster profiles and invite tools are available to Owners and Editors.
+            </AppText>
+          </Card>
+        ) : (
+          <Card style={{ ...sectionCardStyle, gap: 9, paddingVertical: 10 }}>
+            <View style={{ gap: 2 }}>
+              <AppText variant="headline">Add athlete</AppText>
+              <AppText variant="caption" color="mutedText">
+                Create a new roster profile.
+              </AppText>
+            </View>
+            <View style={{ flexDirection: isDesktop ? "row" : "column", gap: 8 }}>
+              <TextField
+                label="First name"
+                value={firstName}
+                onChangeText={setFirstName}
+                placeholder="e.g. Amelia"
+                autoCapitalize="words"
+                style={isDesktop ? { flex: 1 } : undefined}
+              />
+              <TextField
+                label="Last name"
+                value={lastName}
+                onChangeText={setLastName}
+                placeholder="e.g. Dodds"
+                autoCapitalize="words"
+                style={isDesktop ? { flex: 1 } : undefined}
+              />
+              <TextField
+                label="Email (optional)"
+                value={email}
+                onChangeText={setEmail}
+                placeholder="e.g. jane@email.com"
+                keyboardType="email-address"
+                autoCapitalize="none"
+                style={isDesktop ? { flex: 1.2 } : undefined}
+              />
+            </View>
+            <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <Button
+                title={busy ? "Working..." : "Create Athlete"}
+                onPress={addAthlete}
+                disabled={busy}
+                style={{ height: 36 }}
+              />
+              <Button
+                title={s.loadingCount > 0 ? "Refreshing..." : "Refresh"}
+                variant="secondary"
+                onPress={() => void teamDataStore.actions.refreshRoster()}
+                disabled={busy || s.loadingCount > 0}
+                style={{ height: 36 }}
+              />
+            </View>
+          </Card>
+        )}
 
         <Card style={{ ...sectionCardStyle, padding: 0, overflow: "hidden", flex: 1 }}>
           <View style={{ paddingHorizontal: theme.space.md, paddingTop: 9, paddingBottom: 8, gap: 7 }}>
@@ -467,15 +514,17 @@ export function RosterListPane() {
                         ID: {a.id}
                       </AppText>
                     </View>
-                    <View style={{ width: 86, alignItems: "flex-end" }}>
-                      <Button
-                        title="Invite"
-                        variant="secondary"
-                        disabled={busy}
-                        onPress={() => inviteAthlete(a)}
-                        style={{ height: 32, minWidth: 80 }}
-                      />
-                    </View>
+                    {!readOnlyRoster ? (
+                      <View style={{ width: 86, alignItems: "flex-end" }}>
+                        <Button
+                          title="Invite"
+                          variant="secondary"
+                          disabled={busy}
+                          onPress={() => inviteAthlete(a)}
+                          style={{ height: 32, minWidth: 80 }}
+                        />
+                      </View>
+                    ) : null}
                   </View>
                 </Pressable>
                 {idx !== filtered.length - 1 ? <Divider /> : null}

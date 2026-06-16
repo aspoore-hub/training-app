@@ -1,5 +1,6 @@
 import { Alert, Pressable, Text, View } from "react-native";
 import { useRouter } from "expo-router";
+import { AccountContextSelector } from "../../components/account/AccountContextSelector";
 import { supabase } from "../../lib/supabase";
 
 export default function AthleteSettingsScreen() {
@@ -21,6 +22,10 @@ export default function AthleteSettingsScreen() {
         Account and app options.
       </Text>
 
+      <View style={{ marginTop: 14, alignItems: "flex-start" }}>
+        <AccountContextSelector />
+      </View>
+
       <View
         style={{
           marginTop: 16,
@@ -29,8 +34,22 @@ export default function AthleteSettingsScreen() {
           borderColor: "#e2e8f0",
           backgroundColor: "#ffffff",
           padding: 14,
+          gap: 10,
         }}
       >
+        <Pressable
+          onPress={() => router.push("/(auth)/choose-account")}
+          style={{
+            borderRadius: 10,
+            borderWidth: 1,
+            borderColor: "#bfdbfe",
+            backgroundColor: "#eff6ff",
+            paddingVertical: 12,
+            alignItems: "center",
+          }}
+        >
+          <Text style={{ fontWeight: "900", color: "#1d4ed8" }}>Switch account/team</Text>
+        </Pressable>
         <Pressable
           onPress={logOut}
           style={{
@@ -48,4 +67,3 @@ export default function AthleteSettingsScreen() {
     </View>
   );
 }
-

@@ -1,37 +1,62 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
-import { loadFeedbackFlagSettings, type FeedbackWarningMode } from "../../lib/feedbackFlags";
+import {
+  buildAthleteDailyLogEntryId,
+  listAthleteDailyLogEntriesForWeek,
+  type AthleteDailyLogActivityKind,
+  type AthleteDailyLogEntry,
+  type AthleteDailyLogEntryType,
+  upsertAthleteDailyLogEntry,
+} from "../../lib/athleteDailyLogEntries";
 import {
   hasMileageFeedback as hasMileageFeedbackEntry,
   hasWorkoutFeedback as hasWorkoutFeedbackRow,
+  parseNumericLike,
 } from "../../lib/feedbackParsing";
-import { loadMileageFeedback, type MileageSessionFeedback } from "../../lib/mileageFeedback";
+import {
+  buildMileageFeedbackId,
+  loadMileageFeedback,
+  migrateLocalMileageFeedbackToTeamForAthlete,
+  type MileageSessionFeedback,
+  upsertMileageFeedback,
+} from "../../lib/mileageFeedback";
 import { loadWeekStartSetting } from "../../lib/settings";
 import { loadJSON } from "../../lib/storage";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
-import { listAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
-import { teamDataStore } from "../../lib/teamDataStore";
+import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow, updateTeamWorkoutById } from "../../lib/teamWorkoutsCloud";
+import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import { formatMileage, getWeekIndex, getWeekStartISO, parseISODate, parseMileageInput, toISODate } from "../../lib/mileagePlan";
 import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../lib/categories";
 import type { MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
 
-type PendingTarget = {
+type TodaySessionCard = {
   key: string;
+  session: "AM" | "PM";
+  prescribed: string;
+  workouts: TeamWorkoutRow[];
+  mileageFeedback?: MileageSessionFeedback;
+  status: "submitted" | "missing" | "none" | "multiple";
   title: string;
-  subtitle: string;
-  description?: string;
-  routeParams: Record<string, string>;
+  summary: string;
+  planSummary: string;
 };
 
-type SessionPreview = {
-  session: "AM" | "PM";
-  workoutId: string;
-  title: string;
-  details: string;
-  timeLocation: string;
-  categories: string[];
-  moreCount: number;
+type FeedbackEditorState = {
+  card: TodaySessionCard;
+  completedMilesText: string;
+  completedTimeText: string;
+  splitsText: string;
+  additionalFeedbackText: string;
+};
+
+type DailyLogEditorState = {
+  entryType: AthleteDailyLogEntryType;
+  activityKind: AthleteDailyLogActivityKind;
+  titleText: string;
+  completedMilesText: string;
+  completedTimeText: string;
+  notesText: string;
 };
 
 function normalizeSession(value: string | undefined): "AM" | "PM" {
@@ -46,28 +71,20 @@ function toMileageValue(raw: unknown): MileageValue | undefined {
   return undefined;
 }
 
-function addDaysISO(dateISO: string, days: number) {
-  const d = parseISODate(dateISO);
-  d.setDate(d.getDate() + days);
-  return toISODate(d);
-}
-
 function formatDisplayDate(iso: string) {
   const [y, m, d] = String(iso ?? "").split("-").map(Number);
   if (!y || !m || !d) return String(iso ?? "");
   const dt = new Date(y, m - 1, d);
   if (Number.isNaN(dt.getTime())) return String(iso ?? "");
-  return dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  return dt.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
 }
 
-function daysBetween(startISO: string, endISO: string): string[] {
-  const out: string[] = [];
-  let current = String(startISO);
-  while (current <= endISO) {
-    out.push(current);
-    current = addDaysISO(current, 1);
-  }
-  return out;
+function formatCompactDate(iso: string) {
+  const [y, m, d] = String(iso ?? "").split("-").map(Number);
+  if (!y || !m || !d) return String(iso ?? "");
+  const dt = new Date(y, m - 1, d);
+  if (Number.isNaN(dt.getTime())) return String(iso ?? "");
+  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function workoutCategoryNames(row: TeamWorkoutRow): string[] {
@@ -78,46 +95,63 @@ function workoutCategoryNames(row: TeamWorkoutRow): string[] {
   return cleaned.length > 0 ? cleaned : ["Other"];
 }
 
-function hasFeedbackInWorkout(row: TeamWorkoutRow): boolean {
-  return hasWorkoutFeedbackRow(row);
+function feedbackSummaryFromWorkout(row: TeamWorkoutRow): string {
+  const parts = [
+    row.completed_miles != null ? `${row.completed_miles} mi` : "",
+    String(row.completed_time_text ?? "").trim(),
+    String(row.splits_or_pace ?? "").trim(),
+    String(row.additional_feedback ?? "").trim(),
+  ].filter(Boolean);
+  return parts.join(" • ");
 }
 
-function hasFeedbackInMileageEntry(entry: MileageSessionFeedback): boolean {
-  return hasMileageFeedbackEntry(entry);
+function feedbackSummaryFromMileage(entry?: MileageSessionFeedback): string {
+  if (!entry) return "";
+  const parts = [
+    entry.completedMiles != null ? `${entry.completedMiles} mi` : "",
+    String(entry.completedTime ?? "").trim(),
+    String(entry.splitsOrPace ?? "").trim(),
+    String(entry.additionalFeedback ?? "").trim(),
+  ].filter(Boolean);
+  return parts.join(" • ");
 }
 
-function isDateWithinWindow(
-  dateISO: string,
-  todayISO: string,
-  mode: FeedbackWarningMode,
-  startDateISO?: string
-) {
-  if (!dateISO || dateISO > todayISO) return false;
+function plannedTextFromWorkout(row: TeamWorkoutRow): string {
+  const parts = [
+    String(row.title ?? "").trim(),
+    String(row.details ?? "").trim(),
+    String(row.time_text ?? "").trim(),
+    String((row as any).location ?? "").trim(),
+  ].filter(Boolean);
+  return parts.join(" • ");
+}
 
-  if (mode === "all") return true;
+function statusColors(status: TodaySessionCard["status"]) {
+  if (status === "submitted") return { border: "#bbf7d0", bg: "#f0fdf4", text: "#166534", label: "Submitted" };
+  if (status === "missing") return { border: "#fecaca", bg: "#fff1f2", text: "#991b1b", label: "Missing" };
+  if (status === "multiple") return { border: "#fed7aa", bg: "#fff7ed", text: "#9a3412", label: "Multiple" };
+  return { border: "#e2e8f0", bg: "#f8fafc", text: "#64748b", label: "No planned session" };
+}
 
-  if (mode === "last_7_days") {
-    const lower = addDaysISO(todayISO, -7);
-    return dateISO >= lower;
-  }
+function formatDailyLogActivityKind(kind?: AthleteDailyLogActivityKind) {
+  if (kind === "cross_training") return "Cross training";
+  if (kind === "run") return "Run";
+  if (kind === "strength") return "Strength";
+  if (kind === "mobility") return "Mobility";
+  if (kind === "other") return "Other";
+  return "";
+}
 
-  if (mode === "last_14_days") {
-    const lower = addDaysISO(todayISO, -14);
-    return dateISO >= lower;
-  }
-
-  if (mode === "previous_month") {
-    const today = parseISODate(todayISO);
-    const firstCurrent = toISODate(new Date(today.getFullYear(), today.getMonth(), 1));
-    const prevEndISO = addDaysISO(firstCurrent, -1);
-    const prevEnd = parseISODate(prevEndISO);
-    const prevStartISO = toISODate(new Date(prevEnd.getFullYear(), prevEnd.getMonth(), 1));
-    return dateISO >= prevStartISO && dateISO <= prevEndISO;
-  }
-
-  const start = String(startDateISO ?? "").trim();
-  if (!start) return false;
-  return dateISO >= start && dateISO <= todayISO;
+function formatDailyLogEntrySummary(entry: AthleteDailyLogEntry) {
+  const title = String(entry.title ?? "").trim();
+  const notes = String(entry.notes ?? "").trim();
+  const parts = [
+    entry.entryType === "extra_activity" ? formatDailyLogActivityKind(entry.activityKind) : "Daily note",
+    entry.completedMiles != null && String(entry.completedMiles).trim() ? `${entry.completedMiles} mi` : "",
+    String(entry.completedTime ?? "").trim(),
+  ].filter(Boolean);
+  const detail = title || notes;
+  return [parts.join(" · "), detail].filter(Boolean).join(": ");
 }
 
 export default function AthleteDashboardScreen() {
@@ -129,100 +163,84 @@ export default function AthleteDashboardScreen() {
   const [selectedAthleteName, setSelectedAthleteName] = useState<string | null>(null);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
   const [todayRows, setTodayRows] = useState<TeamWorkoutRow[]>([]);
+  const [todayMileageFeedbackEntries, setTodayMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
+  const [todayDailyLogEntries, setTodayDailyLogEntries] = useState<AthleteDailyLogEntry[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
-  const [windowRows, setWindowRows] = useState<TeamWorkoutRow[]>([]);
-  const [windowMileageFeedbackEntries, setWindowMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
-  const [feedbackWindowMode, setFeedbackWindowMode] = useState<FeedbackWarningMode>("all");
-  const [feedbackWindowStartDateISO, setFeedbackWindowStartDateISO] = useState<string | undefined>(undefined);
-  const [pendingLoading, setPendingLoading] = useState(true);
+  const [editor, setEditor] = useState<FeedbackEditorState | null>(null);
+  const [editorSaving, setEditorSaving] = useState(false);
+  const [editorError, setEditorError] = useState<string | null>(null);
+  const [dailyLogEditor, setDailyLogEditor] = useState<DailyLogEditorState | null>(null);
+  const [dailyLogSaving, setDailyLogSaving] = useState(false);
+  const [dailyLogError, setDailyLogError] = useState<string | null>(null);
   const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
   const inFlightRef = useRef(false);
   const activeLoadKeyRef = useRef("");
 
   const todayISO = useMemo(() => toISODate(new Date()), []);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (force = false) => {
     if (inFlightRef.current) return;
     const loadKey = todayISO;
     const now = Date.now();
-    if (lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
+    if (!force && lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
       return;
     }
+
     inFlightRef.current = true;
     activeLoadKeyRef.current = loadKey;
     setLoading(true);
-    setPendingLoading(true);
     try {
-      const [weekStartResult, feedbackSettings, athleteSession, storedCategories] = await Promise.all([
+      const [weekStartResult, athleteSession, storedCategories] = await Promise.all([
         loadWeekStartSetting(),
-        loadFeedbackFlagSettings(),
         resolveAthleteSessionContext(),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       ]);
 
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
       setWeekStartsOn(resolvedWeekStart);
-      setFeedbackWindowMode(feedbackSettings.mode ?? "all");
-      setFeedbackWindowStartDateISO(feedbackSettings.startDateISO);
-
-      const resolvedAthleteId = String(athleteSession.athleteId ?? "").trim();
-      setSelectedAthleteId(resolvedAthleteId || null);
       setCategories(normalizeCategories(storedCategories));
 
+      const resolvedAthleteId = String(athleteSession.athleteId ?? "").trim();
+      const athleteName = String(athleteSession.athleteName ?? "").trim() || null;
+      setSelectedAthleteId(resolvedAthleteId || null);
+      setSelectedAthleteName(athleteName);
+
       if (!resolvedAthleteId) {
-        setSelectedAthleteName(null);
         setTodayRows([]);
-        setWindowRows([]);
-        setWindowMileageFeedbackEntries([]);
-        setPendingLoading(false);
-        setLoading(false);
+        setTodayMileageFeedbackEntries([]);
+        setTodayDailyLogEntries([]);
+        lastLoadRef.current = { key: loadKey, ts: Date.now() };
         return;
       }
 
-      const athleteName = String(athleteSession.athleteName ?? "").trim() || null;
-      setSelectedAthleteName(athleteName);
+      await migrateLocalMileageFeedbackToTeamForAthlete({
+        athleteId: resolvedAthleteId,
+        athleteName,
+      });
 
-      const windowDates = daysBetween(addDaysISO(todayISO, -90), todayISO).filter((dateISO) =>
-        isDateWithinWindow(dateISO, todayISO, feedbackSettings.mode ?? "all", feedbackSettings.startDateISO)
-      );
-      const windowStartISO = windowDates[0] ?? todayISO;
-      const windowEndISO = windowDates[windowDates.length - 1] ?? todayISO;
+      const weekStartISO = getWeekStartISO(todayISO, resolvedWeekStart);
+      const [todayOnlyRows, allMileageFeedback, todayDailyLogs] = await Promise.all([
+        listVisibleAthleteWorkoutsInRange(resolvedAthleteId, todayISO, todayISO),
+        loadMileageFeedback(),
+        listAthleteDailyLogEntriesForWeek(resolvedAthleteId, todayISO, todayISO),
+        teamDataStore.actions.loadVisibleMileageWeekForAthlete(resolvedAthleteId, weekStartISO),
+      ]);
 
-      const weekStartsToLoad = new Set<string>();
-      weekStartsToLoad.add(getWeekStartISO(todayISO, resolvedWeekStart));
-      await teamDataStore.actions.loadMileageWeek(getWeekStartISO(todayISO, resolvedWeekStart));
-
-      const todayOnlyRows = await listAthleteWorkoutsInRange(resolvedAthleteId, todayISO, todayISO);
       if (activeLoadKeyRef.current !== loadKey) return;
       setTodayRows(todayOnlyRows);
-      setWindowRows(todayOnlyRows);
-      setLoading(false);
-
-      // Hydrate heavier feedback-window data in background.
-      void (async () => {
-        windowDates.forEach((dateISO) => weekStartsToLoad.add(getWeekStartISO(dateISO, resolvedWeekStart)));
-        const [allMileageFeedback, rows] = await Promise.all([
-          loadMileageFeedback(),
-          listAthleteWorkoutsInRange(resolvedAthleteId, windowStartISO, windowEndISO),
-          Promise.all(Array.from(weekStartsToLoad).map((weekStartISO) => teamDataStore.actions.loadMileageWeek(weekStartISO))),
-        ]);
-        if (activeLoadKeyRef.current !== loadKey) return;
-        setWindowRows(rows);
-        const filteredMileage = allMileageFeedback.filter((entry) => {
+      setTodayMileageFeedbackEntries(
+        allMileageFeedback.filter((entry) => {
           const entryAthleteId = String((entry as any)?.athleteId ?? "").trim();
           const byId = entryAthleteId === resolvedAthleteId;
           const byName =
             !entryAthleteId &&
             athleteName &&
             String(entry.athleteName ?? "").trim().toLowerCase() === athleteName.toLowerCase();
-          if (!byId && !byName) return false;
-          return windowDates.includes(String(entry.dateISO ?? ""));
-        });
-        setWindowMileageFeedbackEntries(filteredMileage);
-        setPendingLoading(false);
-        lastLoadRef.current = { key: loadKey, ts: Date.now() };
-      })();
-      return;
+          return (byId || byName) && String(entry.dateISO ?? "") === todayISO;
+        })
+      );
+      setTodayDailyLogEntries(todayDailyLogs);
+      lastLoadRef.current = { key: loadKey, ts: Date.now() };
     } finally {
       setLoading(false);
       inFlightRef.current = false;
@@ -231,18 +249,19 @@ export default function AthleteDashboardScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      void loadData();
+      void loadData(true);
     }, [loadData])
   );
 
   const todayAssignment = useMemo(() => {
     if (!selectedAthleteId) return null;
     const weekStartISO = getWeekStartISO(todayISO, weekStartsOn);
+    const visibleMileageKey = visibleMileageAthleteWeekKey(selectedAthleteId, weekStartISO);
     const idx = getWeekIndex(todayISO, weekStartISO);
     if (idx < 0 || idx > 6) return null;
 
-    const cells = store.mileageCellsByWeek[weekStartISO] ?? [];
-    const flags = store.mileageFlagsByWeek[weekStartISO] ?? [];
+    const cells = store.visibleMileageCellsByAthleteWeek[visibleMileageKey] ?? [];
+    const flags = store.visibleMileageFlagsByAthleteWeek[visibleMileageKey] ?? [];
 
     const am = toMileageValue(
       cells.find(
@@ -273,157 +292,253 @@ export default function AthleteDashboardScreen() {
       ncaaOff,
       hasPlan: Boolean(am || pm || ncaaOff),
     };
-  }, [selectedAthleteId, store.mileageCellsByWeek, store.mileageFlagsByWeek, todayISO, weekStartsOn]);
+  }, [selectedAthleteId, store.visibleMileageCellsByAthleteWeek, store.visibleMileageFlagsByAthleteWeek, todayISO, weekStartsOn]);
 
-  const todaySummary = useMemo(() => {
-    if (!todayAssignment?.hasPlan) {
-      return {
-        am: "",
-        pm: "",
-        goal: "",
-      };
-    }
-
-    const am = String(todayAssignment.amLabel ?? "").trim();
-    const pm = String(todayAssignment.pmLabel ?? "").trim();
-    const segments = [am, pm].filter(Boolean);
-    const goal = segments.length > 0 ? segments.join(" • ") : todayAssignment.ncaaOff ? "Off day" : "";
-    return { am, pm, goal };
-  }, [todayAssignment]);
-
-  const todaySessionPreviews = useMemo<SessionPreview[]>(() => {
-    const bySession = new Map<"AM" | "PM", TeamWorkoutRow[]>();
+  const todaySessionCards = useMemo<TodaySessionCard[]>(() => {
+    const workoutBySession = new Map<"AM" | "PM", TeamWorkoutRow[]>();
     for (const row of todayRows) {
       const session = normalizeSession(row.session);
-      const list = bySession.get(session) ?? [];
+      const list = workoutBySession.get(session) ?? [];
       list.push(row);
-      bySession.set(session, list);
+      workoutBySession.set(session, list);
     }
 
-    return (["AM", "PM"] as const)
-      .map((session) => {
-        const rows = (bySession.get(session) ?? []).sort((a, b) =>
-          String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""))
+    const mileageFeedbackBySession = new Map<"AM" | "PM", MileageSessionFeedback>();
+    for (const entry of todayMileageFeedbackEntries) {
+      if (String(entry.dateISO ?? "") !== todayISO) continue;
+      mileageFeedbackBySession.set(normalizeSession(entry.session), entry);
+    }
+
+    return (["AM", "PM"] as const).map((session) => {
+      const workouts = (workoutBySession.get(session) ?? []).sort((a, b) =>
+        String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""))
+      );
+      const topWorkout = workouts[0];
+      const mileageFeedback = mileageFeedbackBySession.get(session);
+      const prescribed = session === "AM" ? todayAssignment?.amLabel ?? "" : todayAssignment?.pmLabel ?? "";
+      const submitted = workouts.some((row) => hasWorkoutFeedbackRow(row)) || Boolean(mileageFeedback && hasMileageFeedbackEntry(mileageFeedback));
+      const hasPlannedSession = workouts.length > 0 || prescribed.length > 0;
+      const status: TodaySessionCard["status"] =
+        workouts.length > 1 ? "multiple" : submitted ? "submitted" : hasPlannedSession ? "missing" : "none";
+      const title =
+        workouts.length > 1
+          ? `${workouts.length} workouts scheduled`
+          : topWorkout
+            ? String(topWorkout.title ?? "Workout").trim() || "Workout"
+            : prescribed
+              ? `${session} Planned Session`
+              : "No planned session";
+      const workoutPlan = topWorkout ? plannedTextFromWorkout(topWorkout) : "";
+      const planSummary = [prescribed ? `Mileage: ${prescribed}` : "", workoutPlan].filter(Boolean).join(" • ");
+      const submittedSummary = topWorkout ? feedbackSummaryFromWorkout(topWorkout) : feedbackSummaryFromMileage(mileageFeedback);
+      const summary =
+        status === "submitted"
+          ? submittedSummary || "Log submitted."
+          : workouts.length > 1
+            ? "Open the day view to complete logs for multiple workouts in this session."
+            : topWorkout
+              ? String(topWorkout.details ?? "").trim() || String(topWorkout.time_text ?? "").trim() || "Workout log needed."
+              : prescribed
+                ? `Prescribed mileage: ${prescribed}`
+                : "Nothing planned for this session.";
+
+      return {
+        key: `${todayISO}|${session}`,
+        session,
+        prescribed,
+        workouts,
+        mileageFeedback,
+        status,
+        title,
+        summary,
+        planSummary,
+      };
+    });
+  }, [todayAssignment, todayISO, todayMileageFeedbackEntries, todayRows]);
+
+  const openEditorForCard = useCallback((card: TodaySessionCard) => {
+    if (card.status === "none") return;
+    if (card.status === "multiple") {
+      Alert.alert("Multiple workouts", "Open the day view to complete logs for multiple workouts in this session.", [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Open day",
+          onPress: () => router.push({ pathname: "/(athlete)/day", params: { date: todayISO } }),
+        },
+      ]);
+      return;
+    }
+
+    const workout = card.workouts[0];
+    const mileage = card.mileageFeedback;
+    setEditorError(null);
+    setEditor({
+      card,
+      completedMilesText:
+        workout?.completed_miles != null
+          ? String(workout.completed_miles)
+          : mileage?.completedMiles != null
+            ? String(mileage.completedMiles)
+            : "",
+      completedTimeText: String(workout?.completed_time_text ?? mileage?.completedTime ?? ""),
+      splitsText: String(workout?.splits_or_pace ?? mileage?.splitsOrPace ?? ""),
+      additionalFeedbackText: String(workout?.additional_feedback ?? mileage?.additionalFeedback ?? ""),
+    });
+  }, [router, todayISO]);
+
+  const saveEditor = useCallback(async () => {
+    if (!editor) return;
+    const completedMilesRaw = editor.completedMilesText.trim();
+    const completedTimeText = editor.completedTimeText.trim();
+    const splitsText = editor.splitsText.trim();
+    const additionalFeedbackText = editor.additionalFeedbackText.trim();
+    const parsedCompletedMiles = completedMilesRaw ? parseNumericLike(completedMilesRaw) : undefined;
+
+    if (completedMilesRaw && parsedCompletedMiles == null) {
+      setEditorError("Distance must be a number, like 5 or 5.25.");
+      return;
+    }
+    if (parsedCompletedMiles != null && !/^\d+(\.\d{1,2})?$/.test(completedMilesRaw)) {
+      setEditorError("Distance can use up to two decimals.");
+      return;
+    }
+    if (parsedCompletedMiles == null && !completedTimeText) {
+      setEditorError("Enter either distance completed or time completed before saving.");
+      return;
+    }
+
+    setEditorSaving(true);
+    setEditorError(null);
+    try {
+      const card = editor.card;
+      const workout = card.workouts[0];
+
+      if (workout) {
+        await updateTeamWorkoutById(workout.id, {
+          completed_miles: parsedCompletedMiles ?? null,
+          completed_time_text: completedTimeText || null,
+          splits_or_pace: splitsText || null,
+          additional_feedback: additionalFeedbackText || null,
+        });
+        setTodayRows((prev) =>
+          prev.map((row) =>
+            row.id === workout.id
+              ? {
+                  ...row,
+                  completed_miles: parsedCompletedMiles ?? null,
+                  completed_time_text: completedTimeText || null,
+                  splits_or_pace: splitsText || null,
+                  additional_feedback: additionalFeedbackText || null,
+                  updated_at: new Date().toISOString(),
+                }
+              : row
+          )
         );
-        if (rows.length === 0) return null;
-        const top = rows[0];
-        const time = String(top.time_text ?? "").trim();
-        const location = String((top as any).location ?? "").trim();
-        const timeLocation = time || location ? `${time || "—"} @ ${location || "—"}` : "";
-        return {
-          session,
-          workoutId: String(top.id),
-          title: String(top.title ?? "").trim() || "Workout",
-          details: String(top.details ?? "").trim(),
-          timeLocation,
-          categories: workoutCategoryNames(top),
-          moreCount: Math.max(0, rows.length - 1),
+      } else {
+        const entry: MileageSessionFeedback = {
+          id: buildMileageFeedbackId({
+            athleteId: String(selectedAthleteId ?? "") || undefined,
+            athleteName: String(selectedAthleteName ?? "") || undefined,
+            dateISO: todayISO,
+            session: card.session,
+          }),
+          athleteId: String(selectedAthleteId ?? "") || undefined,
+          athleteName: String(selectedAthleteName ?? "") || undefined,
+          dateISO: todayISO,
+          session: card.session,
+          prescribed: card.prescribed || undefined,
+          completedMiles: parsedCompletedMiles,
+          completedTime: completedTimeText || undefined,
+          splitsOrPace: splitsText || undefined,
+          additionalFeedback: additionalFeedbackText || undefined,
+          updatedAt: Date.now(),
         };
-      })
-      .filter((item): item is SessionPreview => Boolean(item));
-  }, [todayRows]);
-
-  const pendingTarget = useMemo<PendingTarget | null>(() => {
-    if (!selectedAthleteId) return null;
-
-    const windowDates = daysBetween(addDaysISO(todayISO, -90), todayISO).filter((dateISO) =>
-      isDateWithinWindow(dateISO, todayISO, feedbackWindowMode, feedbackWindowStartDateISO)
-    );
-
-    const workoutBySession = new Map<string, TeamWorkoutRow[]>();
-    const workoutFeedbackBySession = new Map<string, boolean>();
-
-    for (const row of windowRows) {
-      const dateISO = String(row.date_iso ?? "");
-      if (!windowDates.includes(dateISO)) continue;
-      const session = normalizeSession(row.session);
-      const key = `${dateISO}|${session}`;
-      const list = workoutBySession.get(key) ?? [];
-      list.push(row);
-      workoutBySession.set(key, list);
-      if (hasFeedbackInWorkout(row)) workoutFeedbackBySession.set(key, true);
-    }
-
-    const mileageFeedbackBySession = new Set<string>();
-    for (const entry of windowMileageFeedbackEntries) {
-      if (!hasFeedbackInMileageEntry(entry)) continue;
-      const dateISO = String(entry.dateISO ?? "");
-      const session = normalizeSession(entry.session);
-      mileageFeedbackBySession.add(`${dateISO}|${session}`);
-    }
-
-    const newestDates = [...windowDates].sort((a, b) => b.localeCompare(a));
-    for (const dateISO of newestDates) {
-      const weekStartISO = getWeekStartISO(dateISO, weekStartsOn);
-      const idx = getWeekIndex(dateISO, weekStartISO);
-      if (idx < 0 || idx > 6) continue;
-
-      const cells = store.mileageCellsByWeek[weekStartISO] ?? [];
-      const flags = store.mileageFlagsByWeek[weekStartISO] ?? [];
-      const ncaaOff =
-        flags.find(
-          (row) =>
-            String(row.athlete_profile_id) === String(selectedAthleteId) &&
-            row.day_idx === idx
-        )?.ncaa_off ?? false;
-
-      for (const session of ["PM", "AM"] as const) {
-        const key = `${dateISO}|${session}`;
-        const sessionWorkouts = workoutBySession.get(key) ?? [];
-        const hasWorkout = sessionWorkouts.length > 0;
-
-        const planValue = toMileageValue(
-          cells.find(
-            (row) =>
-              String(row.athlete_profile_id) === String(selectedAthleteId) &&
-              row.day_idx === idx &&
-              row.session === session
-          )?.value
-        );
-        const planLabel = String(formatMileage(planValue) ?? "").trim();
-        const hasPlan = planLabel.length > 0;
-
-        const requiresFeedback = !ncaaOff && (hasWorkout || hasPlan);
-        if (!requiresFeedback) continue;
-
-        const hasFeedback = Boolean(workoutFeedbackBySession.get(key)) || mileageFeedbackBySession.has(key);
-        if (hasFeedback) continue;
-
-        const topWorkout = [...sessionWorkouts].sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))[0];
-        if (topWorkout) {
-          return {
-            key: `workout-${topWorkout.id}`,
-            title: String(topWorkout.title ?? `${session} Workout`),
-            subtitle: `${formatDisplayDate(dateISO)} • ${session}`,
-            description:
-              String(topWorkout.time_text ?? "").trim() || String(topWorkout.primary_category ?? "").trim() || "Feedback pending",
-            routeParams: {
-              id: String(topWorkout.id),
-              name: String(selectedAthleteName ?? "Athlete"),
-            } as Record<string, string>,
-          };
-        }
-
-        return {
-          key: `synthetic-${key}`,
-          title: `${session} Planned Session`,
-          subtitle: `${formatDisplayDate(dateISO)} • ${session}`,
-          description: planLabel ? `Prescribed: ${planLabel}` : "Planned from mileage schedule",
-          routeParams: {
-            id: `planned-${dateISO}-${session}`,
-            synthetic: "1",
-            date: dateISO,
-            session,
-            prescribed: planLabel,
-            athleteId: String(selectedAthleteId ?? ""),
-            name: String(selectedAthleteName ?? "Athlete"),
-          } as Record<string, string>,
-        };
+        await upsertMileageFeedback(entry);
+        setTodayMileageFeedbackEntries((prev) => [...prev.filter((item) => item.id !== entry.id), entry]);
       }
+
+      setEditor(null);
+    } catch (error: any) {
+      const message = String(error?.message ?? error ?? "Could not save log.");
+      setEditorError(message);
+      Alert.alert("Save failed", message);
+    } finally {
+      setEditorSaving(false);
+    }
+  }, [editor, selectedAthleteId, selectedAthleteName, todayISO]);
+
+  const openDailyLogEditor = useCallback((entryType: AthleteDailyLogEntryType) => {
+    setDailyLogError(null);
+    setDailyLogEditor({
+      entryType,
+      activityKind: entryType === "extra_activity" ? "run" : null,
+      titleText: "",
+      completedMilesText: "",
+      completedTimeText: "",
+      notesText: "",
+    });
+  }, []);
+
+  const saveDailyLogEntry = useCallback(async () => {
+    if (!dailyLogEditor) return;
+    const athleteId = String(selectedAthleteId ?? "").trim();
+    if (!athleteId) {
+      setDailyLogError("No athlete profile is selected.");
+      return;
     }
 
-    return null;
-  }, [feedbackWindowMode, feedbackWindowStartDateISO, selectedAthleteId, selectedAthleteName, store.mileageCellsByWeek, store.mileageFlagsByWeek, todayISO, weekStartsOn, windowMileageFeedbackEntries, windowRows]);
+    const title = dailyLogEditor.titleText.trim();
+    const notes = dailyLogEditor.notesText.trim();
+    const isExtraActivity = dailyLogEditor.entryType === "extra_activity";
+    const completedMilesRaw = isExtraActivity ? dailyLogEditor.completedMilesText.trim() : "";
+    const completedTime = isExtraActivity ? dailyLogEditor.completedTimeText.trim() : "";
+    const parsedCompletedMiles = completedMilesRaw ? parseNumericLike(completedMilesRaw) : undefined;
+
+    if (completedMilesRaw && parsedCompletedMiles == null) {
+      setDailyLogError("Distance must be a number, like 3 or 3.5.");
+      return;
+    }
+
+    if (!title && !notes && !completedMilesRaw && !completedTime) {
+      setDailyLogError("Add a title, notes, distance, or time before saving.");
+      return;
+    }
+
+    const now = Date.now();
+    const entry: AthleteDailyLogEntry = {
+      id: buildAthleteDailyLogEntryId({
+        athleteId,
+        dateISO: todayISO,
+        createdAt: now,
+      }),
+      athleteId,
+      athleteName: String(selectedAthleteName ?? "").trim() || null,
+      dateISO: todayISO,
+      session: null,
+      entryType: dailyLogEditor.entryType,
+      activityKind: isExtraActivity ? dailyLogEditor.activityKind ?? "other" : null,
+      title: title || null,
+      completedMiles: completedMilesRaw || null,
+      completedTime: completedTime || null,
+      notes: notes || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    setDailyLogSaving(true);
+    setDailyLogError(null);
+    try {
+      const saved = await upsertAthleteDailyLogEntry(entry);
+      setTodayDailyLogEntries((prev) => [...prev.filter((item) => item.id !== saved.id), saved]);
+      setDailyLogEditor(null);
+    } catch (error: any) {
+      const message = String(error?.message ?? error ?? "Could not save daily log entry.");
+      setDailyLogError(message);
+      Alert.alert("Save failed", message);
+    } finally {
+      setDailyLogSaving(false);
+    }
+  }, [dailyLogEditor, selectedAthleteId, selectedAthleteName, todayISO]);
 
   return (
     <ScrollView
@@ -433,15 +548,15 @@ export default function AthleteDashboardScreen() {
     >
       <View
         style={{
-          borderRadius: 14,
+          borderRadius: 18,
           borderWidth: 1,
           borderColor: "#dbeafe",
           backgroundColor: "#ffffff",
-          padding: 12,
+          padding: 14,
         }}
       >
-        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>HOME</Text>
-        <Text style={{ marginTop: 4, fontSize: 24, fontWeight: "900", color: "#0f172a" }}>Dashboard</Text>
+        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>DASHBOARD</Text>
+        <Text style={{ marginTop: 4, fontSize: 26, fontWeight: "900", color: "#0f172a" }}>Today</Text>
         <Text style={{ marginTop: 3, color: "#475569", fontWeight: "700" }}>
           {selectedAthleteName ? `${selectedAthleteName} • ` : ""}
           {formatDisplayDate(todayISO)}
@@ -451,7 +566,7 @@ export default function AthleteDashboardScreen() {
       {loading ? (
         <View style={{ marginTop: 10, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 2 }}>
           <ActivityIndicator />
-          <Text style={{ color: "#64748b", fontWeight: "600" }}>Loading dashboard...</Text>
+          <Text style={{ color: "#64748b", fontWeight: "600" }}>Loading today...</Text>
         </View>
       ) : null}
 
@@ -467,9 +582,7 @@ export default function AthleteDashboardScreen() {
           }}
         >
           <Text style={{ fontWeight: "800", color: "#78350f" }}>No athlete selected</Text>
-          <Text style={{ marginTop: 6, color: "#92400e" }}>
-            Join or select an athlete profile first.
-          </Text>
+          <Text style={{ marginTop: 6, color: "#92400e" }}>Join or select an athlete profile first.</Text>
           <Pressable
             onPress={() => router.push("/(athlete)")}
             style={{
@@ -489,68 +602,94 @@ export default function AthleteDashboardScreen() {
 
       <View
         style={{
-          borderRadius: 14,
+          borderRadius: 18,
           borderWidth: 1,
           borderColor: "#dbeafe",
           backgroundColor: "#ffffff",
-          padding: 12,
+          padding: 14,
         }}
       >
-        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>TODAY</Text>
+        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>TODAY SUMMARY</Text>
         {loading ? (
-          <Text style={{ marginTop: 8, color: "#64748b", fontWeight: "700" }}>Loading today...</Text>
-        ) : !todayAssignment?.hasPlan ? (
-          <Text style={{ marginTop: 8, color: "#475569", fontWeight: "700" }}>No assignment set for today.</Text>
+          <Text style={{ marginTop: 8, color: "#64748b", fontWeight: "700" }}>Loading mileage and workouts...</Text>
+        ) : !todayAssignment?.hasPlan && todayRows.length === 0 ? (
+          <Text style={{ marginTop: 8, color: "#475569", fontWeight: "700" }}>No planned training set for today.</Text>
         ) : (
           <>
-            <View style={{ marginTop: 8, flexDirection: "row", gap: 8 }}>
-              <View style={{ flex: 1, borderRadius: 9, borderWidth: 1, borderColor: "#e2e8f0", backgroundColor: "#f8fafc", paddingVertical: 7, paddingHorizontal: 9 }}>
-                <Text style={{ fontSize: 11, fontWeight: "900", color: "#475569" }}>AM</Text>
-                <Text style={{ marginTop: 2, color: "#0f172a", fontWeight: "900" }}>{todaySummary.am || "—"}</Text>
+            <View style={{ marginTop: 10, flexDirection: "row", gap: 8 }}>
+              <View style={{ flex: 1, borderRadius: 12, borderWidth: 1, borderColor: "#e2e8f0", backgroundColor: "#f8fafc", paddingVertical: 10, paddingHorizontal: 10 }}>
+                <Text style={{ fontSize: 11, fontWeight: "900", color: "#475569" }}>AM Mileage</Text>
+                <Text style={{ marginTop: 3, color: "#0f172a", fontWeight: "900", fontSize: 16 }}>{todayAssignment?.amLabel || "—"}</Text>
               </View>
-              <View style={{ flex: 1, borderRadius: 9, borderWidth: 1, borderColor: "#e2e8f0", backgroundColor: "#f8fafc", paddingVertical: 7, paddingHorizontal: 9 }}>
-                <Text style={{ fontSize: 11, fontWeight: "900", color: "#475569" }}>PM</Text>
-                <Text style={{ marginTop: 2, color: "#0f172a", fontWeight: "900" }}>{todaySummary.pm || "—"}</Text>
+              <View style={{ flex: 1, borderRadius: 12, borderWidth: 1, borderColor: "#e2e8f0", backgroundColor: "#f8fafc", paddingVertical: 10, paddingHorizontal: 10 }}>
+                <Text style={{ fontSize: 11, fontWeight: "900", color: "#475569" }}>PM Mileage</Text>
+                <Text style={{ marginTop: 3, color: "#0f172a", fontWeight: "900", fontSize: 16 }}>{todayAssignment?.pmLabel || "—"}</Text>
               </View>
             </View>
+            {todayAssignment?.ncaaOff ? (
+              <Text style={{ marginTop: 9, color: "#166534", fontWeight: "800" }}>NCAA off day is marked for today.</Text>
+            ) : null}
           </>
         )}
-        {!loading && todaySessionPreviews.length > 0 ? (
-          <View style={{ marginTop: 9, gap: 8 }}>
-            {todaySessionPreviews.map((preview) => (
-              <Pressable
-                key={preview.workoutId}
-                onPress={() =>
-                  router.push({
-                    pathname: "/(athlete)/workout/[id]",
-                    params: { id: preview.workoutId, name: String(selectedAthleteName ?? "Athlete") },
-                  })
-                }
+      </View>
+
+      <View
+        style={{
+          borderRadius: 18,
+          borderWidth: 1,
+          borderColor: "#dbeafe",
+          backgroundColor: "#ffffff",
+          padding: 14,
+        }}
+      >
+        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>TODAY WORKOUTS & LOG</Text>
+        <Text style={{ marginTop: 4, color: "#475569", fontWeight: "700" }}>
+          Enter logs directly for today’s AM and PM sessions.
+        </Text>
+        <View style={{ marginTop: 12, gap: 10 }}>
+          {todaySessionCards.map((card) => {
+            const colors = statusColors(card.status);
+            const workout = card.workouts[0];
+            const categoriesForCard = workout ? workoutCategoryNames(workout) : [];
+            const actionLabel = card.status === "submitted" ? "Edit log" : card.status === "none" ? "No log needed" : "Enter log";
+            return (
+              <View
+                key={card.key}
                 style={{
-                  borderRadius: 10,
+                  borderRadius: 14,
                   borderWidth: 1,
-                  borderColor: "#dbe7f3",
-                  backgroundColor: "#f8fafc",
-                  paddingVertical: 8,
-                  paddingHorizontal: 9,
+                  borderColor: colors.border,
+                  backgroundColor: "#ffffff",
+                  padding: 12,
                 }}
               >
                 <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                  <Text style={{ fontSize: 12, fontWeight: "900", color: "#334155" }}>{preview.session}</Text>
-                  {preview.timeLocation ? (
-                    <Text style={{ fontSize: 12, color: "#64748b", fontWeight: "700", flexShrink: 1 }} numberOfLines={1}>
-                      {preview.timeLocation}
-                    </Text>
-                  ) : null}
+                  <Text style={{ fontSize: 15, fontWeight: "900", color: "#0f172a" }}>{card.session}</Text>
+                  <View
+                    style={{
+                      borderRadius: 999,
+                      borderWidth: 1,
+                      borderColor: colors.border,
+                      backgroundColor: colors.bg,
+                      paddingHorizontal: 9,
+                      paddingVertical: 3,
+                    }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: "900", color: colors.text }}>{colors.label}</Text>
+                  </View>
                 </View>
 
-                {preview.categories.length > 0 ? (
-                  <View style={{ marginTop: 6, flexDirection: "row", flexWrap: "wrap", gap: 5 }}>
-                    {preview.categories.slice(0, 3).map((name) => {
+                {card.prescribed ? (
+                  <Text style={{ marginTop: 8, color: "#1e40af", fontWeight: "900" }}>Mileage: {card.prescribed}</Text>
+                ) : null}
+
+                {categoriesForCard.length > 0 ? (
+                  <View style={{ marginTop: 8, flexDirection: "row", flexWrap: "wrap", gap: 5 }}>
+                    {categoriesForCard.slice(0, 3).map((name) => {
                       const color = categoryColorByName(categories, name);
                       return (
                         <View
-                          key={`${preview.workoutId}-${name}`}
+                          key={`${card.key}-${name}`}
                           style={{
                             flexDirection: "row",
                             alignItems: "center",
@@ -571,165 +710,426 @@ export default function AthleteDashboardScreen() {
                   </View>
                 ) : null}
 
-                <Text style={{ marginTop: 6, fontSize: 15, fontWeight: "900", color: "#0f172a" }} numberOfLines={2}>
-                  {preview.title}
-                </Text>
-                {preview.details ? (
-                  <Text style={{ marginTop: 3, color: "#475569" }} numberOfLines={2}>
-                    {preview.details}
-                  </Text>
+                <Text style={{ marginTop: 8, fontSize: 17, fontWeight: "900", color: "#0f172a" }}>{card.title}</Text>
+                {card.summary ? (
+                  <Text style={{ marginTop: 5, color: "#475569", lineHeight: 20 }}>{card.summary}</Text>
                 ) : null}
-                {preview.moreCount > 0 ? (
-                  <Text style={{ marginTop: 4, color: "#1d4ed8", fontWeight: "800", fontSize: 12 }}>
-                    +{preview.moreCount} more {preview.session} workout{preview.moreCount === 1 ? "" : "s"}
-                  </Text>
+                {workout?.time_text ? (
+                  <Text style={{ marginTop: 5, color: "#64748b", fontWeight: "700" }}>{workout.time_text}</Text>
                 ) : null}
-              </Pressable>
-            ))}
-          </View>
-        ) : !loading && todayRows.length === 0 ? (
-          <Text style={{ marginTop: 8, color: "#64748b" }}>No programmed workouts today.</Text>
-        ) : null}
-        <Pressable
-          onPress={() =>
-            router.push({
-              pathname: "/(athlete)/day",
-              params: { date: todayISO },
-            })
-          }
-          style={{
-            marginTop: 10,
-            borderRadius: 10,
-            borderWidth: 1,
-            borderColor: "#bfdbfe",
-            backgroundColor: "#eff6ff",
-            paddingVertical: 10,
-            alignItems: "center",
-          }}
-        >
-          <Text style={{ fontWeight: "800", color: "#1e40af" }}>Open Today</Text>
-        </Pressable>
-      </View>
 
-      <View
-        style={{
-          borderRadius: 14,
-          borderWidth: 1,
-          borderColor: pendingTarget ? "#fecaca" : "#bbf7d0",
-          backgroundColor: "#ffffff",
-          padding: 12,
-        }}
-      >
-        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>FEEDBACK</Text>
-        <View style={{ marginTop: 3, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <Text style={{ fontSize: 18, fontWeight: "900", color: "#0f172a" }}>Next feedback task</Text>
-          <View
+                <Pressable
+                  disabled={card.status === "none"}
+                  onPress={() => openEditorForCard(card)}
+                  style={{
+                    marginTop: 12,
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: card.status === "none" ? "#e2e8f0" : "#bfdbfe",
+                    backgroundColor: card.status === "none" ? "#f8fafc" : "#eff6ff",
+                    paddingVertical: 11,
+                    alignItems: "center",
+                  }}
+                >
+                  <Text style={{ fontWeight: "900", color: card.status === "none" ? "#94a3b8" : "#1e40af" }}>{actionLabel}</Text>
+                </Pressable>
+              </View>
+            );
+          })}
+        </View>
+
+        <View style={{ marginTop: 12, flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+          <Pressable
+            disabled={!selectedAthleteId}
+            onPress={() => openDailyLogEditor("daily_note")}
             style={{
+              flexGrow: 1,
+              minWidth: 140,
               borderRadius: 999,
               borderWidth: 1,
-              borderColor: pendingTarget ? "#fecaca" : "#bbf7d0",
-              backgroundColor: pendingTarget ? "#fff1f2" : "#f0fdf4",
-              paddingHorizontal: 9,
-              paddingVertical: 3,
+              borderColor: "#ddd6fe",
+              backgroundColor: "#faf5ff",
+              paddingVertical: 11,
+              paddingHorizontal: 12,
+              alignItems: "center",
+              opacity: selectedAthleteId ? 1 : 0.55,
             }}
           >
-            <Text style={{ fontSize: 11, fontWeight: "900", color: pendingTarget ? "#991b1b" : "#166534" }}>
-              {pendingLoading ? "Loading" : pendingTarget ? "Pending" : "Clear"}
-            </Text>
-          </View>
-        </View>
-        {pendingLoading ? (
-          <Text style={{ marginTop: 8, color: "#64748b", fontWeight: "700" }}>Checking feedback...</Text>
-        ) : !pendingTarget ? (
-          <View
+            <Text style={{ fontWeight: "900", color: "#7e22ce" }}>Add daily note</Text>
+          </Pressable>
+          <Pressable
+            disabled={!selectedAthleteId}
+            onPress={() => openDailyLogEditor("extra_activity")}
             style={{
-              marginTop: 8,
-              borderRadius: 10,
+              flexGrow: 1,
+              minWidth: 140,
+              borderRadius: 999,
               borderWidth: 1,
-              borderColor: "#bbf7d0",
-              backgroundColor: "#f0fdf4",
-              paddingVertical: 8,
-              paddingHorizontal: 10,
+              borderColor: "#bae6fd",
+              backgroundColor: "#f0f9ff",
+              paddingVertical: 11,
+              paddingHorizontal: 12,
+              alignItems: "center",
+              opacity: selectedAthleteId ? 1 : 0.55,
             }}
           >
-            <Text style={{ color: "#166534", fontWeight: "900" }}>All caught up.</Text>
-            <Text style={{ marginTop: 2, color: "#166534" }}>No pending feedback right now.</Text>
+            <Text style={{ fontWeight: "900", color: "#0369a1" }}>Add extra activity</Text>
+          </Pressable>
+        </View>
+
+        {todayDailyLogEntries.length > 0 ? (
+          <View style={{ marginTop: 12, borderTopWidth: 1, borderTopColor: "#e2e8f0", paddingTop: 10, gap: 6 }}>
+            <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.5, color: "#64748b" }}>TODAY EXTRAS</Text>
+            {todayDailyLogEntries
+              .slice()
+              .sort((a, b) => Number(a.createdAt ?? 0) - Number(b.createdAt ?? 0))
+              .map((entry) => (
+                <Text key={entry.id} style={{ color: "#334155", fontWeight: "700", lineHeight: 18 }}>
+                  {formatDailyLogEntrySummary(entry)}
+                </Text>
+              ))}
           </View>
-        ) : (
-          <>
-            <Text style={{ marginTop: 8, fontSize: 16, fontWeight: "900", color: "#111827" }}>
-              {pendingTarget.title}
-            </Text>
-            <Text style={{ marginTop: 3, color: "#475569", fontWeight: "700" }}>{pendingTarget.subtitle}</Text>
-            {pendingTarget.description ? (
-              <Text style={{ marginTop: 5, color: "#334155" }}>{pendingTarget.description}</Text>
-            ) : null}
-            <Pressable
-              onPress={() =>
-                router.push({
-                  pathname: "/(athlete)/workout/[id]",
-                  params: pendingTarget.routeParams,
-                })
-              }
-              style={{
-                marginTop: 10,
-                borderRadius: 10,
-                borderWidth: 1,
-                borderColor: "#fecaca",
-                backgroundColor: "#fff1f2",
-                paddingVertical: 10,
-                alignItems: "center",
-              }}
-            >
-              <Text style={{ fontWeight: "800", color: "#991b1b" }}>Open feedback</Text>
-            </Pressable>
-          </>
-        )}
+        ) : null}
       </View>
 
-      <View
-        style={{
-          borderRadius: 14,
-          borderWidth: 1,
-          borderColor: "#e2e8f0",
-          backgroundColor: "#ffffff",
-          padding: 12,
+      <Modal
+        visible={Boolean(editor)}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          if (!editorSaving) setEditor(null);
         }}
       >
-        <Text style={{ fontSize: 11, fontWeight: "900", letterSpacing: 0.7, color: "#64748b" }}>CALENDAR</Text>
-        <Text style={{ marginTop: 3, fontSize: 18, fontWeight: "900", color: "#0f172a" }}>Browse schedule</Text>
-        <Text style={{ marginTop: 6, color: "#475569" }}>Open Month or Week view to navigate your training plan.</Text>
-        <View style={{ marginTop: 10, flexDirection: "row", gap: 8 }}>
-          <Pressable
-            onPress={() => router.push("/(athlete)/month")}
+        <View style={{ flex: 1, backgroundColor: "rgba(15, 23, 42, 0.35)", justifyContent: "flex-end" }}>
+          <View
             style={{
-              flex: 1,
-              borderRadius: 10,
-              borderWidth: 1,
-              borderColor: "#cbd5e1",
-              backgroundColor: "#f8fafc",
-              paddingVertical: 10,
-              alignItems: "center",
+              maxHeight: "88%",
+              borderTopLeftRadius: 24,
+              borderTopRightRadius: 24,
+              backgroundColor: "#ffffff",
+              padding: 18,
             }}
           >
-            <Text style={{ fontWeight: "800", color: "#0f172a" }}>Open Month</Text>
-          </Pressable>
-          <Pressable
-            onPress={() => router.push({ pathname: "/(athlete)/week", params: { date: todayISO } })}
-            style={{
-              flex: 1,
-              borderRadius: 10,
-              borderWidth: 1,
-              borderColor: "#cbd5e1",
-              backgroundColor: "#f8fafc",
-              paddingVertical: 10,
-              alignItems: "center",
-            }}
-          >
-            <Text style={{ fontWeight: "800", color: "#0f172a" }}>Open Week</Text>
-          </Pressable>
+            {editor ? (
+              <ScrollView keyboardShouldPersistTaps="handled">
+                <Text style={{ fontSize: 22, fontWeight: "900", color: "#0f172a" }}>{editor.card.session} Log</Text>
+                <Text style={{ marginTop: 4, color: "#475569", fontWeight: "700" }}>{formatCompactDate(todayISO)}</Text>
+                {editor.card.planSummary || editor.card.prescribed ? (
+                  <View
+                    style={{
+                      marginTop: 12,
+                      borderRadius: 14,
+                      borderWidth: 1,
+                      borderColor: "#dbeafe",
+                      backgroundColor: "#eff6ff",
+                      padding: 12,
+                    }}
+                  >
+                    <Text style={{ fontWeight: "900", color: "#1e3a8a" }}>Planned</Text>
+                    <Text style={{ marginTop: 4, color: "#1e40af", lineHeight: 20 }}>
+                      {editor.card.planSummary || `Mileage: ${editor.card.prescribed}`}
+                    </Text>
+                  </View>
+                ) : null}
+
+                <View style={{ marginTop: 14, gap: 12 }}>
+                  <View>
+                    <Text style={{ fontWeight: "900", color: "#334155" }}>Completed distance</Text>
+                    <TextInput
+                      value={editor.completedMilesText}
+                      onChangeText={(text) => setEditor((prev) => (prev ? { ...prev, completedMilesText: text } : prev))}
+                      placeholder="Example: 5.25"
+                      keyboardType="decimal-pad"
+                      style={{
+                        marginTop: 6,
+                        borderRadius: 12,
+                        borderWidth: 1,
+                        borderColor: "#cbd5e1",
+                        paddingHorizontal: 12,
+                        paddingVertical: 11,
+                        fontWeight: "800",
+                        color: "#0f172a",
+                      }}
+                    />
+                  </View>
+                  <View>
+                    <Text style={{ fontWeight: "900", color: "#334155" }}>Completed time</Text>
+                    <TextInput
+                      value={editor.completedTimeText}
+                      onChangeText={(text) => setEditor((prev) => (prev ? { ...prev, completedTimeText: text } : prev))}
+                      placeholder="Example: 42:30"
+                      style={{
+                        marginTop: 6,
+                        borderRadius: 12,
+                        borderWidth: 1,
+                        borderColor: "#cbd5e1",
+                        paddingHorizontal: 12,
+                        paddingVertical: 11,
+                        fontWeight: "800",
+                        color: "#0f172a",
+                      }}
+                    />
+                  </View>
+                  <View>
+                    <Text style={{ fontWeight: "900", color: "#334155" }}>Splits / pace</Text>
+                    <TextInput
+                      value={editor.splitsText}
+                      onChangeText={(text) => setEditor((prev) => (prev ? { ...prev, splitsText: text } : prev))}
+                      placeholder="Optional"
+                      multiline
+                      style={{
+                        marginTop: 6,
+                        minHeight: 72,
+                        textAlignVertical: "top",
+                        borderRadius: 12,
+                        borderWidth: 1,
+                        borderColor: "#cbd5e1",
+                        paddingHorizontal: 12,
+                        paddingVertical: 11,
+                        fontWeight: "700",
+                        color: "#0f172a",
+                      }}
+                    />
+                  </View>
+                  <View>
+                    <Text style={{ fontWeight: "900", color: "#334155" }}>Notes</Text>
+                    <TextInput
+                      value={editor.additionalFeedbackText}
+                      onChangeText={(text) => setEditor((prev) => (prev ? { ...prev, additionalFeedbackText: text } : prev))}
+                      placeholder="Optional notes"
+                      multiline
+                      style={{
+                        marginTop: 6,
+                        minHeight: 92,
+                        textAlignVertical: "top",
+                        borderRadius: 12,
+                        borderWidth: 1,
+                        borderColor: "#cbd5e1",
+                        paddingHorizontal: 12,
+                        paddingVertical: 11,
+                        fontWeight: "700",
+                        color: "#0f172a",
+                      }}
+                    />
+                  </View>
+                </View>
+
+                {editorError ? <Text style={{ marginTop: 12, color: "#be123c", fontWeight: "800" }}>{editorError}</Text> : null}
+
+                <View style={{ marginTop: 18, flexDirection: "row", gap: 10 }}>
+                  <Pressable
+                    disabled={editorSaving}
+                    onPress={() => setEditor(null)}
+                    style={{
+                      flex: 1,
+                      borderRadius: 14,
+                      borderWidth: 1,
+                      borderColor: "#cbd5e1",
+                      backgroundColor: "#ffffff",
+                      paddingVertical: 13,
+                      alignItems: "center",
+                    }}
+                  >
+                    <Text style={{ fontWeight: "900", color: "#334155" }}>Cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    disabled={editorSaving}
+                    onPress={() => void saveEditor()}
+                    style={{
+                      flex: 1,
+                      borderRadius: 14,
+                      backgroundColor: editorSaving ? "#93c5fd" : "#2563eb",
+                      paddingVertical: 13,
+                      alignItems: "center",
+                    }}
+                  >
+                    <Text style={{ fontWeight: "900", color: "white" }}>{editorSaving ? "Saving..." : "Save log"}</Text>
+                  </Pressable>
+                </View>
+              </ScrollView>
+            ) : null}
+          </View>
         </View>
-      </View>
+      </Modal>
+
+      <Modal
+        visible={Boolean(dailyLogEditor)}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          if (!dailyLogSaving) setDailyLogEditor(null);
+        }}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(15, 23, 42, 0.35)", justifyContent: "flex-end" }}>
+          <View
+            style={{
+              maxHeight: "90%",
+              borderTopLeftRadius: 24,
+              borderTopRightRadius: 24,
+              backgroundColor: "#ffffff",
+              padding: 18,
+            }}
+          >
+            {dailyLogEditor ? (
+              <ScrollView keyboardShouldPersistTaps="handled">
+                <Text style={{ fontSize: 22, fontWeight: "900", color: "#0f172a" }}>
+                  {dailyLogEditor.entryType === "extra_activity" ? "Add extra activity" : "Add daily note"}
+                </Text>
+                <Text style={{ marginTop: 4, color: "#475569", fontWeight: "700" }}>{formatCompactDate(todayISO)}</Text>
+
+                <View style={{ marginTop: 14, gap: 12 }}>
+                  {dailyLogEditor.entryType === "extra_activity" ? (
+                    <View>
+                      <Text style={{ fontWeight: "900", color: "#334155" }}>Activity kind</Text>
+                      <View style={{ marginTop: 7, flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                        {(["run", "cross_training", "strength", "mobility", "other"] as const).map((kind) => {
+                          const selected = dailyLogEditor.activityKind === kind;
+                          return (
+                            <Pressable
+                              key={`dashboard-daily-log-kind-${kind}`}
+                              onPress={() => setDailyLogEditor((prev) => (prev ? { ...prev, activityKind: kind } : prev))}
+                              style={{
+                                borderRadius: 999,
+                                borderWidth: 1,
+                                borderColor: selected ? "#0284c7" : "#cbd5e1",
+                                backgroundColor: selected ? "#f0f9ff" : "#ffffff",
+                                paddingHorizontal: 12,
+                                paddingVertical: 9,
+                              }}
+                            >
+                              <Text style={{ fontWeight: "900", color: selected ? "#0369a1" : "#334155" }}>
+                                {formatDailyLogActivityKind(kind)}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  ) : null}
+
+                  <View>
+                    <Text style={{ fontWeight: "900", color: "#334155" }}>Title</Text>
+                    <TextInput
+                      value={dailyLogEditor.titleText}
+                      onChangeText={(text) => setDailyLogEditor((prev) => (prev ? { ...prev, titleText: text } : prev))}
+                      placeholder={dailyLogEditor.entryType === "extra_activity" ? "Example: Extra bike ride" : "Example: Felt sick today"}
+                      style={{
+                        marginTop: 6,
+                        borderRadius: 12,
+                        borderWidth: 1,
+                        borderColor: "#cbd5e1",
+                        paddingHorizontal: 12,
+                        paddingVertical: 11,
+                        fontWeight: "800",
+                        color: "#0f172a",
+                      }}
+                    />
+                  </View>
+
+                  {dailyLogEditor.entryType === "extra_activity" ? (
+                    <View style={{ flexDirection: "row", gap: 10 }}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontWeight: "900", color: "#334155" }}>Completed miles</Text>
+                        <TextInput
+                          value={dailyLogEditor.completedMilesText}
+                          onChangeText={(text) => setDailyLogEditor((prev) => (prev ? { ...prev, completedMilesText: text } : prev))}
+                          placeholder="Optional"
+                          keyboardType="decimal-pad"
+                          style={{
+                            marginTop: 6,
+                            borderRadius: 12,
+                            borderWidth: 1,
+                            borderColor: "#cbd5e1",
+                            paddingHorizontal: 12,
+                            paddingVertical: 11,
+                            fontWeight: "800",
+                            color: "#0f172a",
+                          }}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontWeight: "900", color: "#334155" }}>Completed time</Text>
+                        <TextInput
+                          value={dailyLogEditor.completedTimeText}
+                          onChangeText={(text) => setDailyLogEditor((prev) => (prev ? { ...prev, completedTimeText: text } : prev))}
+                          placeholder="30:00"
+                          style={{
+                            marginTop: 6,
+                            borderRadius: 12,
+                            borderWidth: 1,
+                            borderColor: "#cbd5e1",
+                            paddingHorizontal: 12,
+                            paddingVertical: 11,
+                            fontWeight: "800",
+                            color: "#0f172a",
+                          }}
+                        />
+                      </View>
+                    </View>
+                  ) : null}
+
+                  <View>
+                    <Text style={{ fontWeight: "900", color: "#334155" }}>Notes</Text>
+                    <TextInput
+                      value={dailyLogEditor.notesText}
+                      onChangeText={(text) => setDailyLogEditor((prev) => (prev ? { ...prev, notesText: text } : prev))}
+                      placeholder="Add anything your coach should know."
+                      multiline
+                      style={{
+                        marginTop: 6,
+                        minHeight: 104,
+                        textAlignVertical: "top",
+                        borderRadius: 12,
+                        borderWidth: 1,
+                        borderColor: "#cbd5e1",
+                        paddingHorizontal: 12,
+                        paddingVertical: 11,
+                        fontWeight: "700",
+                        color: "#0f172a",
+                      }}
+                    />
+                  </View>
+                </View>
+
+                {dailyLogError ? <Text style={{ marginTop: 12, color: "#be123c", fontWeight: "800" }}>{dailyLogError}</Text> : null}
+
+                <View style={{ marginTop: 18, flexDirection: "row", gap: 10 }}>
+                  <Pressable
+                    disabled={dailyLogSaving}
+                    onPress={() => setDailyLogEditor(null)}
+                    style={{
+                      flex: 1,
+                      borderRadius: 14,
+                      borderWidth: 1,
+                      borderColor: "#cbd5e1",
+                      backgroundColor: "#ffffff",
+                      paddingVertical: 13,
+                      alignItems: "center",
+                    }}
+                  >
+                    <Text style={{ fontWeight: "900", color: "#334155" }}>Cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    disabled={dailyLogSaving}
+                    onPress={() => void saveDailyLogEntry()}
+                    style={{
+                      flex: 1,
+                      borderRadius: 14,
+                      backgroundColor: dailyLogSaving ? "#93c5fd" : "#2563eb",
+                      paddingVertical: 13,
+                      alignItems: "center",
+                    }}
+                  >
+                    <Text style={{ fontWeight: "900", color: "white" }}>
+                      {dailyLogSaving ? "Saving..." : dailyLogEditor.entryType === "extra_activity" ? "Save activity" : "Save note"}
+                    </Text>
+                  </Pressable>
+                </View>
+              </ScrollView>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
