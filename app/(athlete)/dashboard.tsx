@@ -24,7 +24,12 @@ import {
 import { loadWeekStartSetting } from "../../lib/settings";
 import { loadJSON } from "../../lib/storage";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
-import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow, updateTeamWorkoutById } from "../../lib/teamWorkoutsCloud";
+import {
+  listTeamWorkoutsByBatch,
+  listVisibleAthleteWorkoutsInRange,
+  type TeamWorkoutRow,
+  updateTeamWorkoutById,
+} from "../../lib/teamWorkoutsCloud";
 import { listTeamWorkoutBatchHeadersForDate } from "../../lib/teamWorkoutBatchHeadersCloud";
 import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import { formatMileage, getWeekIndex, getWeekStartISO, parseISODate, parseMileageInput, toISODate } from "../../lib/mileagePlan";
@@ -226,8 +231,16 @@ export default function AthleteDashboardScreen() {
       ]);
 
       if (activeLoadKeyRef.current !== loadKey) return;
+      const batchIds = Array.from(
+        new Set(todayOnlyRows.map((row) => cleanDisplayText(row.batch_id)).filter(Boolean))
+      );
+      const batchContextRows =
+        batchIds.length > 0
+          ? (await Promise.all(batchIds.map((batchId) => listTeamWorkoutsByBatch(batchId).catch(() => [])))).flat()
+          : [];
+      if (activeLoadKeyRef.current !== loadKey) return;
       setTodayRows(todayOnlyRows);
-      setBatchNotesByWorkoutId(buildBatchNotesByWorkoutId(todayOnlyRows, batchHeaders));
+      setBatchNotesByWorkoutId(buildBatchNotesByWorkoutId([...todayOnlyRows, ...batchContextRows], batchHeaders));
       setTodayMileageFeedbackEntries(
         allMileageFeedback.filter((entry) => {
           const entryAthleteId = String((entry as any)?.athleteId ?? "").trim();

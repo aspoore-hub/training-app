@@ -23,6 +23,7 @@ import { loadJSON, saveJSON } from "../../../lib/storage";
 import { supabase } from "../../../lib/supabase";
 import { getCurrentTeamId } from "../../../lib/team";
 import { buildTeamWorkoutInsertRows, createTeamWorkoutBatch } from "../../../lib/teamWorkoutsCloud";
+import { saveTeamWorkoutBatchHeaderNotes } from "../../../lib/teamWorkoutBatchHeadersCloud";
 import { normalizeWorkoutTimeInput } from "../../../lib/time";
 import {
   loadCoreCoachSettings,
@@ -1496,6 +1497,19 @@ export default function PlannerScreen() {
       };
 
       const insertedRows = await createTeamWorkoutBatch(payload);
+      if (details.trim()) {
+        try {
+          await saveTeamWorkoutBatchHeaderNotes({
+            batch_id: newBatchId,
+            date_iso: dateISO,
+            session,
+            header_notes: details.trim(),
+          });
+        } catch {
+          // The per-athlete workout rows still carry details if a legacy environment
+          // has not deployed the batch-header table or RPC yet.
+        }
+      }
       setSubmitDebug(`insert success (${insertedRows?.length ?? payload.length} rows)`);
 
       if (activeDraftId) {

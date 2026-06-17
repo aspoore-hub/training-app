@@ -11,7 +11,12 @@ import type { AthleteWorkout, MileageValue, WeekStartDay } from "../../lib/types
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import { ATHLETE_CALENDAR_VIEW_STATE_KEY, type AthleteCalendarViewState } from "../../lib/athleteCalendarView";
 import { loadRosterNameMapForTeam } from "../../lib/rosterNameMap";
-import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow, updateTeamWorkoutById } from "../../lib/teamWorkoutsCloud";
+import {
+  listTeamWorkoutsByBatch,
+  listVisibleAthleteWorkoutsInRange,
+  type TeamWorkoutRow,
+  updateTeamWorkoutById,
+} from "../../lib/teamWorkoutsCloud";
 import { listTeamWorkoutBatchHeadersForDate } from "../../lib/teamWorkoutBatchHeadersCloud";
 import {
   buildMileageFeedbackId,
@@ -356,6 +361,14 @@ export default function AthleteDayScreen() {
           listTeamWorkoutBatchHeadersForDate(String(currentDateISO)),
         ]);
         if (activeLoadKeyRef.current !== loadKey) return;
+        const batchIds = Array.from(
+          new Set(athleteRows.map((row) => cleanDisplayText(row.batch_id)).filter(Boolean))
+        );
+        const batchContextRows =
+          batchIds.length > 0
+            ? (await Promise.all(batchIds.map((batchId) => listTeamWorkoutsByBatch(batchId).catch(() => [])))).flat()
+            : [];
+        if (activeLoadKeyRef.current !== loadKey) return;
 
         const athleteMapped = athleteRows.map((row) => toAthleteWorkout(row, new Map()));
         const athleteFiltered = athleteMapped
@@ -368,7 +381,7 @@ export default function AthleteDayScreen() {
 
         setAllWorkouts(athleteMapped);
         setWorkouts(athleteFiltered);
-        setBatchNotesByWorkoutId(buildBatchNotesByWorkoutId(athleteRows, batchHeaders));
+        setBatchNotesByWorkoutId(buildBatchNotesByWorkoutId([...athleteRows, ...batchContextRows], batchHeaders));
         setMileageFeedbackEntries(
           allMileageFeedback.filter((entry) => {
             const entryAthleteId = String((entry as any)?.athleteId ?? "").trim();

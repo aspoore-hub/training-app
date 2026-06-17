@@ -39,7 +39,7 @@ import { loadWeekStartSetting } from "../../../lib/settings";
 import { loadJSON } from "../../../lib/storage";
 import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../../lib/categories";
 import type { WorkoutCategory } from "../../../lib/types";
-import { cleanDisplayText, formatPrescribedLabel } from "../../../lib/athleteWorkoutDisplay";
+import { buildBatchNotesByWorkoutId, cleanDisplayText, formatPrescribedLabel } from "../../../lib/athleteWorkoutDisplay";
 
 function normalizeGroupId(groupId?: string): string {
   const normalized = String(groupId ?? "").trim().toUpperCase();
@@ -216,8 +216,9 @@ export default function AthleteWorkoutDetail() {
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       ]);
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
+      const loadedRoutineById = new Map(routines.map((routine) => [routine.id, routine] as const));
       setRosterMap(rosterMap);
-      setRoutineById(new Map(routines.map((routine) => [routine.id, routine] as const)));
+      setRoutineById(loadedRoutineById);
       setCategories(normalizeCategories(storedCategories));
       setWeekStartsOn(resolvedWeekStart);
 
@@ -233,6 +234,13 @@ export default function AthleteWorkoutDetail() {
 
         setGroupMateNames([]);
         setBatchHeaderNotes("");
+        setExpandedRoutineIds(
+          new Set(
+            [...(Array.isArray(found.preRoutineIds) ? found.preRoutineIds : []), ...(Array.isArray(found.postRoutineIds) ? found.postRoutineIds : [])]
+              .map((routineId) => cleanDisplayText(routineId))
+              .filter((routineId) => Boolean(cleanDisplayText(loadedRoutineById.get(routineId)?.details)))
+          )
+        );
 
         if (foundRow?.batch_id) {
           const [batchRows, headerRows] = await Promise.all([
@@ -249,12 +257,8 @@ export default function AthleteWorkoutDetail() {
             .map((row) => rosterMap.get(String(row.athlete_profile_id ?? "").trim()) ?? fallbackAthleteName(String(row.athlete_profile_id ?? "")))
             .filter(Boolean);
           setGroupMateNames(Array.from(new Set(groupNames)));
-          const header = headerRows.find(
-            (row) =>
-              String(row.batch_id ?? "") === String(foundRow.batch_id ?? "") &&
-              String(row.session ?? "") === String(foundRow.session ?? "")
-          );
-          setBatchHeaderNotes(String(header?.header_notes ?? "").trim());
+          const batchNotesByWorkoutId = buildBatchNotesByWorkoutId([foundRow, ...visibleBatchRows], headerRows);
+          setBatchHeaderNotes(batchNotesByWorkoutId.get(String(foundRow.id)) ?? "");
         }
 
         if (found?.athleteId && found?.dateISO) {
