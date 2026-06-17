@@ -68,7 +68,7 @@ Deno.serve(async (req) => {
       adminClient.from("teams").select("name").eq("id", invite.team_id).maybeSingle(),
       adminClient
         .from("team_athletes")
-        .select("display_name,first_name,last_name,claimed_user_id")
+        .select("display_name,first_name,last_name")
         .eq("team_id", invite.team_id)
         .eq("id", invite.athlete_profile_id)
         .maybeSingle(),
@@ -76,10 +76,7 @@ Deno.serve(async (req) => {
     if (teamError) throw teamError;
     if (athleteError) throw athleteError;
 
-    const acceptedAt =
-      invite.accepted_at == null && !athlete?.claimed_user_id
-        ? null
-        : String(invite.accepted_at ?? new Date().toISOString());
+    const acceptedAt = invite.accepted_at == null ? null : String(invite.accepted_at);
     const expiresAt = invite.expires_at == null ? null : String(invite.expires_at);
     const expired = expiresAt ? Date.parse(expiresAt) <= Date.now() : false;
     const status = acceptedAt ? "accepted" : expired ? "expired" : "valid";

@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
@@ -21,6 +21,14 @@ const SELECTED_ATHLETE_KEY = "training_app_selected_athlete_v1";
 
 type JoinMode = "create" | "signin";
 type SessionUser = { email: string | null } | null;
+type JoinState =
+  | "preview"
+  | "wrong_account"
+  | "signed_out"
+  | "ready_to_claim"
+  | "claiming"
+  | "claimed_success"
+  | "blocked";
 
 function firstString(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
@@ -33,7 +41,7 @@ function normalizeEmail(value: string | null | undefined) {
 function friendlyInviteError(preview: AthleteInvitePreview | null, fallback?: string) {
   if (!preview) return fallback || "Could not load this invite.";
   if (preview.status === "expired") return "This invite has expired. Ask your coach for a new invite.";
-  if (preview.status === "accepted") return "This invite has already been accepted.";
+  if (preview.status === "accepted") return "This invite has already been accepted. Contact your coach for a new invite.";
   if (preview.status === "invalid") return "This invite link is invalid. Ask your coach for a new invite.";
   return fallback || preview.error || "Could not load this invite.";
 }
@@ -45,6 +53,18 @@ function isExistingUserError(error: any) {
 
 function emailMismatchMessage(invitedEmail: string, signedInEmail: string) {
   return `This invite is for ${invitedEmail}. You are signed in as ${signedInEmail}. Please sign out and continue with the invited email.`;
+}
+
+function friendlyClaimError(error: any) {
+  const message = String(error?.message ?? error ?? "");
+  const lower = message.toLowerCase();
+  if (lower.includes("already accepted") || lower.includes("already been claimed")) {
+    return "This invite has already been accepted. Contact your coach for a new invite.";
+  }
+  if (lower.includes("expired")) return "This invite has expired. Ask your coach for a new invite.";
+  if (lower.includes("invalid")) return "This invite link is invalid. Ask your coach for a new invite.";
+  if (lower.includes("email") && lower.includes("match")) return "This invite must be accepted with the invited email address.";
+  return message || "Could not accept this invite.";
 }
 
 export default function Join() {
@@ -62,12 +82,24 @@ export default function Join() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const autoClaimAttemptedRef = useRef(false);
 
   const inviteEmail = normalizeEmail(preview?.email);
   const activeEmail = normalizeEmail(sessionUser?.email);
   const emailLocked = !!inviteEmail;
   const emailMismatch = !!sessionUser && !!inviteEmail && activeEmail !== inviteEmail;
+  const joinState: JoinState = loading
+    ? "preview"
+    : !preview?.ok
+      ? "blocked"
+      : busy && message === "Accepting invite..."
+        ? "claiming"
+        : message === "Invite accepted. Opening your athlete dashboard..."
+          ? "claimed_success"
+          : emailMismatch
+            ? "wrong_account"
+            : !sessionUser
+              ? "signed_out"
+              : "ready_to_claim";
   const canCreate = email.trim().length > 3 && password.length >= 6 && confirmPassword.length >= 6 && !busy;
   const canSignIn = email.trim().length > 3 && password.length >= 6 && !busy;
 
@@ -78,7 +110,6 @@ export default function Join() {
       setLoading(true);
       setErrorMessage(null);
       setMessage(null);
-      autoClaimAttemptedRef.current = false;
 
       try {
         const { data, error } = await supabase.auth.getSession();
@@ -194,18 +225,11 @@ export default function Join() {
       await routeAfterClaim(result);
     } catch (error: any) {
       setMessage(null);
-      setErrorMessage(String(error?.message ?? "Could not accept this invite."));
+      setErrorMessage(friendlyClaimError(error));
     } finally {
       setBusy(false);
     }
   }
-
-  useEffect(() => {
-    if (loading || busy || autoClaimAttemptedRef.current) return;
-    if (!preview?.ok || !sessionUser || emailMismatch) return;
-    autoClaimAttemptedRef.current = true;
-    void claimInvite();
-  }, [loading, busy, preview?.ok, sessionUser, emailMismatch]);
 
   async function createAccountAndClaim() {
     const cleanEmail = normalizeEmail(email);
@@ -258,6 +282,7 @@ export default function Join() {
       }
 
       setSessionUser({ email: cleanEmail });
+      setMessage("Account created. Continue to accept your invite.");
       await claimInvite();
     } catch (error: any) {
       setErrorMessage(String(error?.message ?? "Could not create this account."));
@@ -281,6 +306,7 @@ export default function Join() {
       const { error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
       if (error) throw error;
       setSessionUser({ email: cleanEmail });
+      setMessage("Signed in. Continue to accept your invite.");
       await claimInvite();
     } catch (error: any) {
       setErrorMessage(String(error?.message ?? "Could not sign in."));
@@ -428,10 +454,21 @@ export default function Join() {
       ) : null}
 
       {preview?.ok && sessionUser && !emailMismatch ? (
-        <View style={{ borderWidth: 1, borderColor: "#bbf7d0", backgroundColor: "#f0fdf4", borderRadius: 12, padding: 12 }}>
+        <View style={{ borderWidth: 1, borderColor: "#bbf7d0", backgroundColor: "#f0fdf4", borderRadius: 12, padding: 12, gap: 8 }}>
           <Text style={{ color: "#166534", fontWeight: "700", lineHeight: 20 }}>
-            {message || "Signed in. Accepting your invite..."}
+            {joinState === "ready_to_claim"
+              ? `Signed in as ${activeEmail}. Continue to accept this invite.`
+              : message || "Working..."}
           </Text>
+          {joinState === "ready_to_claim" ? (
+            <Pressable
+              onPress={claimInvite}
+              disabled={busy}
+              style={{ backgroundColor: busy ? "#999" : "black", padding: 14, borderRadius: 12, alignItems: "center" }}
+            >
+              <Text style={{ color: "white", fontSize: 16, fontWeight: "600" }}>Accept Invite</Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
 
