@@ -18,6 +18,7 @@ import { switchAccountContext } from "../../lib/accountContextSwitch";
 import { supabase } from "../../lib/supabase";
 
 const SELECTED_ATHLETE_KEY = "training_app_selected_athlete_v1";
+const PENDING_INVITE_TOKEN_KEY = "training_app_pending_invite_token_v1";
 
 type JoinMode = "create" | "signin";
 type SessionUser = { email: string | null } | null;
@@ -55,6 +56,14 @@ function emailMismatchMessage(invitedEmail: string, signedInEmail: string) {
   return `This invite is for ${invitedEmail}. You are signed in as ${signedInEmail}. Please sign out and continue with the invited email.`;
 }
 
+function inviteRedirectUrl(token: string) {
+  const encodedToken = encodeURIComponent(token);
+  if (typeof window !== "undefined" && window.location?.origin) {
+    return `${window.location.origin}/join?token=${encodedToken}`;
+  }
+  return `https://www.tracksidecoach.com/join?token=${encodedToken}`;
+}
+
 function friendlyClaimError(error: any) {
   const message = String(error?.message ?? error ?? "");
   const lower = message.toLowerCase();
@@ -70,8 +79,9 @@ function friendlyClaimError(error: any) {
 export default function Join() {
   const router = useRouter();
   const params = useLocalSearchParams<{ token?: string | string[] }>();
-  const token = useMemo(() => String(firstString(params.token) ?? "").trim(), [params.token]);
+  const urlToken = useMemo(() => String(firstString(params.token) ?? "").trim(), [params.token]);
 
+  const [token, setToken] = useState(urlToken);
   const [preview, setPreview] = useState<AthleteInvitePreview | null>(null);
   const [sessionUser, setSessionUser] = useState<SessionUser>(null);
   const [loading, setLoading] = useState(true);
@@ -112,11 +122,19 @@ export default function Join() {
       setMessage(null);
 
       try {
+        let resolvedToken = urlToken;
+        if (resolvedToken) {
+          await AsyncStorage.setItem(PENDING_INVITE_TOKEN_KEY, resolvedToken);
+        } else {
+          resolvedToken = String((await AsyncStorage.getItem(PENDING_INVITE_TOKEN_KEY)) ?? "").trim();
+        }
+        if (!cancelled) setToken(resolvedToken);
+
         const { data, error } = await supabase.auth.getSession();
         if (error) throw error;
         if (!cancelled) setSessionUser(data.session?.user ? { email: data.session.user.email ?? null } : null);
 
-        if (!token) {
+        if (!resolvedToken) {
           if (!cancelled) {
             setPreview(null);
             setErrorMessage("This invite link is missing a token. Open the link from your coach's email.");
@@ -124,7 +142,7 @@ export default function Join() {
           return;
         }
 
-        const nextPreview = await getAthleteInvitePreview(token);
+        const nextPreview = await getAthleteInvitePreview(resolvedToken);
         if (cancelled) return;
         setPreview(nextPreview);
         if (nextPreview.email) setEmail(nextPreview.email);
@@ -140,7 +158,7 @@ export default function Join() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [urlToken]);
 
   async function routeAfterClaim(result: AcceptInviteResult) {
     let teamId: string | null = null;
@@ -221,6 +239,7 @@ export default function Join() {
 
       const result = await acceptInvite(token);
       setMessage("Invite accepted. Opening your athlete dashboard...");
+      await AsyncStorage.removeItem(PENDING_INVITE_TOKEN_KEY).catch(() => {});
       await new Promise((resolve) => setTimeout(resolve, 700));
       await routeAfterClaim(result);
     } catch (error: any) {
@@ -254,6 +273,9 @@ export default function Join() {
       const { data, error } = await supabase.auth.signUp({
         email: cleanEmail,
         password,
+        options: {
+          emailRedirectTo: inviteRedirectUrl(token),
+        },
       });
 
       if (error) {
@@ -275,7 +297,8 @@ export default function Join() {
       if (!data.session) {
         const signInResult = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
         if (signInResult.error) {
-          setMessage("Account created. Confirm your email if prompted, then sign in here to claim this invite.");
+          await AsyncStorage.setItem(PENDING_INVITE_TOKEN_KEY, token);
+          setMessage("Account created. Confirm your email if prompted, then return to this invite link and sign in to claim it.");
           setMode("signin");
           return;
         }

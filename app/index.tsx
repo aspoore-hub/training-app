@@ -1,13 +1,17 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Redirect } from "expo-router";
 import { useEffect, useState } from "react";
 import { resolveStartupAccountContext, routeForAccountContext } from "../lib/accountContexts";
 import { supabase } from "../lib/supabase";
 
+const PENDING_INVITE_TOKEN_KEY = "training_app_pending_invite_token_v1";
+
 type IndexTarget =
   | "/(auth)/login"
   | "/(auth)/choose-account"
   | "/(coach)/(tabs)/calendar?view=monthly"
-  | "/(athlete)/dashboard";
+  | "/(athlete)/dashboard"
+  | string;
 
 export default function Index() {
   const [target, setTarget] = useState<IndexTarget | null>(null);
@@ -22,6 +26,12 @@ export default function Index() {
 
         if (!hasSession) {
           if (!cancelled) setTarget("/(auth)/login");
+          return;
+        }
+
+        const pendingInviteToken = String((await AsyncStorage.getItem(PENDING_INVITE_TOKEN_KEY)) ?? "").trim();
+        if (pendingInviteToken) {
+          if (!cancelled) setTarget(`/(auth)/join?token=${encodeURIComponent(pendingInviteToken)}`);
           return;
         }
 
