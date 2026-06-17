@@ -185,6 +185,7 @@ export default function CoachSettingsTab() {
   const [auxiliaryPreCategoryNamesDraft, setAuxiliaryPreCategoryNamesDraft] = useState<string[]>([]);
   const [auxiliaryPostCategoryNamesDraft, setAuxiliaryPostCategoryNamesDraft] = useState<string[]>([]);
   const [auxiliaryAutosaveStatus, setAuxiliaryAutosaveStatus] = useState<"idle" | "dirty" | "saving" | "saved" | "error">("idle");
+  const [auxiliaryDeleteBusy, setAuxiliaryDeleteBusy] = useState(false);
   const lastAuxiliarySavedSnapshotRef = React.useRef("");
   const auxiliarySaveSeqRef = React.useRef(0);
   const auxiliaryCommitInFlightRef = React.useRef<Promise<boolean> | null>(null);
@@ -435,6 +436,13 @@ export default function CoachSettingsTab() {
     setAuxiliaryAutosaveStatus("idle");
   }
 
+  function setSelectedAuxiliaryRoutine(routine: AuxiliaryRoutine | null) {
+    const nextId = routine?.id ?? null;
+    selectedAuxiliaryRoutineIdRef.current = nextId;
+    setSelectedAuxiliaryRoutineId(nextId);
+    loadAuxiliaryRoutineIntoDrafts(routine);
+  }
+
   async function selectAuxiliaryRoutineById(routineId: string | null) {
     if (routineId === selectedAuxiliaryRoutineIdRef.current) return;
     const committed = await commitAuxiliaryRoutineDraft("routine-selection");
@@ -593,33 +601,57 @@ export default function CoachSettingsTab() {
   }
 
   function confirmDeleteSelectedAuxiliaryRoutine() {
+    if (auxiliaryDeleteBusy) return;
     if (!selectedAuxiliaryRoutineId) {
       Alert.alert("Select a routine", "Choose a routine to delete.");
       return;
     }
 
     const routineId = selectedAuxiliaryRoutineId;
-    Alert.alert("Delete routine?", "This removes the selected auxiliary routine.", [
+    const routine = sortedAuxiliaryRoutines.find((item) => item.id === routineId) ?? null;
+    if (!routine) {
+      Alert.alert("Routine not found", "Refresh Settings and try again.");
+      void reloadAuxiliaryRoutines(null);
+      return;
+    }
+
+    const runDelete = async () => {
+      const previous = [...sortedAuxiliaryRoutines];
+      const index = previous.findIndex((item) => item.id === routineId);
+      const next = previous.filter((item) => item.id !== routineId);
+      const fallback = next[index] ?? next[index - 1] ?? next[0] ?? null;
+
+      setAuxiliaryDeleteBusy(true);
+      setAuxiliaryRoutines(next);
+      setSelectedAuxiliaryRoutine(fallback);
+
+      try {
+        await deleteAuxiliaryRoutine(routineId, { requireCloudSync: true });
+        const refreshed = await loadAuxiliaryRoutines();
+        const sorted = [...refreshed].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
+        setAuxiliaryRoutines(sorted);
+        const selected = fallback ? sorted.find((item) => item.id === fallback.id) ?? sorted[0] ?? null : sorted[0] ?? null;
+        setSelectedAuxiliaryRoutine(selected);
+      } catch (error: any) {
+        const message = getErrorMessage(error);
+        console.error("[settings-aux] delete failed", { routineId, error });
+        setAuxiliaryRoutines(previous);
+        setSelectedAuxiliaryRoutine(routine);
+        Alert.alert("Routine delete failed", message || "Couldn't delete routine. Please try again.");
+      } finally {
+        setAuxiliaryDeleteBusy(false);
+      }
+    };
+
+    const message = `"${routine.title || "Routine"}" will be removed from auxiliary routines.`;
+    if (Platform.OS === "web" && typeof window !== "undefined" && typeof window.confirm === "function") {
+      if (window.confirm(`Delete routine?\n\n${message}`)) void runDelete();
+      return;
+    }
+
+    Alert.alert("Delete routine?", message, [
       { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          const index = sortedAuxiliaryRoutines.findIndex((routine) => routine.id === routineId);
-          await deleteAuxiliaryRoutine(routineId);
-          const refreshed = await loadAuxiliaryRoutines();
-          const sorted = [...refreshed].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
-          setAuxiliaryRoutines(sorted);
-          const fallback = sorted[index] ?? sorted[index - 1] ?? sorted[0] ?? null;
-          if (fallback) {
-            setSelectedAuxiliaryRoutineId(fallback.id);
-            loadAuxiliaryRoutineIntoDrafts(fallback);
-          } else {
-            setSelectedAuxiliaryRoutineId(null);
-            loadAuxiliaryRoutineIntoDrafts(null);
-          }
-        },
-      },
+      { text: "Delete", style: "destructive", onPress: () => void runDelete() },
     ]);
   }
 
@@ -1911,11 +1943,11 @@ export default function CoachSettingsTab() {
                         <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
                           <Pressable
                             onPress={() => void saveSelectedAuxiliaryRoutine()}
-                            disabled={auxiliaryAutosaveStatus === "saving"}
+                            disabled={auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy}
                             style={[
                               styles.groupActionBtn,
                               { alignItems: "center", justifyContent: "center" },
-                              auxiliaryAutosaveStatus === "saving" && styles.disabledBtn,
+                              (auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy) && styles.disabledBtn,
                             ]}
                           >
                             <Text style={styles.groupActionBtnText}>
@@ -1925,14 +1957,14 @@ export default function CoachSettingsTab() {
 
                           <Pressable
                             onPress={confirmDeleteSelectedAuxiliaryRoutine}
-                            disabled={auxiliaryAutosaveStatus === "saving"}
+                            disabled={auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy}
                             style={[
                               styles.groupDeleteBtn,
                               { alignItems: "center", justifyContent: "center" },
-                              auxiliaryAutosaveStatus === "saving" && styles.disabledBtn,
+                              (auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy) && styles.disabledBtn,
                             ]}
                           >
-                            <Text style={styles.groupDeleteBtnText}>Delete</Text>
+                            <Text style={styles.groupDeleteBtnText}>{auxiliaryDeleteBusy ? "Deleting..." : "Delete"}</Text>
                           </Pressable>
                         </View>
                       </View>

@@ -1,4 +1,5 @@
 import { loadJSON, saveJSON } from "./storage";
+import { saveJSONWithTeamCloudSyncStrict } from "./teamCloudSync";
 
 export const AUXILIARY_ROUTINES_KEY = "training_app_auxiliary_routines_v1";
 
@@ -55,7 +56,14 @@ export async function loadAuxiliaryRoutines(): Promise<AuxiliaryRoutine[]> {
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-export async function saveAuxiliaryRoutines(list: AuxiliaryRoutine[]) {
+export async function saveAuxiliaryRoutines(
+  list: AuxiliaryRoutine[],
+  options?: { requireCloudSync?: boolean }
+) {
+  if (options?.requireCloudSync) {
+    await saveJSONWithTeamCloudSyncStrict(AUXILIARY_ROUTINES_KEY, list);
+    return;
+  }
   await saveJSON(AUXILIARY_ROUTINES_KEY, list);
 }
 
@@ -132,8 +140,11 @@ export async function updateAuxiliaryRoutine(
   await saveAuxiliaryRoutines(next);
 }
 
-export async function deleteAuxiliaryRoutine(id: string) {
+export async function deleteAuxiliaryRoutine(
+  id: string,
+  options?: { requireCloudSync?: boolean }
+) {
   const existing = await loadAuxiliaryRoutines();
   const next = existing.filter((item) => item.id !== id);
-  await saveAuxiliaryRoutines(next);
+  await saveAuxiliaryRoutines(next, options);
 }

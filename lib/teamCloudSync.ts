@@ -145,6 +145,28 @@ export async function saveJSONWithTeamCloudSync<T>(
   }
 }
 
+/**
+ * Strict team save for destructive actions that should not look successful
+ * unless the team cloud row was actually updated.
+ */
+export async function saveJSONWithTeamCloudSyncStrict<T>(
+  key: string,
+  value: T,
+  storage: StorageLike = AsyncStorage
+) {
+  const teamId = await getCurrentTeamId();
+  await requireTeamPermission("training.edit", teamId);
+
+  const meta = await readMeta(key, storage);
+  const next: SyncMeta = { version: meta.version + 1, updatedAt: new Date().toISOString() };
+  const payload = JSON.stringify(value);
+
+  await uploadToTeam(key, next.version, next.updatedAt, payload);
+  await storage.setItem(key, payload);
+  await writeMeta(key, next, storage);
+  await clearDirty(key, storage);
+}
+
 export async function loadJSONWithTeamCloudSync<T>(
   key: string,
   fallback: T,
