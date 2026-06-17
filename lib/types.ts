@@ -43,6 +43,7 @@ export type AthleteWorkout = {
   dateISO: string;           // YYYY-MM-DD
   session?: "AM" | "PM";     // AM or PM
   time?: string;             // optional start time label, independent from AM/PM
+  location?: string;         // optional location label
   preRoutineIds?: string[];  // optional auxiliary routines before main workout
   postRoutineIds?: string[]; // optional auxiliary routines after main workout
   category: string;          // primary category (first selected)

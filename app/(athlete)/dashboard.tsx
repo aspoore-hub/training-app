@@ -27,7 +27,9 @@ import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow, updateTeamWorkoutById } from "../../lib/teamWorkoutsCloud";
 import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import { formatMileage, getWeekIndex, getWeekStartISO, parseISODate, parseMileageInput, toISODate } from "../../lib/mileagePlan";
-import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../lib/categories";
+import { CATEGORIES_KEY, normalizeCategories } from "../../lib/categories";
+import { AthleteQuickFeedbackSheet } from "../../components/athlete/AthleteQuickFeedbackSheet";
+import { AthleteSessionCard } from "../../components/athlete/AthleteSessionCard";
 import type { MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
 
 type TodaySessionCard = {
@@ -118,19 +120,10 @@ function feedbackSummaryFromMileage(entry?: MileageSessionFeedback): string {
 
 function plannedTextFromWorkout(row: TeamWorkoutRow): string {
   const parts = [
-    String(row.title ?? "").trim(),
     String(row.details ?? "").trim(),
-    String(row.time_text ?? "").trim(),
     String((row as any).location ?? "").trim(),
   ].filter(Boolean);
   return parts.join(" • ");
-}
-
-function statusColors(status: TodaySessionCard["status"]) {
-  if (status === "submitted") return { border: "#bbf7d0", bg: "#f0fdf4", text: "#166534", label: "Submitted" };
-  if (status === "missing") return { border: "#fecaca", bg: "#fff1f2", text: "#991b1b", label: "Missing" };
-  if (status === "multiple") return { border: "#fed7aa", bg: "#fff7ed", text: "#9a3412", label: "Multiple" };
-  return { border: "#e2e8f0", bg: "#f8fafc", text: "#64748b", label: "No planned session" };
 }
 
 function formatDailyLogActivityKind(kind?: AthleteDailyLogActivityKind) {
@@ -353,8 +346,45 @@ export default function AthleteDashboardScreen() {
         summary,
         planSummary,
       };
-    });
+    }).filter((card) => card.workouts.length > 0 || Boolean(card.prescribed));
   }, [todayAssignment, todayISO, todayMileageFeedbackEntries, todayRows]);
+
+  const openDetailForCard = useCallback((card: TodaySessionCard) => {
+    if (card.status === "none") return;
+    if (card.workouts.length > 1) {
+      router.push({ pathname: "/(athlete)/day", params: { date: todayISO } });
+      return;
+    }
+
+    const workout = card.workouts[0];
+    if (workout) {
+      router.push({
+        pathname: "/(athlete)/workout/[id]",
+        params: {
+          id: workout.id,
+          name: selectedAthleteName ?? "",
+          returnTo: "/(athlete)/dashboard",
+        },
+      });
+      return;
+    }
+
+    if (card.prescribed) {
+      router.push({
+        pathname: "/(athlete)/workout/[id]",
+        params: {
+          id: `planned-${todayISO}-${card.session}`,
+          synthetic: "1",
+          date: todayISO,
+          session: card.session,
+          prescribed: card.prescribed,
+          athleteId: selectedAthleteId ?? "",
+          name: selectedAthleteName ?? "",
+          returnTo: "/(athlete)/dashboard",
+        },
+      });
+    }
+  }, [router, selectedAthleteId, selectedAthleteName, todayISO]);
 
   const openEditorForCard = useCallback((card: TodaySessionCard) => {
     if (card.status === "none") return;
@@ -648,92 +678,26 @@ export default function AthleteDashboardScreen() {
         </Text>
         <View style={{ marginTop: 12, gap: 10 }}>
           {todaySessionCards.map((card) => {
-            const colors = statusColors(card.status);
             const workout = card.workouts[0];
             const categoriesForCard = workout ? workoutCategoryNames(workout) : [];
             const actionLabel = card.status === "submitted" ? "Edit log" : card.status === "none" ? "No log needed" : "Enter log";
             return (
-              <View
+              <AthleteSessionCard
                 key={card.key}
-                style={{
-                  borderRadius: 14,
-                  borderWidth: 1,
-                  borderColor: colors.border,
-                  backgroundColor: "#ffffff",
-                  padding: 12,
-                }}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                  <Text style={{ fontSize: 15, fontWeight: "900", color: "#0f172a" }}>{card.session}</Text>
-                  <View
-                    style={{
-                      borderRadius: 999,
-                      borderWidth: 1,
-                      borderColor: colors.border,
-                      backgroundColor: colors.bg,
-                      paddingHorizontal: 9,
-                      paddingVertical: 3,
-                    }}
-                  >
-                    <Text style={{ fontSize: 11, fontWeight: "900", color: colors.text }}>{colors.label}</Text>
-                  </View>
-                </View>
-
-                {card.prescribed ? (
-                  <Text style={{ marginTop: 8, color: "#1e40af", fontWeight: "900" }}>Mileage: {card.prescribed}</Text>
-                ) : null}
-
-                {categoriesForCard.length > 0 ? (
-                  <View style={{ marginTop: 8, flexDirection: "row", flexWrap: "wrap", gap: 5 }}>
-                    {categoriesForCard.slice(0, 3).map((name) => {
-                      const color = categoryColorByName(categories, name);
-                      return (
-                        <View
-                          key={`${card.key}-${name}`}
-                          style={{
-                            flexDirection: "row",
-                            alignItems: "center",
-                            gap: 4,
-                            paddingHorizontal: 7,
-                            paddingVertical: 2,
-                            borderRadius: 999,
-                            borderWidth: 1,
-                            borderColor: color,
-                            backgroundColor: "white",
-                          }}
-                        >
-                          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color }} />
-                          <Text style={{ fontSize: 11, fontWeight: "800", color: "#334155" }}>{name}</Text>
-                        </View>
-                      );
-                    })}
-                  </View>
-                ) : null}
-
-                <Text style={{ marginTop: 8, fontSize: 17, fontWeight: "900", color: "#0f172a" }}>{card.title}</Text>
-                {card.summary ? (
-                  <Text style={{ marginTop: 5, color: "#475569", lineHeight: 20 }}>{card.summary}</Text>
-                ) : null}
-                {workout?.time_text ? (
-                  <Text style={{ marginTop: 5, color: "#64748b", fontWeight: "700" }}>{workout.time_text}</Text>
-                ) : null}
-
-                <Pressable
-                  disabled={card.status === "none"}
-                  onPress={() => openEditorForCard(card)}
-                  style={{
-                    marginTop: 12,
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: card.status === "none" ? "#e2e8f0" : "#bfdbfe",
-                    backgroundColor: card.status === "none" ? "#f8fafc" : "#eff6ff",
-                    paddingVertical: 11,
-                    alignItems: "center",
-                  }}
-                >
-                  <Text style={{ fontWeight: "900", color: card.status === "none" ? "#94a3b8" : "#1e40af" }}>{actionLabel}</Text>
-                </Pressable>
-              </View>
+                session={card.session}
+                title={card.title}
+                summary={card.summary}
+                planSummary={workout ? card.planSummary : undefined}
+                prescribed={card.prescribed}
+                time={workout?.time_text ?? null}
+                location={String((workout as any)?.location ?? "").trim() || null}
+                categories={categoriesForCard}
+                categoriesSource={categories}
+                status={card.status}
+                actionLabel={actionLabel}
+                onOpen={() => openDetailForCard(card)}
+                onLog={() => openEditorForCard(card)}
+              />
             );
           })}
         </View>
@@ -792,165 +756,26 @@ export default function AthleteDashboardScreen() {
         ) : null}
       </View>
 
-      <Modal
+      <AthleteQuickFeedbackSheet
         visible={Boolean(editor)}
-        transparent
-        animationType="slide"
-        onRequestClose={() => {
+        title={editor ? `${editor.card.session} Log` : "Log"}
+        subtitle={formatCompactDate(todayISO)}
+        planSummary={editor ? editor.card.planSummary || (editor.card.prescribed ? `Mileage: ${editor.card.prescribed}` : "") : ""}
+        completedMilesText={editor?.completedMilesText ?? ""}
+        completedTimeText={editor?.completedTimeText ?? ""}
+        splitsText={editor?.splitsText ?? ""}
+        additionalFeedbackText={editor?.additionalFeedbackText ?? ""}
+        saving={editorSaving}
+        error={editorError}
+        onChangeCompletedMiles={(text) => setEditor((prev) => (prev ? { ...prev, completedMilesText: text } : prev))}
+        onChangeCompletedTime={(text) => setEditor((prev) => (prev ? { ...prev, completedTimeText: text } : prev))}
+        onChangeSplits={(text) => setEditor((prev) => (prev ? { ...prev, splitsText: text } : prev))}
+        onChangeAdditionalFeedback={(text) => setEditor((prev) => (prev ? { ...prev, additionalFeedbackText: text } : prev))}
+        onCancel={() => {
           if (!editorSaving) setEditor(null);
         }}
-      >
-        <View style={{ flex: 1, backgroundColor: "rgba(15, 23, 42, 0.35)", justifyContent: "flex-end" }}>
-          <View
-            style={{
-              maxHeight: "88%",
-              borderTopLeftRadius: 24,
-              borderTopRightRadius: 24,
-              backgroundColor: "#ffffff",
-              padding: 18,
-            }}
-          >
-            {editor ? (
-              <ScrollView keyboardShouldPersistTaps="handled">
-                <Text style={{ fontSize: 22, fontWeight: "900", color: "#0f172a" }}>{editor.card.session} Log</Text>
-                <Text style={{ marginTop: 4, color: "#475569", fontWeight: "700" }}>{formatCompactDate(todayISO)}</Text>
-                {editor.card.planSummary || editor.card.prescribed ? (
-                  <View
-                    style={{
-                      marginTop: 12,
-                      borderRadius: 14,
-                      borderWidth: 1,
-                      borderColor: "#dbeafe",
-                      backgroundColor: "#eff6ff",
-                      padding: 12,
-                    }}
-                  >
-                    <Text style={{ fontWeight: "900", color: "#1e3a8a" }}>Planned</Text>
-                    <Text style={{ marginTop: 4, color: "#1e40af", lineHeight: 20 }}>
-                      {editor.card.planSummary || `Mileage: ${editor.card.prescribed}`}
-                    </Text>
-                  </View>
-                ) : null}
-
-                <View style={{ marginTop: 14, gap: 12 }}>
-                  <View>
-                    <Text style={{ fontWeight: "900", color: "#334155" }}>Completed distance</Text>
-                    <TextInput
-                      value={editor.completedMilesText}
-                      onChangeText={(text) => setEditor((prev) => (prev ? { ...prev, completedMilesText: text } : prev))}
-                      placeholder="Example: 5.25"
-                      keyboardType="decimal-pad"
-                      style={{
-                        marginTop: 6,
-                        borderRadius: 12,
-                        borderWidth: 1,
-                        borderColor: "#cbd5e1",
-                        paddingHorizontal: 12,
-                        paddingVertical: 11,
-                        fontWeight: "800",
-                        color: "#0f172a",
-                      }}
-                    />
-                  </View>
-                  <View>
-                    <Text style={{ fontWeight: "900", color: "#334155" }}>Completed time</Text>
-                    <TextInput
-                      value={editor.completedTimeText}
-                      onChangeText={(text) => setEditor((prev) => (prev ? { ...prev, completedTimeText: text } : prev))}
-                      placeholder="Example: 42:30"
-                      style={{
-                        marginTop: 6,
-                        borderRadius: 12,
-                        borderWidth: 1,
-                        borderColor: "#cbd5e1",
-                        paddingHorizontal: 12,
-                        paddingVertical: 11,
-                        fontWeight: "800",
-                        color: "#0f172a",
-                      }}
-                    />
-                  </View>
-                  <View>
-                    <Text style={{ fontWeight: "900", color: "#334155" }}>Splits / pace</Text>
-                    <TextInput
-                      value={editor.splitsText}
-                      onChangeText={(text) => setEditor((prev) => (prev ? { ...prev, splitsText: text } : prev))}
-                      placeholder="Optional"
-                      multiline
-                      style={{
-                        marginTop: 6,
-                        minHeight: 72,
-                        textAlignVertical: "top",
-                        borderRadius: 12,
-                        borderWidth: 1,
-                        borderColor: "#cbd5e1",
-                        paddingHorizontal: 12,
-                        paddingVertical: 11,
-                        fontWeight: "700",
-                        color: "#0f172a",
-                      }}
-                    />
-                  </View>
-                  <View>
-                    <Text style={{ fontWeight: "900", color: "#334155" }}>Notes</Text>
-                    <TextInput
-                      value={editor.additionalFeedbackText}
-                      onChangeText={(text) => setEditor((prev) => (prev ? { ...prev, additionalFeedbackText: text } : prev))}
-                      placeholder="Optional notes"
-                      multiline
-                      style={{
-                        marginTop: 6,
-                        minHeight: 92,
-                        textAlignVertical: "top",
-                        borderRadius: 12,
-                        borderWidth: 1,
-                        borderColor: "#cbd5e1",
-                        paddingHorizontal: 12,
-                        paddingVertical: 11,
-                        fontWeight: "700",
-                        color: "#0f172a",
-                      }}
-                    />
-                  </View>
-                </View>
-
-                {editorError ? <Text style={{ marginTop: 12, color: "#be123c", fontWeight: "800" }}>{editorError}</Text> : null}
-
-                <View style={{ marginTop: 18, flexDirection: "row", gap: 10 }}>
-                  <Pressable
-                    disabled={editorSaving}
-                    onPress={() => setEditor(null)}
-                    style={{
-                      flex: 1,
-                      borderRadius: 14,
-                      borderWidth: 1,
-                      borderColor: "#cbd5e1",
-                      backgroundColor: "#ffffff",
-                      paddingVertical: 13,
-                      alignItems: "center",
-                    }}
-                  >
-                    <Text style={{ fontWeight: "900", color: "#334155" }}>Cancel</Text>
-                  </Pressable>
-                  <Pressable
-                    disabled={editorSaving}
-                    onPress={() => void saveEditor()}
-                    style={{
-                      flex: 1,
-                      borderRadius: 14,
-                      backgroundColor: editorSaving ? "#93c5fd" : "#2563eb",
-                      paddingVertical: 13,
-                      alignItems: "center",
-                    }}
-                  >
-                    <Text style={{ fontWeight: "900", color: "white" }}>{editorSaving ? "Saving..." : "Save log"}</Text>
-                  </Pressable>
-                </View>
-              </ScrollView>
-            ) : null}
-          </View>
-        </View>
-      </Modal>
+        onSave={() => void saveEditor()}
+      />
 
       <Modal
         visible={Boolean(dailyLogEditor)}

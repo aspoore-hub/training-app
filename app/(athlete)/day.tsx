@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FlatList, Pressable, Text, View } from "react-native";
+import { Alert, FlatList, Pressable, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
@@ -11,7 +11,15 @@ import type { AthleteWorkout, MileageValue, WeekStartDay } from "../../lib/types
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import { ATHLETE_CALENDAR_VIEW_STATE_KEY, type AthleteCalendarViewState } from "../../lib/athleteCalendarView";
 import { loadRosterNameMapForTeam } from "../../lib/rosterNameMap";
-import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
+import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow, updateTeamWorkoutById } from "../../lib/teamWorkoutsCloud";
+import {
+  buildMileageFeedbackId,
+  loadMileageFeedback,
+  migrateLocalMileageFeedbackToTeamForAthlete,
+  type MileageSessionFeedback,
+  upsertMileageFeedback,
+} from "../../lib/mileageFeedback";
+import { hasMileageFeedback, hasWorkoutFeedback, parseNumericLike } from "../../lib/feedbackParsing";
 import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import {
   getWeekStartISO,
@@ -25,6 +33,10 @@ import {
 } from "../../lib/mileagePlan";
 import { loadWeekStartSetting } from "../../lib/settings";
 import { PrevNextNavButtons } from "../../components/shared/PrevNextNavButtons";
+import { CATEGORIES_KEY, normalizeCategories } from "../../lib/categories";
+import { AthleteQuickFeedbackSheet } from "../../components/athlete/AthleteQuickFeedbackSheet";
+import { AthleteSessionCard, type AthleteSessionCardStatus } from "../../components/athlete/AthleteSessionCard";
+import type { WorkoutCategory } from "../../lib/types";
 
 const ATHLETE_DAY_UI_STATE_KEY = "training_app_athlete_day_ui_state_v1";
 
@@ -32,9 +44,26 @@ type AthleteDayUiState = {
   dateISO?: string;
 };
 
+type FeedbackEditorState = {
+  dateISO: string;
+  session: "AM" | "PM";
+  prescribed: string;
+  workout?: AthleteWorkout;
+  mileageFeedback?: MileageSessionFeedback;
+  planSummary: string;
+  completedMilesText: string;
+  completedTimeText: string;
+  splitsText: string;
+  additionalFeedbackText: string;
+};
+
 function normalizeGroupId(groupId?: string): string {
   const normalized = String(groupId ?? "").trim().toUpperCase();
   return normalized || "A";
+}
+
+function normalizeSession(value: string | undefined): "AM" | "PM" {
+  return String(value ?? "PM").toUpperCase() === "AM" ? "AM" : "PM";
 }
 
 function fallbackAthleteName(athleteId: string) {
@@ -59,6 +88,7 @@ function toAthleteWorkout(row: TeamWorkoutRow, nameByAthleteId: Map<string, stri
     dateISO: String(row.date_iso),
     session: row.session === "AM" ? "AM" : "PM",
     time: row.time_text ?? undefined,
+    location: row.location ?? undefined,
     preRoutineIds: row.pre_routine_ids ?? undefined,
     postRoutineIds: row.post_routine_ids ?? undefined,
     category: String(row.primary_category ?? "Other"),
@@ -104,6 +134,33 @@ function appendRouteParam(parts: string[], key: string, value: unknown) {
   parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(clean)}`);
 }
 
+function workoutCategoryNames(workout: AthleteWorkout): string[] {
+  const arr = Array.isArray(workout.categories) ? workout.categories : [String(workout.category ?? "Other")];
+  const cleaned = arr.map((x) => String(x ?? "").trim()).filter(Boolean);
+  return cleaned.length > 0 ? cleaned : ["Other"];
+}
+
+function feedbackSummaryFromWorkout(workout: AthleteWorkout): string {
+  const parts = [
+    workout.completedMiles != null ? `${workout.completedMiles} mi` : "",
+    String(workout.completedTime ?? "").trim(),
+    String(workout.splitsOrPace ?? "").trim(),
+    String(workout.additionalFeedback ?? workout.feedback ?? "").trim(),
+  ].filter(Boolean);
+  return parts.join(" • ");
+}
+
+function feedbackSummaryFromMileage(entry?: MileageSessionFeedback): string {
+  if (!entry) return "";
+  const parts = [
+    entry.completedMiles != null ? `${entry.completedMiles} mi` : "",
+    String(entry.completedTime ?? "").trim(),
+    String(entry.splitsOrPace ?? "").trim(),
+    String(entry.additionalFeedback ?? "").trim(),
+  ].filter(Boolean);
+  return parts.join(" • ");
+}
+
 export default function AthleteDayScreen() {
   const router = useRouter();
   const store = teamDataStore.use();
@@ -122,6 +179,11 @@ export default function AthleteDayScreen() {
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
+  const [mileageFeedbackEntries, setMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
+  const [categories, setCategories] = useState<WorkoutCategory[]>([]);
+  const [editor, setEditor] = useState<FeedbackEditorState | null>(null);
+  const [editorSaving, setEditorSaving] = useState(false);
+  const [editorError, setEditorError] = useState<string | null>(null);
   const [loadingContext, setLoadingContext] = useState(true);
   const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
   const inFlightRef = useRef(false);
@@ -244,11 +306,12 @@ export default function AthleteDayScreen() {
       inFlightRef.current = true;
       setLoadingContext(true);
       try {
-        const [ws, pace, unit, athleteSession] = await Promise.all([
+        const [ws, pace, unit, athleteSession, storedCategories] = await Promise.all([
           loadWeekStartSetting(),
           loadPaceSecondsPerMile(),
           loadDistanceUnit(),
           resolveAthleteSessionContext(),
+          loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
         ]);
 
         const resolvedWeekStart: WeekStartDay = ws.normalized === "sunday" ? 0 : 1;
@@ -259,6 +322,7 @@ export default function AthleteDayScreen() {
         setWeekStartsOn(resolvedWeekStart);
         setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
         setDistanceUnit(unit);
+        setCategories(normalizeCategories(storedCategories));
 
         const resolvedId = String(athleteSession.athleteId ?? "").trim() || null;
         const resolvedName = resolvedId ? String(athleteSession.athleteName ?? "").trim() || null : null;
@@ -276,7 +340,11 @@ export default function AthleteDayScreen() {
           return;
         }
 
-        const athleteRows = await listVisibleAthleteWorkoutsInRange(String(resolvedId), String(currentDateISO), String(currentDateISO));
+        await migrateLocalMileageFeedbackToTeamForAthlete({ athleteId: resolvedId, athleteName: resolvedName });
+        const [athleteRows, allMileageFeedback] = await Promise.all([
+          listVisibleAthleteWorkoutsInRange(String(resolvedId), String(currentDateISO), String(currentDateISO)),
+          loadMileageFeedback(),
+        ]);
         if (activeLoadKeyRef.current !== loadKey) return;
 
         const athleteMapped = athleteRows.map((row) => toAthleteWorkout(row, new Map()));
@@ -290,6 +358,17 @@ export default function AthleteDayScreen() {
 
         setAllWorkouts(athleteMapped);
         setWorkouts(athleteFiltered);
+        setMileageFeedbackEntries(
+          allMileageFeedback.filter((entry) => {
+            const entryAthleteId = String((entry as any)?.athleteId ?? "").trim();
+            const byId = entryAthleteId === resolvedId;
+            const byName =
+              !entryAthleteId &&
+              resolvedName &&
+              String(entry.athleteName ?? "").trim().toLowerCase() === resolvedName.toLowerCase();
+            return (byId || byName) && String(entry.dateISO ?? "") === String(currentDateISO);
+          })
+        );
         lastLoadRef.current = { key: loadKey, ts: Date.now() };
 
         // Hydrate roster names in background without loading hidden team rows.
@@ -395,6 +474,115 @@ export default function AthleteDayScreen() {
     appendRouteParam(params, "returnView", returnView);
     appendRouteParam(params, "returnDate", returnDate);
     return `/(athlete)/day?${params.join("&")}`;
+  }
+
+  function mileageFeedbackForSession(session: "AM" | "PM") {
+    return mileageFeedbackEntries.find((entry) => String(entry.dateISO ?? "") === String(currentDateISO) && normalizeSession(entry.session) === session);
+  }
+
+  function openEditorForSession(input: {
+    session: "AM" | "PM";
+    prescribed: string;
+    workout?: AthleteWorkout;
+  }) {
+    const mileageFeedback = mileageFeedbackForSession(input.session);
+    const workout = input.workout;
+    setEditorError(null);
+    setEditor({
+      dateISO: String(currentDateISO),
+      session: input.session,
+      prescribed: input.prescribed,
+      workout,
+      mileageFeedback,
+      planSummary: [input.prescribed ? `Mileage: ${input.prescribed}` : "", workout?.details ? String(workout.details) : ""].filter(Boolean).join(" • "),
+      completedMilesText:
+        workout?.completedMiles != null
+          ? String(workout.completedMiles)
+          : mileageFeedback?.completedMiles != null
+            ? String(mileageFeedback.completedMiles)
+            : "",
+      completedTimeText: String(workout?.completedTime ?? mileageFeedback?.completedTime ?? ""),
+      splitsText: String(workout?.splitsOrPace ?? mileageFeedback?.splitsOrPace ?? ""),
+      additionalFeedbackText: String(workout?.additionalFeedback ?? workout?.feedback ?? mileageFeedback?.additionalFeedback ?? ""),
+    });
+  }
+
+  async function saveEditor() {
+    if (!editor) return;
+    const completedMilesRaw = editor.completedMilesText.trim();
+    const completedTimeText = editor.completedTimeText.trim();
+    const splitsText = editor.splitsText.trim();
+    const additionalFeedbackText = editor.additionalFeedbackText.trim();
+    const parsedCompletedMiles = completedMilesRaw ? parseNumericLike(completedMilesRaw) : undefined;
+
+    if (completedMilesRaw && parsedCompletedMiles == null) {
+      setEditorError("Distance must be a number, like 5 or 5.25.");
+      return;
+    }
+    if (parsedCompletedMiles != null && !/^\d+(\.\d{1,2})?$/.test(completedMilesRaw)) {
+      setEditorError("Distance can use up to two decimals.");
+      return;
+    }
+    if (parsedCompletedMiles == null && !completedTimeText) {
+      setEditorError("Enter either distance completed or time completed before saving.");
+      return;
+    }
+
+    setEditorSaving(true);
+    setEditorError(null);
+    try {
+      const workout = editor.workout;
+      if (workout) {
+        await updateTeamWorkoutById(workout.id, {
+          completed_miles: parsedCompletedMiles ?? null,
+          completed_time_text: completedTimeText || null,
+          splits_or_pace: splitsText || null,
+          additional_feedback: additionalFeedbackText || null,
+        });
+        const updateWorkout = (item: AthleteWorkout): AthleteWorkout =>
+          item.id === workout.id
+            ? {
+                ...item,
+                completedMiles: parsedCompletedMiles,
+                completedTime: completedTimeText || undefined,
+                splitsOrPace: splitsText || undefined,
+                additionalFeedback: additionalFeedbackText || undefined,
+                feedback: additionalFeedbackText || undefined,
+              }
+            : item;
+        setWorkouts((prev) => prev.map(updateWorkout));
+        setAllWorkouts((prev) => prev.map(updateWorkout));
+      } else {
+        const entry: MileageSessionFeedback = {
+          id: buildMileageFeedbackId({
+            athleteId: String(selectedAthleteId ?? "") || undefined,
+            athleteName: String(selectedAthleteName ?? "") || undefined,
+            dateISO: editor.dateISO,
+            session: editor.session,
+          }),
+          athleteId: String(selectedAthleteId ?? "") || undefined,
+          athleteName: String(selectedAthleteName ?? "") || undefined,
+          dateISO: editor.dateISO,
+          session: editor.session,
+          prescribed: editor.prescribed || undefined,
+          completedMiles: parsedCompletedMiles,
+          completedTime: completedTimeText || undefined,
+          splitsOrPace: splitsText || undefined,
+          additionalFeedback: additionalFeedbackText || undefined,
+          updatedAt: Date.now(),
+        };
+        await upsertMileageFeedback(entry);
+        setMileageFeedbackEntries((prev) => [...prev.filter((item) => item.id !== entry.id), entry]);
+      }
+
+      setEditor(null);
+    } catch (error: any) {
+      const message = String(error?.message ?? error ?? "Could not save log.");
+      setEditorError(message);
+      Alert.alert("Save failed", message);
+    } finally {
+      setEditorSaving(false);
+    }
   }
 
   const translateX = useSharedValue(0);
@@ -537,120 +725,75 @@ export default function AthleteDayScreen() {
         keyExtractor={(item) => item.session}
         contentContainerStyle={{ paddingTop: 10, paddingBottom: 24, gap: 10 }}
         renderItem={({ item }) => (
-          <View
-            style={{
-              borderWidth: 1,
-              borderColor: "#e2e8f0",
-              borderRadius: 12,
-              backgroundColor: "#fff",
-              padding: 10,
-            }}
-          >
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-              <Text style={{ fontWeight: "900", color: "#0f172a" }}>{item.session}</Text>
-              {item.prescribed ? (
-                <Text style={{ color: "#334155", fontWeight: "800" }}>Plan: {item.prescribed}</Text>
-              ) : null}
-            </View>
-
+          <View style={{ gap: 10 }}>
             {item.workouts.length === 0 && item.prescribed ? (
-              <View style={{ marginTop: 8 }}>
-                <Pressable
-                  onPress={() =>
+              <AthleteSessionCard
+                session={item.session}
+                title={`${item.session} Planned Session`}
+                summary={`Prescribed mileage: ${item.prescribed}`}
+                prescribed={item.prescribed}
+                status={hasMileageFeedback(mileageFeedbackForSession(item.session) ?? {}) ? "submitted" : "missing"}
+                actionLabel={hasMileageFeedback(mileageFeedbackForSession(item.session) ?? {}) ? "Edit log" : "Enter log"}
+                onOpen={() =>
+                  router.push({
+                    pathname: "/(athlete)/workout/[id]",
+                    params: {
+                      id: `planned-${String(currentDateISO)}-${item.session}`,
+                      synthetic: "1",
+                      date: String(currentDateISO),
+                      session: item.session,
+                      prescribed: item.prescribed,
+                      athleteId: selectedAthleteId ?? "",
+                      name: selectedAthleteName,
+                      returnTo: buildWorkoutReturnTo(String(currentDateISO)),
+                    },
+                  })
+                }
+                onLog={() => openEditorForSession({ session: item.session, prescribed: item.prescribed })}
+              />
+            ) : null}
+
+            {item.workouts.map((workout) => {
+              const peers = groupMatesByWorkoutId.get(workout.id) ?? [];
+              const prescribed = item.session === "AM" ? dayPlan?.am : dayPlan?.pm;
+              const prescribedLabel = formatMileage(prescribed) || item.prescribed;
+              const logged = hasWorkoutFeedback({
+                completed_miles: workout.completedMiles,
+                completed_time_text: workout.completedTime,
+                splits_or_pace: workout.splitsOrPace,
+                additional_feedback: workout.additionalFeedback ?? workout.feedback,
+              });
+              const status: AthleteSessionCardStatus = logged ? "submitted" : "missing";
+              const feedbackSummary = feedbackSummaryFromWorkout(workout);
+              const peerSummary = peers.length > 0 ? `With ${peers.length} teammate${peers.length === 1 ? "" : "s"}.` : "";
+              return (
+                <AthleteSessionCard
+                  key={workout.id}
+                  session={item.session}
+                  title={workout.title || "Workout"}
+                  summary={logged ? feedbackSummary || "Log submitted." : String(workout.details ?? "").trim() || "Workout log needed."}
+                  planSummary={peerSummary}
+                  prescribed={prescribedLabel}
+                  time={workout.time ?? null}
+                  location={workout.location ?? null}
+                  categories={workoutCategoryNames(workout)}
+                  categoriesSource={categories}
+                  status={status}
+                  actionLabel={logged ? "Edit log" : "Enter log"}
+                  onOpen={() =>
                     router.push({
                       pathname: "/(athlete)/workout/[id]",
                       params: {
-                        id: `planned-${String(currentDateISO)}-${item.session}`,
-                        synthetic: "1",
-                        date: String(currentDateISO),
-                        session: item.session,
-                        prescribed: item.prescribed,
-                        athleteId: selectedAthleteId ?? "",
+                        id: workout.id,
                         name: selectedAthleteName,
                         returnTo: buildWorkoutReturnTo(String(currentDateISO)),
                       },
                     })
                   }
-                  style={{
-                    borderRadius: 10,
-                    borderWidth: 1,
-                    borderColor: "#cbd5e1",
-                    backgroundColor: "#f8fafc",
-                    paddingVertical: 9,
-                    alignItems: "center",
-                  }}
-                >
-                  <Text style={{ fontWeight: "800", color: "#0f172a" }}>Open log</Text>
-                </Pressable>
-              </View>
-            ) : (
-              <View style={{ marginTop: 8, gap: 8 }}>
-                {item.workouts.map((workout) => {
-                  const preRoutineIds = Array.isArray(workout.preRoutineIds) ? workout.preRoutineIds : [];
-                  const postRoutineIds = Array.isArray(workout.postRoutineIds) ? workout.postRoutineIds : [];
-                  const peers = groupMatesByWorkoutId.get(workout.id) ?? [];
-                  const prescribed = item.session === "AM" ? dayPlan?.am : dayPlan?.pm;
-                  const prescribedLabel = formatMileage(prescribed) || "Off";
-                  const routineCount = preRoutineIds.length + postRoutineIds.length;
-
-                  return (
-                    <Pressable
-                      key={workout.id}
-                      onPress={() =>
-                        router.push({
-                          pathname: "/(athlete)/workout/[id]",
-                          params: {
-                            id: workout.id,
-                            name: selectedAthleteName,
-                            returnTo: buildWorkoutReturnTo(String(currentDateISO)),
-                          },
-                        })
-                      }
-                      style={{
-                        padding: 10,
-                        borderRadius: 10,
-                        backgroundColor: "#f8fafc",
-                        borderWidth: 1,
-                        borderColor: "#dbe7f3",
-                      }}
-                    >
-                      <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ fontWeight: "900", fontSize: 16, color: "#0f172a" }}>{workout.title || "Workout"}</Text>
-                          <Text style={{ marginTop: 3, color: "#475569", fontWeight: "700" }}>
-                            {workout.time ? `${workout.time}` : "Time TBA"}
-                            {workout.category ? ` • ${workout.category}` : ""}
-                          </Text>
-                        </View>
-                        <Text style={{ fontSize: 12, fontWeight: "800", color: "#1e40af" }}>Open</Text>
-                      </View>
-
-                      {workout.details ? (
-                        <Text numberOfLines={3} style={{ marginTop: 7, color: "#1f2937" }}>
-                          {workout.details}
-                        </Text>
-                      ) : null}
-
-                      {routineCount > 0 ? (
-                        <Text style={{ marginTop: 7, color: "#334155", fontWeight: "700" }}>
-                          Routines: {preRoutineIds.length} pre • {postRoutineIds.length} post
-                        </Text>
-                      ) : null}
-
-                      {peers.length > 0 ? (
-                        <Text style={{ marginTop: 6, color: "#475569", fontWeight: "700" }}>
-                          With {peers.length} teammate{peers.length === 1 ? "" : "s"}
-                        </Text>
-                      ) : null}
-
-                      <Text style={{ marginTop: 6, color: "#0f172a", fontWeight: "800" }}>
-                        Prescribed: {prescribedLabel}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            )}
+                  onLog={() => openEditorForSession({ session: item.session, prescribed: prescribedLabel, workout })}
+                />
+              );
+            })}
           </View>
         )}
         ListEmptyComponent={
@@ -669,6 +812,26 @@ export default function AthleteDayScreen() {
       />
       </Animated.View>
       </GestureDetector>
+      <AthleteQuickFeedbackSheet
+        visible={Boolean(editor)}
+        title={editor ? `${editor.session} Log` : "Log"}
+        subtitle={formatDisplayDate(String(currentDateISO))}
+        planSummary={editor?.planSummary ?? ""}
+        completedMilesText={editor?.completedMilesText ?? ""}
+        completedTimeText={editor?.completedTimeText ?? ""}
+        splitsText={editor?.splitsText ?? ""}
+        additionalFeedbackText={editor?.additionalFeedbackText ?? ""}
+        saving={editorSaving}
+        error={editorError}
+        onChangeCompletedMiles={(text) => setEditor((prev) => (prev ? { ...prev, completedMilesText: text } : prev))}
+        onChangeCompletedTime={(text) => setEditor((prev) => (prev ? { ...prev, completedTimeText: text } : prev))}
+        onChangeSplits={(text) => setEditor((prev) => (prev ? { ...prev, splitsText: text } : prev))}
+        onChangeAdditionalFeedback={(text) => setEditor((prev) => (prev ? { ...prev, additionalFeedbackText: text } : prev))}
+        onCancel={() => {
+          if (!editorSaving) setEditor(null);
+        }}
+        onSave={() => void saveEditor()}
+      />
     </View>
   );
 }
