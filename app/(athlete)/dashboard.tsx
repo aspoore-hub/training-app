@@ -25,11 +25,19 @@ import { loadWeekStartSetting } from "../../lib/settings";
 import { loadJSON } from "../../lib/storage";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow, updateTeamWorkoutById } from "../../lib/teamWorkoutsCloud";
+import { listTeamWorkoutBatchHeadersForDate } from "../../lib/teamWorkoutBatchHeadersCloud";
 import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import { formatMileage, getWeekIndex, getWeekStartISO, parseISODate, parseMileageInput, toISODate } from "../../lib/mileagePlan";
 import { CATEGORIES_KEY, normalizeCategories } from "../../lib/categories";
 import { AthleteQuickFeedbackSheet } from "../../components/athlete/AthleteQuickFeedbackSheet";
 import { AthleteSessionCard } from "../../components/athlete/AthleteSessionCard";
+import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
+import {
+  buildBatchNotesByWorkoutId,
+  cleanDisplayText,
+  formatPrescribedLabel,
+  getRoutineTitles,
+} from "../../lib/athleteWorkoutDisplay";
 import type { MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
 
 type TodaySessionCard = {
@@ -118,14 +126,6 @@ function feedbackSummaryFromMileage(entry?: MileageSessionFeedback): string {
   return parts.join(" • ");
 }
 
-function plannedTextFromWorkout(row: TeamWorkoutRow): string {
-  const parts = [
-    String(row.details ?? "").trim(),
-    String((row as any).location ?? "").trim(),
-  ].filter(Boolean);
-  return parts.join(" • ");
-}
-
 function formatDailyLogActivityKind(kind?: AthleteDailyLogActivityKind) {
   if (kind === "cross_training") return "Cross training";
   if (kind === "run") return "Run";
@@ -159,6 +159,8 @@ export default function AthleteDashboardScreen() {
   const [todayMileageFeedbackEntries, setTodayMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
   const [todayDailyLogEntries, setTodayDailyLogEntries] = useState<AthleteDailyLogEntry[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
+  const [batchNotesByWorkoutId, setBatchNotesByWorkoutId] = useState<Map<string, string>>(new Map());
+  const [routineById, setRoutineById] = useState<Map<string, AuxiliaryRoutine>>(new Map());
   const [editor, setEditor] = useState<FeedbackEditorState | null>(null);
   const [editorSaving, setEditorSaving] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
@@ -183,15 +185,17 @@ export default function AthleteDashboardScreen() {
     activeLoadKeyRef.current = loadKey;
     setLoading(true);
     try {
-      const [weekStartResult, athleteSession, storedCategories] = await Promise.all([
+      const [weekStartResult, athleteSession, storedCategories, routines] = await Promise.all([
         loadWeekStartSetting(),
         resolveAthleteSessionContext(),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
+        loadAuxiliaryRoutines(),
       ]);
 
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
       setWeekStartsOn(resolvedWeekStart);
       setCategories(normalizeCategories(storedCategories));
+      setRoutineById(new Map(routines.map((routine) => [routine.id, routine] as const)));
 
       const resolvedAthleteId = String(athleteSession.athleteId ?? "").trim();
       const athleteName = String(athleteSession.athleteName ?? "").trim() || null;
@@ -200,6 +204,7 @@ export default function AthleteDashboardScreen() {
 
       if (!resolvedAthleteId) {
         setTodayRows([]);
+        setBatchNotesByWorkoutId(new Map());
         setTodayMileageFeedbackEntries([]);
         setTodayDailyLogEntries([]);
         lastLoadRef.current = { key: loadKey, ts: Date.now() };
@@ -212,15 +217,17 @@ export default function AthleteDashboardScreen() {
       });
 
       const weekStartISO = getWeekStartISO(todayISO, resolvedWeekStart);
-      const [todayOnlyRows, allMileageFeedback, todayDailyLogs] = await Promise.all([
+      const [todayOnlyRows, allMileageFeedback, todayDailyLogs, batchHeaders] = await Promise.all([
         listVisibleAthleteWorkoutsInRange(resolvedAthleteId, todayISO, todayISO),
         loadMileageFeedback(),
         listAthleteDailyLogEntriesForWeek(resolvedAthleteId, todayISO, todayISO),
+        listTeamWorkoutBatchHeadersForDate(todayISO),
         teamDataStore.actions.loadVisibleMileageWeekForAthlete(resolvedAthleteId, weekStartISO),
       ]);
 
       if (activeLoadKeyRef.current !== loadKey) return;
       setTodayRows(todayOnlyRows);
+      setBatchNotesByWorkoutId(buildBatchNotesByWorkoutId(todayOnlyRows, batchHeaders));
       setTodayMileageFeedbackEntries(
         allMileageFeedback.filter((entry) => {
           const entryAthleteId = String((entry as any)?.athleteId ?? "").trim();
@@ -321,8 +328,7 @@ export default function AthleteDashboardScreen() {
             : prescribed
               ? `${session} Planned Session`
               : "No planned session";
-      const workoutPlan = topWorkout ? plannedTextFromWorkout(topWorkout) : "";
-      const planSummary = [prescribed ? `Mileage: ${prescribed}` : "", workoutPlan].filter(Boolean).join(" • ");
+      const planSummary = prescribed ? `Mileage: ${formatPrescribedLabel(prescribed)}` : "";
       const submittedSummary = topWorkout ? feedbackSummaryFromWorkout(topWorkout) : feedbackSummaryFromMileage(mileageFeedback);
       const summary =
         status === "submitted"
@@ -330,9 +336,9 @@ export default function AthleteDashboardScreen() {
           : workouts.length > 1
             ? "Open the day view to complete logs for multiple workouts in this session."
             : topWorkout
-              ? String(topWorkout.details ?? "").trim() || String(topWorkout.time_text ?? "").trim() || "Workout log needed."
+              ? "Workout log needed."
               : prescribed
-                ? `Prescribed mileage: ${prescribed}`
+                ? `Prescribed mileage: ${formatPrescribedLabel(prescribed)}`
                 : "Nothing planned for this session.";
 
       return {
@@ -687,12 +693,19 @@ export default function AthleteDashboardScreen() {
                 session={card.session}
                 title={card.title}
                 summary={card.summary}
-                planSummary={workout ? card.planSummary : undefined}
-                prescribed={card.prescribed}
+                prescribed={formatPrescribedLabel(card.prescribed)}
                 time={workout?.time_text ?? null}
                 location={String((workout as any)?.location ?? "").trim() || null}
                 categories={categoriesForCard}
                 categoriesSource={categories}
+                batchDetails={workout ? batchNotesByWorkoutId.get(String(workout.id)) ?? "" : ""}
+                individualDetails={
+                  workout && cleanDisplayText(workout.details) !== cleanDisplayText(batchNotesByWorkoutId.get(String(workout.id)))
+                    ? cleanDisplayText(workout.details)
+                    : ""
+                }
+                preRoutineTitles={workout ? getRoutineTitles(workout.pre_routine_ids, routineById) : []}
+                postRoutineTitles={workout ? getRoutineTitles(workout.post_routine_ids, routineById) : []}
                 status={card.status}
                 actionLabel={actionLabel}
                 onOpen={() => openDetailForCard(card)}

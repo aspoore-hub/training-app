@@ -17,7 +17,6 @@ import {
   type MileageSessionFeedback,
   upsertMileageFeedback,
 } from "../../../lib/mileageFeedback";
-import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../../lib/units";
 import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
 import { parseNumericLike } from "../../../lib/feedbackParsing";
 import { getCurrentTeamId } from "../../../lib/team";
@@ -40,6 +39,7 @@ import { loadWeekStartSetting } from "../../../lib/settings";
 import { loadJSON } from "../../../lib/storage";
 import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../../lib/categories";
 import type { WorkoutCategory } from "../../../lib/types";
+import { cleanDisplayText, formatPrescribedLabel } from "../../../lib/athleteWorkoutDisplay";
 
 function normalizeGroupId(groupId?: string): string {
   const normalized = String(groupId ?? "").trim().toUpperCase();
@@ -167,16 +167,15 @@ export default function AthleteWorkoutDetail() {
 
   const [workout, setWorkout] = useState<AthleteWorkout | null>(null);
   const [groupMateNames, setGroupMateNames] = useState<string[]>([]);
-  const [batchAthleteNames, setBatchAthleteNames] = useState<string[]>([]);
   const [batchHeaderNotes, setBatchHeaderNotes] = useState("");
   const [routineById, setRoutineById] = useState<Map<string, AuxiliaryRoutine>>(new Map());
+  const [expandedRoutineIds, setExpandedRoutineIds] = useState<Set<string>>(new Set());
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [completedMilesText, setCompletedMilesText] = useState("");
   const [completedTimeText, setCompletedTimeText] = useState("");
   const [splitsText, setSplitsText] = useState("");
   const [additionalFeedbackText, setAdditionalFeedbackText] = useState("");
   const [logSheetOpen, setLogSheetOpen] = useState(false);
-  const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [loading, setLoading] = useState(true);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
   const [submitStatus, setSubmitStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -210,20 +209,14 @@ export default function AthleteWorkoutDetail() {
     (async () => {
       const athleteSession = await resolveAthleteSessionContext();
       const visibleAthleteId = String(athleteSession.athleteId ?? athleteId ?? "").trim();
-      const [rosterMap, unit, routines, weekStartResult, storedCategories] = await Promise.all([
+      const [rosterMap, routines, weekStartResult, storedCategories] = await Promise.all([
         loadRosterAny(),
-        loadDistanceUnit(),
         loadAuxiliaryRoutines(),
         loadWeekStartSetting(),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       ]);
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
-      console.log("[athlete-workout] week start loaded via shared helper", {
-        raw: weekStartResult.raw,
-        normalized: resolvedWeekStart,
-      });
       setRosterMap(rosterMap);
-      setDistanceUnit(unit);
       setRoutineById(new Map(routines.map((routine) => [routine.id, routine] as const)));
       setCategories(normalizeCategories(storedCategories));
       setWeekStartsOn(resolvedWeekStart);
@@ -239,7 +232,6 @@ export default function AthleteWorkoutDetail() {
         setAdditionalFeedbackText(String(found.additionalFeedback ?? found.feedback ?? ""));
 
         setGroupMateNames([]);
-        setBatchAthleteNames([]);
         setBatchHeaderNotes("");
 
         if (foundRow?.batch_id) {
@@ -256,11 +248,7 @@ export default function AthleteWorkoutDetail() {
             )
             .map((row) => rosterMap.get(String(row.athlete_profile_id ?? "").trim()) ?? fallbackAthleteName(String(row.athlete_profile_id ?? "")))
             .filter(Boolean);
-          const batchNames = visibleBatchRows
-            .map((row) => rosterMap.get(String(row.athlete_profile_id ?? "").trim()) ?? fallbackAthleteName(String(row.athlete_profile_id ?? "")))
-            .filter(Boolean);
           setGroupMateNames(Array.from(new Set(groupNames)));
-          setBatchAthleteNames(Array.from(new Set(batchNames)));
           const header = headerRows.find(
             (row) =>
               String(row.batch_id ?? "") === String(foundRow.batch_id ?? "") &&
@@ -429,11 +417,7 @@ export default function AthleteWorkoutDetail() {
   const prescribedFromMileage = workout
     ? resolvePrescribedText(store, String(workout.athleteId ?? ""), String(workout.dateISO), String(workout.session ?? "PM") as "AM" | "PM", weekStartsOn)
     : "";
-  const prescribedLabel = String(isSynthetic ? String(prescribed ?? "") : prescribedFromMileage).trim();
-  const completedSummaryParts: string[] = [];
-  if (completedMilesText.trim()) completedSummaryParts.push(`${completedMilesText.trim()} ${distanceUnitLabel(distanceUnit).toUpperCase()}`);
-  if (completedTimeText.trim()) completedSummaryParts.push(completedTimeText.trim());
-  const completedSummary = completedSummaryParts.length > 0 ? completedSummaryParts.join(" • ") : "Not entered yet";
+  const prescribedLabel = formatPrescribedLabel(isSynthetic ? String(prescribed ?? "") : prescribedFromMileage);
   const workoutCategoryNames = Array.from(
     new Set(
       (Array.isArray(workout?.categories) ? workout?.categories : [workout?.category ?? "Other"])
@@ -455,9 +439,10 @@ export default function AthleteWorkoutDetail() {
         .filter((value): value is AuxiliaryRoutine => Boolean(value))
     )
   );
-  const individualDetails = String(workout?.details ?? "").trim();
-  const batchDetails = String(batchHeaderNotes || individualDetails).trim();
+  const individualDetails = cleanDisplayText(workout?.details);
+  const batchDetails = cleanDisplayText(batchHeaderNotes);
   const showIndividualDetails = Boolean(individualDetails && individualDetails !== batchDetails);
+  const prescribedPrefix = prescribedLabel.toLowerCase().includes("xt") ? "Cross training" : "Prescribed mileage";
 
   return (
     <>
@@ -491,9 +476,11 @@ export default function AthleteWorkoutDetail() {
           {!isSynthetic && workout?.location ? (
             <Text style={{ marginTop: 4, color: "#334155", fontWeight: "700" }}>Location: {workout.location}</Text>
           ) : null}
-          <Text style={{ marginTop: 8, color: "#334155", fontWeight: "800" }}>
-            {prescribedLabel ? `Prescribed: ${prescribedLabel}` : "Prescribed from mileage plan"}
-          </Text>
+          {prescribedLabel ? (
+            <Text style={{ marginTop: 8, color: "#334155", fontWeight: "800" }}>
+              {prescribedPrefix}: {prescribedLabel}
+            </Text>
+          ) : null}
         </View>
 
         {!isSynthetic && workoutCategoryNames.length > 0 ? (
@@ -537,43 +524,60 @@ export default function AthleteWorkoutDetail() {
             <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.6, color: "#64748b" }}>ROUTINES</Text>
             {preRoutines.map((routine) => (
               <View key={`pre-${routine.id}`} style={{ borderTopWidth: 1, borderTopColor: "#f1f5f9", paddingTop: 8 }}>
-                <Text style={{ fontWeight: "900", color: "#0f172a" }}>Pre-run: {routine.title}</Text>
-                {routine.details ? <Text style={{ marginTop: 4, color: "#475569", lineHeight: 19 }}>{routine.details}</Text> : null}
+                <Pressable
+                  onPress={() => {
+                    if (!routine.details) return;
+                    setExpandedRoutineIds((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(routine.id)) next.delete(routine.id);
+                      else next.add(routine.id);
+                      return next;
+                    });
+                  }}
+                >
+                  <Text style={{ fontWeight: "900", color: "#0f172a" }}>
+                    Pre-run: {routine.title}{routine.details ? expandedRoutineIds.has(routine.id) ? " • Hide details" : " • Show details" : ""}
+                  </Text>
+                </Pressable>
+                {routine.details && expandedRoutineIds.has(routine.id) ? (
+                  <Text style={{ marginTop: 4, color: "#475569", lineHeight: 19 }}>{routine.details}</Text>
+                ) : null}
               </View>
             ))}
             {postRoutines.map((routine) => (
               <View key={`post-${routine.id}`} style={{ borderTopWidth: 1, borderTopColor: "#f1f5f9", paddingTop: 8 }}>
-                <Text style={{ fontWeight: "900", color: "#0f172a" }}>Post-run: {routine.title}</Text>
-                {routine.details ? <Text style={{ marginTop: 4, color: "#475569", lineHeight: 19 }}>{routine.details}</Text> : null}
+                <Pressable
+                  onPress={() => {
+                    if (!routine.details) return;
+                    setExpandedRoutineIds((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(routine.id)) next.delete(routine.id);
+                      else next.add(routine.id);
+                      return next;
+                    });
+                  }}
+                >
+                  <Text style={{ fontWeight: "900", color: "#0f172a" }}>
+                    Post-run: {routine.title}{routine.details ? expandedRoutineIds.has(routine.id) ? " • Hide details" : " • Show details" : ""}
+                  </Text>
+                </Pressable>
+                {routine.details && expandedRoutineIds.has(routine.id) ? (
+                  <Text style={{ marginTop: 4, color: "#475569", lineHeight: 19 }}>{routine.details}</Text>
+                ) : null}
               </View>
             ))}
           </View>
         ) : null}
 
-        {!isSynthetic ? (
+        {!isSynthetic && groupMateNames.length > 0 ? (
           <View style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 16, backgroundColor: "#ffffff", padding: 12, gap: 8 }}>
             <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.6, color: "#64748b" }}>ATHLETES</Text>
             <Text style={{ fontWeight: "900", color: "#0f172a" }}>Your group</Text>
             <Text style={{ color: "#475569", lineHeight: 19 }}>
-              {groupMateNames.length > 0
-                ? `${athleteName}, ${groupMatePreview}${hiddenGroupMateCount > 0 ? ` +${hiddenGroupMateCount} more` : ""}`
-                : athleteName}
-            </Text>
-            <Text style={{ marginTop: 6, fontWeight: "900", color: "#0f172a" }}>Entire workout batch</Text>
-            <Text style={{ color: "#475569", lineHeight: 19 }}>
-              {batchAthleteNames.length > 0 ? batchAthleteNames.join(", ") : "Batch roster is not available for this workout."}
+              {athleteName}, {groupMatePreview}{hiddenGroupMateCount > 0 ? ` +${hiddenGroupMateCount} more` : ""}
             </Text>
           </View>
         ) : null}
-
-        <View style={{ borderWidth: 1, borderColor: "#dbeafe", borderRadius: 14, padding: 10, backgroundColor: "#f8fafc" }}>
-          <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.4, color: "#475569" }}>LOG SUMMARY</Text>
-          <Text style={{ marginTop: 6, fontSize: 13, fontWeight: "700", color: "#0f172a" }}>Prescribed: {prescribedLabel || "Not set"}</Text>
-          <Text style={{ marginTop: 2, fontSize: 13, color: "#334155" }}>Completed: {completedSummary}</Text>
-          <View style={{ marginTop: 6 }}>
-            <InlineSaveStatus status={submitStatus} message={submitError} size="md" />
-          </View>
-        </View>
 
         <Pressable
           onPress={() => setLogSheetOpen(true)}
@@ -590,13 +594,14 @@ export default function AthleteWorkoutDetail() {
             {completedMilesText.trim() || completedTimeText.trim() || splitsText.trim() || additionalFeedbackText.trim() ? "Edit log" : "Enter log"}
           </Text>
         </Pressable>
+        <InlineSaveStatus status={submitStatus} message={submitError} size="md" />
       </ScrollView>
 
       <AthleteQuickFeedbackSheet
         visible={logSheetOpen}
         title={`${displaySession} Log`}
         subtitle={formatDisplayDate(displayDate)}
-        planSummary={prescribedLabel ? `Prescribed: ${prescribedLabel}` : ""}
+        planSummary={prescribedLabel ? `${prescribedPrefix}: ${prescribedLabel}` : ""}
         completedMilesText={completedMilesText}
         completedTimeText={completedTimeText}
         splitsText={splitsText}

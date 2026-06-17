@@ -12,6 +12,7 @@ import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import { ATHLETE_CALENDAR_VIEW_STATE_KEY, type AthleteCalendarViewState } from "../../lib/athleteCalendarView";
 import { loadRosterNameMapForTeam } from "../../lib/rosterNameMap";
 import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow, updateTeamWorkoutById } from "../../lib/teamWorkoutsCloud";
+import { listTeamWorkoutBatchHeadersForDate } from "../../lib/teamWorkoutBatchHeadersCloud";
 import {
   buildMileageFeedbackId,
   loadMileageFeedback,
@@ -37,6 +38,13 @@ import { CATEGORIES_KEY, normalizeCategories } from "../../lib/categories";
 import { AthleteQuickFeedbackSheet } from "../../components/athlete/AthleteQuickFeedbackSheet";
 import { AthleteSessionCard, type AthleteSessionCardStatus } from "../../components/athlete/AthleteSessionCard";
 import type { WorkoutCategory } from "../../lib/types";
+import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
+import {
+  buildBatchNotesByWorkoutId,
+  cleanDisplayText,
+  formatPrescribedLabel,
+  getRoutineTitles,
+} from "../../lib/athleteWorkoutDisplay";
 
 const ATHLETE_DAY_UI_STATE_KEY = "training_app_athlete_day_ui_state_v1";
 
@@ -181,6 +189,8 @@ export default function AthleteDayScreen() {
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
   const [mileageFeedbackEntries, setMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
+  const [batchNotesByWorkoutId, setBatchNotesByWorkoutId] = useState<Map<string, string>>(new Map());
+  const [routineById, setRoutineById] = useState<Map<string, AuxiliaryRoutine>>(new Map());
   const [editor, setEditor] = useState<FeedbackEditorState | null>(null);
   const [editorSaving, setEditorSaving] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
@@ -306,23 +316,21 @@ export default function AthleteDayScreen() {
       inFlightRef.current = true;
       setLoadingContext(true);
       try {
-        const [ws, pace, unit, athleteSession, storedCategories] = await Promise.all([
+        const [ws, pace, unit, athleteSession, storedCategories, routines] = await Promise.all([
           loadWeekStartSetting(),
           loadPaceSecondsPerMile(),
           loadDistanceUnit(),
           resolveAthleteSessionContext(),
           loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
+          loadAuxiliaryRoutines(),
         ]);
 
         const resolvedWeekStart: WeekStartDay = ws.normalized === "sunday" ? 0 : 1;
-        console.log("[athlete-day] week start loaded via shared helper", {
-          raw: ws.raw,
-          normalized: resolvedWeekStart,
-        });
         setWeekStartsOn(resolvedWeekStart);
         setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
         setDistanceUnit(unit);
         setCategories(normalizeCategories(storedCategories));
+        setRoutineById(new Map(routines.map((routine) => [routine.id, routine] as const)));
 
         const resolvedId = String(athleteSession.athleteId ?? "").trim() || null;
         const resolvedName = resolvedId ? String(athleteSession.athleteName ?? "").trim() || null : null;
@@ -337,13 +345,15 @@ export default function AthleteDayScreen() {
         if (!currentDateISO || !resolvedId) {
           setAllWorkouts([]);
           setWorkouts([]);
+          setBatchNotesByWorkoutId(new Map());
           return;
         }
 
         await migrateLocalMileageFeedbackToTeamForAthlete({ athleteId: resolvedId, athleteName: resolvedName });
-        const [athleteRows, allMileageFeedback] = await Promise.all([
+        const [athleteRows, allMileageFeedback, batchHeaders] = await Promise.all([
           listVisibleAthleteWorkoutsInRange(String(resolvedId), String(currentDateISO), String(currentDateISO)),
           loadMileageFeedback(),
+          listTeamWorkoutBatchHeadersForDate(String(currentDateISO)),
         ]);
         if (activeLoadKeyRef.current !== loadKey) return;
 
@@ -358,6 +368,7 @@ export default function AthleteDayScreen() {
 
         setAllWorkouts(athleteMapped);
         setWorkouts(athleteFiltered);
+        setBatchNotesByWorkoutId(buildBatchNotesByWorkoutId(athleteRows, batchHeaders));
         setMileageFeedbackEntries(
           allMileageFeedback.filter((entry) => {
             const entryAthleteId = String((entry as any)?.athleteId ?? "").trim();
@@ -494,7 +505,7 @@ export default function AthleteDayScreen() {
       prescribed: input.prescribed,
       workout,
       mileageFeedback,
-      planSummary: [input.prescribed ? `Mileage: ${input.prescribed}` : "", workout?.details ? String(workout.details) : ""].filter(Boolean).join(" • "),
+      planSummary: input.prescribed ? `Mileage: ${formatPrescribedLabel(input.prescribed)}` : "",
       completedMilesText:
         workout?.completedMiles != null
           ? String(workout.completedMiles)
@@ -730,8 +741,8 @@ export default function AthleteDayScreen() {
               <AthleteSessionCard
                 session={item.session}
                 title={`${item.session} Planned Session`}
-                summary={`Prescribed mileage: ${item.prescribed}`}
-                prescribed={item.prescribed}
+                summary={`Prescribed mileage: ${formatPrescribedLabel(item.prescribed)}`}
+                prescribed={formatPrescribedLabel(item.prescribed)}
                 status={hasMileageFeedback(mileageFeedbackForSession(item.session) ?? {}) ? "submitted" : "missing"}
                 actionLabel={hasMileageFeedback(mileageFeedbackForSession(item.session) ?? {}) ? "Edit log" : "Enter log"}
                 onOpen={() =>
@@ -756,7 +767,7 @@ export default function AthleteDayScreen() {
             {item.workouts.map((workout) => {
               const peers = groupMatesByWorkoutId.get(workout.id) ?? [];
               const prescribed = item.session === "AM" ? dayPlan?.am : dayPlan?.pm;
-              const prescribedLabel = formatMileage(prescribed) || item.prescribed;
+              const prescribedLabel = formatPrescribedLabel(formatMileage(prescribed) || item.prescribed);
               const logged = hasWorkoutFeedback({
                 completed_miles: workout.completedMiles,
                 completed_time_text: workout.completedTime,
@@ -771,13 +782,21 @@ export default function AthleteDayScreen() {
                   key={workout.id}
                   session={item.session}
                   title={workout.title || "Workout"}
-                  summary={logged ? feedbackSummary || "Log submitted." : String(workout.details ?? "").trim() || "Workout log needed."}
+                  summary={logged ? feedbackSummary || "Log submitted." : "Workout log needed."}
                   planSummary={peerSummary}
                   prescribed={prescribedLabel}
                   time={workout.time ?? null}
                   location={workout.location ?? null}
                   categories={workoutCategoryNames(workout)}
                   categoriesSource={categories}
+                  batchDetails={batchNotesByWorkoutId.get(String(workout.id)) ?? ""}
+                  individualDetails={
+                    cleanDisplayText(workout.details) === cleanDisplayText(batchNotesByWorkoutId.get(String(workout.id)))
+                      ? ""
+                      : cleanDisplayText(workout.details)
+                  }
+                  preRoutineTitles={getRoutineTitles(workout.preRoutineIds, routineById)}
+                  postRoutineTitles={getRoutineTitles(workout.postRoutineIds, routineById)}
                   status={status}
                   actionLabel={logged ? "Edit log" : "Enter log"}
                   onOpen={() =>

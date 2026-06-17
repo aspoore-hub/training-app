@@ -9,6 +9,10 @@ type Props = {
   title: string;
   summary?: string;
   planSummary?: string;
+  batchDetails?: string;
+  individualDetails?: string;
+  preRoutineTitles?: string[];
+  postRoutineTitles?: string[];
   prescribed?: string;
   time?: string | null;
   location?: string | null;
@@ -34,6 +38,10 @@ export function AthleteSessionCard({
   title,
   summary,
   planSummary,
+  batchDetails,
+  individualDetails,
+  preRoutineTitles,
+  postRoutineTitles,
   prescribed,
   time,
   location,
@@ -47,6 +55,10 @@ export function AthleteSessionCard({
 }: Props) {
   const colors = statusColors(status);
   const cleanCategories = Array.from(new Set((categories ?? []).map((name) => String(name ?? "").trim()).filter(Boolean)));
+  const preTitles = Array.from(new Set((preRoutineTitles ?? []).map((title) => String(title ?? "").trim()).filter(Boolean)));
+  const postTitles = Array.from(new Set((postRoutineTitles ?? []).map((title) => String(title ?? "").trim()).filter(Boolean)));
+  const cleanBatchDetails = String(batchDetails ?? "").trim();
+  const cleanIndividualDetails = String(individualDetails ?? "").trim();
   const canOpen = Boolean(onOpen) && !disabled;
   const canLog = Boolean(onLog) && !disabled && status !== "none";
 
@@ -114,6 +126,24 @@ export function AthleteSessionCard({
         ) : null}
 
         {summary ? <Text style={{ marginTop: 8, color: "#475569", lineHeight: 20 }}>{summary}</Text> : null}
+        {cleanBatchDetails ? (
+          <Text style={{ marginTop: 8, color: "#111827", lineHeight: 20 }}>{cleanBatchDetails}</Text>
+        ) : null}
+        {cleanIndividualDetails ? (
+          <Text style={{ marginTop: 6, color: "#475569", fontWeight: "700", lineHeight: 19 }}>
+            Individual: {cleanIndividualDetails}
+          </Text>
+        ) : null}
+        {preTitles.length > 0 ? (
+          <Text style={{ marginTop: 7, color: "#334155", fontWeight: "800", lineHeight: 19 }}>
+            Pre-run: {preTitles.join(", ")}
+          </Text>
+        ) : null}
+        {postTitles.length > 0 ? (
+          <Text style={{ marginTop: 4, color: "#334155", fontWeight: "800", lineHeight: 19 }}>
+            Post-run: {postTitles.join(", ")}
+          </Text>
+        ) : null}
         {planSummary ? <Text style={{ marginTop: 7, color: "#334155", fontWeight: "700", lineHeight: 19 }}>{planSummary}</Text> : null}
       </Pressable>
 
