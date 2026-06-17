@@ -226,13 +226,13 @@ Deno.serve(async (req) => {
       `${String(athlete?.first_name ?? "").trim()} ${String(athlete?.last_name ?? "").trim()}`.trim() ||
       "Athlete";
     const inviteUrl = `${siteUrl}/join?token=${encodeURIComponent(inviteRow.token)}`;
-    const subject = `Join ${teamName} on Trackside Coach`;
+    const subject = `Accept your ${teamName} invite`;
     const text = [
       `Hi ${athleteName},`,
       "",
       `You have been invited to join ${teamName} on Trackside Coach.`,
       "",
-      `Open this link to claim your athlete profile:`,
+      `Open this link to create your account or sign in and accept your invite:`,
       inviteUrl,
       "",
       "If you were not expecting this invite, you can ignore this email.",
@@ -240,7 +240,7 @@ Deno.serve(async (req) => {
     const html = [
       `<p>Hi ${escapeHtml(athleteName)},</p>`,
       `<p>You have been invited to join <strong>${escapeHtml(teamName)}</strong> on Trackside Coach.</p>`,
-      `<p><a href="${escapeHtml(inviteUrl)}">Claim your athlete profile</a></p>`,
+      `<p><a href="${escapeHtml(inviteUrl)}">Create your account and accept invite</a></p>`,
       `<p>If the button does not work, copy and paste this link:</p>`,
       `<p>${escapeHtml(inviteUrl)}</p>`,
       `<p>If you were not expecting this invite, you can ignore this email.</p>`,

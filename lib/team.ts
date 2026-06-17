@@ -285,6 +285,56 @@ export async function sendAthleteInviteEmail(inviteId: string): Promise<SendAthl
   };
 }
 
+export type AthleteInvitePreviewStatus = "valid" | "invalid" | "expired" | "accepted";
+
+export type AthleteInvitePreview = {
+  ok: boolean;
+  status: AthleteInvitePreviewStatus;
+  email: string | null;
+  team_name: string | null;
+  athlete_name: string | null;
+  expires_at: string | null;
+  accepted_at: string | null;
+  message?: string;
+  error?: string;
+};
+
+function normalizeInvitePreview(data: any): AthleteInvitePreview {
+  return {
+    ok: data?.ok === true,
+    status: String(data?.status ?? "invalid") as AthleteInvitePreviewStatus,
+    email: data?.email == null ? null : String(data.email),
+    team_name: data?.team_name == null ? null : String(data.team_name),
+    athlete_name: data?.athlete_name == null ? null : String(data.athlete_name),
+    expires_at: data?.expires_at == null ? null : String(data.expires_at),
+    accepted_at: data?.accepted_at == null ? null : String(data.accepted_at),
+    message: data?.message == null ? undefined : String(data.message),
+    error: data?.error == null ? undefined : String(data.error),
+  };
+}
+
+export async function getAthleteInvitePreview(token: string): Promise<AthleteInvitePreview> {
+  const cleanToken = String(token ?? "").trim();
+  if (!cleanToken) {
+    return {
+      ok: false,
+      status: "invalid",
+      email: null,
+      team_name: null,
+      athlete_name: null,
+      expires_at: null,
+      accepted_at: null,
+      error: "Missing invite token.",
+    };
+  }
+
+  const { data, error } = await supabase.functions.invoke("get-athlete-invite", {
+    body: { token: cleanToken },
+  });
+  if (error) throw error;
+  return normalizeInvitePreview(data);
+}
+
 export type AthleteLoginLinkStatus =
   | "linked"
   | "no_user_found"

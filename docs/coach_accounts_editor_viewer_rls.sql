@@ -113,24 +113,47 @@ as $$
 declare
   v_invite public.team_invites%rowtype;
   v_user_id uuid := auth.uid();
+  v_user_email text;
   v_role text;
 begin
   if v_user_id is null then
     raise exception 'Not signed in';
   end if;
 
+  select lower(trim(u.email))
+  into v_user_email
+  from auth.users u
+  where u.id = v_user_id;
+
   select *
   into v_invite
   from public.team_invites
   where token = p_token
-    and (expires_at is null or expires_at > now())
   limit 1;
 
   if not found then
-    raise exception 'Invalid or expired invite';
+    raise exception 'Invalid invite';
+  end if;
+
+  if v_invite.accepted_at is not null then
+    raise exception 'Invite already accepted';
+  end if;
+
+  if v_invite.expires_at is not null and v_invite.expires_at <= now() then
+    raise exception 'Invite expired';
   end if;
 
   v_role := lower(coalesce(v_invite.role, 'athlete'));
+
+  if v_role not in ('editor', 'viewer', 'coach')
+    and nullif(lower(trim(coalesce(v_invite.email, ''))), '') is null then
+    raise exception 'Athlete invite is missing an email address';
+  end if;
+
+  if nullif(lower(trim(coalesce(v_invite.email, ''))), '') is not null
+    and lower(trim(coalesce(v_invite.email, ''))) <> coalesce(v_user_email, '') then
+    raise exception 'Invite email does not match signed-in account';
+  end if;
 
   if v_role in ('editor', 'viewer', 'coach') then
     v_role := case when v_role = 'viewer' then 'viewer' else 'editor' end;
@@ -144,6 +167,11 @@ begin
     values (v_user_id, 'coach', v_invite.team_id, now(), now())
     on conflict (id)
     do update set role = 'coach', current_team_id = excluded.current_team_id, updated_at = now();
+
+    update public.team_invites
+    set accepted_at = now()
+    where token = p_token
+      and accepted_at is null;
 
     return jsonb_build_object(
       'team_id', v_invite.team_id,
@@ -160,12 +188,22 @@ begin
   set claimed_user_id = v_user_id,
       updated_at = now()
   where id = v_invite.athlete_profile_id
-    and team_id = v_invite.team_id;
+    and team_id = v_invite.team_id
+    and (claimed_user_id is null or claimed_user_id = v_user_id);
+
+  if not found then
+    raise exception 'Athlete invite has already been claimed';
+  end if;
 
   insert into public.profiles (id, role, current_team_id, created_at, updated_at)
   values (v_user_id, 'athlete', v_invite.team_id, now(), now())
   on conflict (id)
   do update set role = 'athlete', current_team_id = excluded.current_team_id, updated_at = now();
+
+  update public.team_invites
+  set accepted_at = now()
+  where token = p_token
+    and accepted_at is null;
 
   return jsonb_build_object(
     'team_id', v_invite.team_id,

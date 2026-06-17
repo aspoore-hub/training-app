@@ -76,6 +76,7 @@ Deploy the Edge Function:
 
 ```sh
 supabase functions deploy send-athlete-invite --no-verify-jwt
+supabase functions deploy get-athlete-invite --no-verify-jwt
 ```
 
 The function verifies the user from the `Authorization` header itself, checks the invite's team permissions with `public.can_write_team`/`public.can_manage_team_coaches`, builds this URL format, and sends it through Zoho SMTP:
@@ -94,3 +95,13 @@ To test:
 6. If delivery fails, the app still creates and copies the invite link so it can be sent manually.
 
 When switching senders later, update `ZOHO_SMTP_USER`, `INVITE_EMAIL_FROM`, and `ZOHO_SMTP_PASS` in Supabase secrets, then redeploy or restart the function if needed.
+
+The join page also calls `get-athlete-invite` to preview invite details before authentication. For the strongest invite-claim security, keep `public.accept_team_invite` updated with the version in `docs/coach_accounts_editor_viewer_rls.sql`; it checks that the signed-in email matches the invite email and sets `team_invites.accepted_at`.
+
+Apply the hardening migration before testing invite claims in production:
+
+```sh
+supabase db push
+```
+
+Or run `supabase/migrations/20260617000100_harden_accept_team_invite_email_match.sql` in the Supabase SQL editor.
