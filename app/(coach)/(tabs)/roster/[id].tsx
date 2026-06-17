@@ -24,6 +24,7 @@ import {
   createClaimInvite,
   getCurrentTeamId,
   linkTeamAthleteToExistingUserEmail,
+  sendAthleteInviteEmail,
   unlinkTeamAthleteLogin,
   type AthleteLoginLinkResult,
 } from "../../../../lib/team";
@@ -39,6 +40,15 @@ import { canEditRoster, getCurrentTeamRole, type TeamRole } from "../../../../li
 
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
+
+function buildInviteUrl(token: string) {
+  const cleanToken = String(token ?? "").trim();
+  const origin =
+    Platform.OS === "web" && typeof window !== "undefined"
+      ? window.location.origin
+      : "https://www.tracksidecoach.com";
+  return `${origin}/join?token=${encodeURIComponent(cleanToken)}`;
 }
 
 function isValidDateOnlyISO(value: string): boolean {
@@ -233,6 +243,7 @@ export default function CoachEditTeamAthlete() {
   const [claimed, setClaimed] = useState(false);
   const [loginAccessMessage, setLoginAccessMessage] = useState<string | null>(null);
   const [loginAccessTone, setLoginAccessTone] = useState<"success" | "mutedText" | "danger">("mutedText");
+  const [latestInviteUrl, setLatestInviteUrl] = useState("");
   const [rosterStatus, setRosterStatus] = useState<TeamAthleteRosterStatus>("active");
   const [teamTenureError, setTeamTenureError] = useState<string | null>(null);
   const [seasonDraftById, setSeasonDraftById] = useState<Record<string, { start: string; end: string }>>({});
@@ -267,7 +278,8 @@ export default function CoachEditTeamAthlete() {
 
   useEffect(() => {
     let active = true;
-    getCurrentTeamRole()
+    getCurrentTeamId()
+      .then((teamId) => getCurrentTeamRole(teamId))
       .then((role) => {
         if (active) setCurrentTeamRole(role);
       })
@@ -1055,7 +1067,7 @@ export default function CoachEditTeamAthlete() {
     }
     return {
       tone: "danger" as const,
-      message: "You do not have permission to link athlete login access.",
+      message: result.message || "Could not update athlete login access.",
     };
   }
 
@@ -1139,10 +1151,27 @@ export default function CoachEditTeamAthlete() {
 
     setBusy(true);
     try {
-      const token = await createClaimInvite(athleteId, e);
-      await Clipboard.setStringAsync(token);
+      const invite = await createClaimInvite(athleteId, e);
+      const inviteUrl = buildInviteUrl(invite.token);
+      await Clipboard.setStringAsync(inviteUrl);
+      setLatestInviteUrl(inviteUrl);
 
-      Alert.alert("Invite created", "Token copied to clipboard.");
+      try {
+        const emailResult = await sendAthleteInviteEmail(invite.id);
+        const copyableUrl = emailResult.invite_url || inviteUrl;
+        await Clipboard.setStringAsync(copyableUrl);
+        setLatestInviteUrl(copyableUrl);
+        setLoginAccessTone("success");
+        setLoginAccessMessage(`Invite email sent. Invite link copied as backup: ${copyableUrl}`);
+        Alert.alert("Invite email sent", "Invite email sent. The invite link was copied as a manual backup.");
+      } catch (emailError: any) {
+        setLoginAccessTone("danger");
+        setLoginAccessMessage(`Invite link created, but email failed to send. Copy and send manually: ${inviteUrl}`);
+        Alert.alert(
+          "Invite link created",
+          `Invite link created, but email failed to send.\n\nThe invite link was copied so you can send it manually:\n${inviteUrl}`
+        );
+      }
     } catch (e: any) {
       Alert.alert("Invite failed", e?.message ?? "Could not create invite token.");
     } finally {
@@ -1330,10 +1359,20 @@ export default function CoachEditTeamAthlete() {
             {teamTenureError}
           </AppText>
         ) : null}
+        {latestInviteUrl ? (
+          <View style={{ gap: 3 }}>
+            <AppText variant="caption" color="mutedText">
+              Latest invite link, copied for manual sending
+            </AppText>
+            <AppText variant="caption" color="text" numberOfLines={2}>
+              {latestInviteUrl}
+            </AppText>
+          </View>
+        ) : null}
         {!readOnlyRoster ? (
           <View style={{ flexDirection: "row", gap: theme.space.sm, flexWrap: "wrap", justifyContent: "flex-end" }}>
             <Button title={busy || loading ? "Saving..." : "Save"} onPress={save} disabled={busy || loading} />
-            <Button title="Create invite" variant="secondary" onPress={invite} disabled={busy || loading} />
+            <Button title="Create and send invite" variant="secondary" onPress={invite} disabled={busy || loading} />
           </View>
         ) : null}
 
@@ -1348,7 +1387,7 @@ export default function CoachEditTeamAthlete() {
         <View style={{ gap: 4 }}>
           <AppText variant="headline">Login Access</AppText>
           <AppText variant="caption" color="mutedText">
-            Email is used to find an existing login account. Access is granted only when this profile is linked to an auth user id.
+            Email is used for invite delivery and to find an existing login account. The invite link can also be copied and sent manually.
           </AppText>
         </View>
         <Divider />

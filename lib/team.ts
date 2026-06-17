@@ -226,6 +226,11 @@ export async function createTeamAthlete(first_name: string, last_name: string, e
 }
 
 // Coach creates invite for an athlete profile to claim
+export type TeamInviteCreateResult = {
+  id: string;
+  token: string;
+};
+
 export async function createClaimInvite(athlete_profile_id: string, email: string, daysValid = 14) {
   const userId = await getMyUserId();
   const teamId = await getCurrentTeamId();
@@ -245,11 +250,39 @@ export async function createClaimInvite(athlete_profile_id: string, email: strin
       expires_at: expires,
       created_by: userId,
     })
-    .select("token")
+    .select("id,token")
     .single();
 
   if (error) throw error;
-  return data.token as string;
+  return {
+    id: String(data.id ?? ""),
+    token: String(data.token ?? ""),
+  } satisfies TeamInviteCreateResult;
+}
+
+export type SendAthleteInviteEmailResult = {
+  ok: boolean;
+  invite_url?: string;
+  message?: string;
+  error?: string;
+};
+
+export async function sendAthleteInviteEmail(inviteId: string): Promise<SendAthleteInviteEmailResult> {
+  const cleanInviteId = String(inviteId ?? "").trim();
+  if (!cleanInviteId) throw new Error("Missing invite id.");
+
+  const { data, error } = await supabase.functions.invoke("send-athlete-invite", {
+    body: { invite_id: cleanInviteId },
+  });
+  if (error) throw error;
+
+  const result = (data ?? {}) as Record<string, unknown>;
+  return {
+    ok: result.ok === true,
+    invite_url: result.invite_url == null ? undefined : String(result.invite_url),
+    message: result.message == null ? undefined : String(result.message),
+    error: result.error == null ? undefined : String(result.error),
+  };
 }
 
 export type AthleteLoginLinkStatus =

@@ -9,6 +9,7 @@ import {
   getCurrentTeamId,
   getMyUserId,
   linkTeamAthleteToExistingUserEmail,
+  sendAthleteInviteEmail,
 } from "../../lib/team";
 import { teamDataStore, type TeamAthlete } from "../../lib/teamDataStore";
 import { canEditRoster, getCurrentTeamRole, type TeamRole } from "../../lib/teamPermissions";
@@ -23,6 +24,15 @@ import { useAppTheme } from "../ui/useAppTheme";
 import { useResponsive } from "../../lib/useResponsive";
 
 const DEBUG_RLS = false; // flip true only when you need it
+
+function buildInviteUrl(token: string) {
+  const cleanToken = String(token ?? "").trim();
+  const origin =
+    Platform.OS === "web" && typeof window !== "undefined"
+      ? window.location.origin
+      : "https://www.tracksidecoach.com";
+  return `${origin}/join?token=${encodeURIComponent(cleanToken)}`;
+}
 
 function splitName(displayName: string) {
   const parts = String(displayName ?? "").trim().split(/\s+/).filter(Boolean);
@@ -52,7 +62,7 @@ export function RosterListPane() {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
-  const [lastInviteToken, setLastInviteToken] = useState("");
+  const [lastInviteUrl, setLastInviteUrl] = useState("");
   const [rosterFilter, setRosterFilter] = useState<"active" | "all" | "inactive">("active");
   const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
   const readOnlyRoster = !canEditRoster(currentTeamRole);
@@ -90,7 +100,8 @@ export function RosterListPane() {
 
   useEffect(() => {
     let cancelled = false;
-    getCurrentTeamRole()
+    getCurrentTeamId()
+      .then((teamId) => getCurrentTeamRole(teamId))
       .then((role) => {
         if (!cancelled) setCurrentTeamRole(role);
       })
@@ -164,9 +175,9 @@ export function RosterListPane() {
     []
   );
 
-  async function copyToken(token: string) {
-    await Clipboard.setStringAsync(token);
-    if (Platform.OS === "web") setStatus("Invite token copied.");
+  async function copyInviteUrl(inviteUrl: string) {
+    await Clipboard.setStringAsync(inviteUrl);
+    if (Platform.OS === "web") setStatus("Invite link copied.");
   }
 
   function normName(s: string) {
@@ -259,10 +270,26 @@ export function RosterListPane() {
     setBusy(true);
     setStatus("");
     try {
-      const token = await createClaimInvite(athlete.id, athleteEmail);
-      await copyToken(token);
-      setLastInviteToken(token);
-      Alert.alert("Invite created", "Token copied");
+      const invite = await createClaimInvite(athlete.id, athleteEmail);
+      const inviteUrl = buildInviteUrl(invite.token);
+      await copyInviteUrl(inviteUrl);
+      setLastInviteUrl(inviteUrl);
+
+      try {
+        const emailResult = await sendAthleteInviteEmail(invite.id);
+        const copyableUrl = emailResult.invite_url || inviteUrl;
+        await copyInviteUrl(copyableUrl);
+        setLastInviteUrl(copyableUrl);
+        setStatus("Invite email sent. Invite link copied as backup.");
+        Alert.alert("Invite email sent", "Invite email sent. The invite link was copied as a manual backup.");
+      } catch (emailError: any) {
+        console.warn("Invite email failed", emailError);
+        setStatus("Invite link created, but email failed to send. Link copied for manual sending.");
+        Alert.alert(
+          "Invite link created",
+          `Invite link created, but email failed to send.\n\nThe invite link was copied so you can send it manually:\n${inviteUrl}`
+        );
+      }
     } catch (e: any) {
       console.warn("Invite failed", e);
       Alert.alert("Invite failed", e?.message ?? "Could not create invite token.");
@@ -339,10 +366,10 @@ export function RosterListPane() {
           </View>
         ) : null}
 
-        {lastInviteToken ? (
+        {lastInviteUrl ? (
           <Card style={{ ...sectionCardStyle, gap: 3, paddingVertical: 8 }}>
-            <AppText variant="caption" color="mutedText">Latest invite token</AppText>
-            <AppText variant="sub" numberOfLines={1}>{lastInviteToken}</AppText>
+            <AppText variant="caption" color="mutedText">Latest invite link, copied for manual sending</AppText>
+            <AppText variant="sub" numberOfLines={1}>{lastInviteUrl}</AppText>
           </Card>
         ) : null}
 

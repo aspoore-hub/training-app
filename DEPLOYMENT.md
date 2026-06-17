@@ -56,3 +56,41 @@ npm run build:web
 The static web output should be written to `dist`.
 
 The `postbuild:web` script copies PWA assets from `public` and ensures the exported HTML references `/manifest.json`.
+
+## Athlete Invite Email
+
+Athlete invite rows are created in `public.team_invites`, then the app calls the Supabase Edge Function `send-athlete-invite`. SMTP credentials must stay in Supabase secrets only; do not put them in Expo, Vercel, or GitHub.
+
+Set the required Supabase secrets:
+
+```sh
+supabase secrets set ZOHO_SMTP_HOST=smtp.zoho.com
+supabase secrets set ZOHO_SMTP_PORT=465
+supabase secrets set ZOHO_SMTP_USER=coach@gettracksideapp.com
+supabase secrets set INVITE_EMAIL_FROM='Trackside Coach <coach@gettracksideapp.com>'
+supabase secrets set PUBLIC_SITE_URL=https://www.tracksidecoach.com
+supabase secrets set ZOHO_SMTP_PASS='your-zoho-app-password'
+```
+
+Deploy the Edge Function:
+
+```sh
+supabase functions deploy send-athlete-invite --no-verify-jwt
+```
+
+The function verifies the user from the `Authorization` header itself, checks the invite's team permissions with `public.can_write_team`/`public.can_manage_team_coaches`, builds this URL format, and sends it through Zoho SMTP:
+
+```text
+https://www.tracksidecoach.com/join?token=<token>
+```
+
+To test:
+
+1. In production, open a real athlete roster profile with a test email you can receive.
+2. Click `Create and send invite`.
+3. Confirm the UI says `Invite email sent.`
+4. Confirm the email arrives from `coach@gettracksideapp.com`.
+5. Open the link and verify it lands on `/join?token=<token>` with the token filled in.
+6. If delivery fails, the app still creates and copies the invite link so it can be sent manually.
+
+When switching senders later, update `ZOHO_SMTP_USER`, `INVITE_EMAIL_FROM`, and `ZOHO_SMTP_PASS` in Supabase secrets, then redeploy or restart the function if needed.
