@@ -36,10 +36,11 @@ import { formatMileage, getWeekIndex, getWeekStartISO, parseISODate, parseMileag
 import { CATEGORIES_KEY, normalizeCategories } from "../../lib/categories";
 import { AthleteQuickFeedbackSheet } from "../../components/athlete/AthleteQuickFeedbackSheet";
 import { AthleteSessionCard } from "../../components/athlete/AthleteSessionCard";
-import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
+import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
 import {
   buildBatchNotesByWorkoutId,
   cleanDisplayText,
+  formatPlannedDistanceLabel,
   formatPrescribedLabel,
   getRoutineTitles,
 } from "../../lib/athleteWorkoutDisplay";
@@ -194,7 +195,7 @@ export default function AthleteDashboardScreen() {
         loadWeekStartSetting(),
         resolveAthleteSessionContext(),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
-        loadAuxiliaryRoutines(),
+        loadAuxiliaryRoutineDefinitions(),
       ]);
 
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
@@ -700,13 +701,16 @@ export default function AthleteDashboardScreen() {
             const workout = card.workouts[0];
             const categoriesForCard = workout ? workoutCategoryNames(workout) : [];
             const actionLabel = card.status === "submitted" ? "Edit log" : card.status === "none" ? "No log needed" : "Enter log";
+            const prescribedLabel =
+              (workout ? formatPlannedDistanceLabel(workout.planned_distance, workout.planned_distance_unit) : "") ||
+              formatPrescribedLabel(card.prescribed);
             return (
               <AthleteSessionCard
                 key={card.key}
                 session={card.session}
                 title={card.title}
                 summary={card.summary}
-                prescribed={formatPrescribedLabel(card.prescribed)}
+                prescribed={prescribedLabel}
                 time={workout?.time_text ?? null}
                 location={String((workout as any)?.location ?? "").trim() || null}
                 categories={categoriesForCard}

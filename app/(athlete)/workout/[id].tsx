@@ -17,7 +17,7 @@ import {
   type MileageSessionFeedback,
   upsertMileageFeedback,
 } from "../../../lib/mileageFeedback";
-import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
+import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
 import { parseNumericLike } from "../../../lib/feedbackParsing";
 import { getCurrentTeamId } from "../../../lib/team";
 import { resolveAthleteSessionContext } from "../../../lib/athleteSession";
@@ -39,7 +39,12 @@ import { loadWeekStartSetting } from "../../../lib/settings";
 import { loadJSON } from "../../../lib/storage";
 import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../../lib/categories";
 import type { WorkoutCategory } from "../../../lib/types";
-import { buildBatchNotesByWorkoutId, cleanDisplayText, formatPrescribedLabel } from "../../../lib/athleteWorkoutDisplay";
+import {
+  buildBatchNotesByWorkoutId,
+  cleanDisplayText,
+  formatPlannedDistanceLabel,
+  formatPrescribedLabel,
+} from "../../../lib/athleteWorkoutDisplay";
 
 function normalizeGroupId(groupId?: string): string {
   const normalized = String(groupId ?? "").trim().toUpperCase();
@@ -96,6 +101,8 @@ function toAthleteWorkout(row: TeamWorkoutRow, rosterMap: Map<string, string>): 
     categories: row.categories ?? undefined,
     title: row.title ?? "Workout",
     details: row.details ?? undefined,
+    plannedMiles: parseNumericLike(row.planned_distance),
+    plannedDistanceUnit: row.planned_distance_unit === "km" ? "km" : "mi",
     completedMiles: parseNumericLike(row.completed_miles),
     completedTime: String(row.completed_time_text ?? "").trim() || undefined,
     splitsOrPace: String(row.splits_or_pace ?? "").trim() || undefined,
@@ -211,7 +218,7 @@ export default function AthleteWorkoutDetail() {
       const visibleAthleteId = String(athleteSession.athleteId ?? athleteId ?? "").trim();
       const [rosterMap, routines, weekStartResult, storedCategories] = await Promise.all([
         loadRosterAny(),
-        loadAuxiliaryRoutines(),
+        loadAuxiliaryRoutineDefinitions(),
         loadWeekStartSetting(),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       ]);
@@ -421,7 +428,8 @@ export default function AthleteWorkoutDetail() {
   const prescribedFromMileage = workout
     ? resolvePrescribedText(store, String(workout.athleteId ?? ""), String(workout.dateISO), String(workout.session ?? "PM") as "AM" | "PM", weekStartsOn)
     : "";
-  const prescribedLabel = formatPrescribedLabel(isSynthetic ? String(prescribed ?? "") : prescribedFromMileage);
+  const prescribedFromWorkout = workout ? formatPlannedDistanceLabel(workout.plannedMiles, workout.plannedDistanceUnit) : "";
+  const prescribedLabel = formatPrescribedLabel(isSynthetic ? String(prescribed ?? "") : prescribedFromWorkout || prescribedFromMileage);
   const workoutCategoryNames = Array.from(
     new Set(
       (Array.isArray(workout?.categories) ? workout?.categories : [workout?.category ?? "Other"])

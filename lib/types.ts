@@ -51,6 +51,7 @@ export type AthleteWorkout = {
   title?: string;            // optional short label
   details?: string;          // optional workout text
   plannedMiles?: number;     // optional for now
+  plannedDistanceUnit?: "mi" | "km";
   completedMiles?: number;   // later from feedback
   completedTime?: string;    // athlete-reported time completed
   splitsOrPace?: string;     // athlete-reported splits / pace notes

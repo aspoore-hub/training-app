@@ -43,10 +43,11 @@ import { CATEGORIES_KEY, normalizeCategories } from "../../lib/categories";
 import { AthleteQuickFeedbackSheet } from "../../components/athlete/AthleteQuickFeedbackSheet";
 import { AthleteSessionCard, type AthleteSessionCardStatus } from "../../components/athlete/AthleteSessionCard";
 import type { WorkoutCategory } from "../../lib/types";
-import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
+import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
 import {
   buildBatchNotesByWorkoutId,
   cleanDisplayText,
+  formatPlannedDistanceLabel,
   formatPrescribedLabel,
   getRoutineTitles,
 } from "../../lib/athleteWorkoutDisplay";
@@ -108,6 +109,8 @@ function toAthleteWorkout(row: TeamWorkoutRow, nameByAthleteId: Map<string, stri
     categories: row.categories ?? undefined,
     title: row.title ?? "Workout",
     details: row.details ?? undefined,
+    plannedMiles: parseNumericLike(row.planned_distance),
+    plannedDistanceUnit: row.planned_distance_unit === "km" ? "km" : "mi",
     completedMiles: typeof (row as any).completed_miles === "number" ? (row as any).completed_miles : undefined,
     completedTime: String((row as any).completed_time_text ?? "").trim() || undefined,
     splitsOrPace: String((row as any).splits_or_pace ?? "").trim() || undefined,
@@ -327,7 +330,7 @@ export default function AthleteDayScreen() {
           loadDistanceUnit(),
           resolveAthleteSessionContext(),
           loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
-          loadAuxiliaryRoutines(),
+          loadAuxiliaryRoutineDefinitions(),
         ]);
 
         const resolvedWeekStart: WeekStartDay = ws.normalized === "sunday" ? 0 : 1;
@@ -780,7 +783,9 @@ export default function AthleteDayScreen() {
             {item.workouts.map((workout) => {
               const peers = groupMatesByWorkoutId.get(workout.id) ?? [];
               const prescribed = item.session === "AM" ? dayPlan?.am : dayPlan?.pm;
-              const prescribedLabel = formatPrescribedLabel(formatMileage(prescribed) || item.prescribed);
+              const prescribedLabel =
+                formatPlannedDistanceLabel(workout.plannedMiles, workout.plannedDistanceUnit) ||
+                formatPrescribedLabel(formatMileage(prescribed) || item.prescribed);
               const logged = hasWorkoutFeedback({
                 completed_miles: workout.completedMiles,
                 completed_time_text: workout.completedTime,

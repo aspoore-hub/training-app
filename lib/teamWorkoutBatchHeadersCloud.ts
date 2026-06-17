@@ -19,6 +19,12 @@ function normalizeSession(value: string | undefined): "AM" | "PM" {
   return String(value ?? "PM").toUpperCase() === "AM" ? "AM" : "PM";
 }
 
+function normalizeDateISO(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  const match = raw.match(/\d{4}-\d{2}-\d{2}/);
+  return match?.[0] ?? raw;
+}
+
 function isMissingRelationOrFunction(error: PostgrestError | null): boolean {
   if (!error) return false;
   const code = String(error.code ?? "").trim();
@@ -38,9 +44,9 @@ export async function listTeamWorkoutBatchHeadersForDate(
   const teamId = await getCurrentTeamId();
   const { data, error } = await supabase
     .from("team_workout_batch_headers")
-    .select("*")
+    .select("id,team_id,batch_id,date_iso,session,header_notes,created_by,created_at,updated_at")
     .eq("team_id", teamId)
-    .eq("date_iso", String(dateISO ?? "").trim());
+    .eq("date_iso", normalizeDateISO(dateISO));
 
   if (error) {
     // Fail-open so daily workouts still load even if batch-header table/RLS
@@ -61,10 +67,10 @@ export async function listTeamWorkoutBatchHeadersInRange(
   const teamId = await getCurrentTeamId();
   const { data, error } = await supabase
     .from("team_workout_batch_headers")
-    .select("*")
+    .select("id,team_id,batch_id,date_iso,session,header_notes,created_by,created_at,updated_at")
     .eq("team_id", teamId)
-    .gte("date_iso", String(dateStartISO ?? "").trim())
-    .lte("date_iso", String(dateEndISO ?? "").trim())
+    .gte("date_iso", normalizeDateISO(dateStartISO))
+    .lte("date_iso", normalizeDateISO(dateEndISO))
     .order("date_iso", { ascending: true });
 
   if (error) {

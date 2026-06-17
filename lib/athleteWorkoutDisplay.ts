@@ -12,35 +12,47 @@ export function normalizeDisplaySession(value: unknown): "AM" | "PM" {
   return String(value ?? "PM").toUpperCase() === "AM" ? "AM" : "PM";
 }
 
-export function batchHeaderKey(batchId: unknown, dateISO: unknown, session: unknown): string {
+export function normalizeDateISO(value: unknown): string {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  const raw = cleanDisplayText(value);
+  const match = raw.match(/\d{4}-\d{2}-\d{2}/);
+  return match?.[0] ?? raw;
+}
+
+export function batchHeaderKey(teamId: unknown, batchId: unknown, dateISO: unknown, session: unknown): string {
   return [
+    cleanDisplayText(teamId),
     cleanDisplayText(batchId),
-    cleanDisplayText(dateISO),
+    normalizeDateISO(dateISO),
     normalizeDisplaySession(session),
   ].join("|");
 }
 
 export function buildBatchNotesByWorkoutId(
-  workouts: Array<Pick<TeamWorkoutRow, "id" | "batch_id" | "date_iso" | "session" | "details">>,
+  workouts: Array<Pick<TeamWorkoutRow, "id" | "team_id" | "batch_id" | "date_iso" | "session" | "details">>,
   headers: TeamWorkoutBatchHeaderRow[]
 ): Map<string, string> {
   const notesByKey = new Map<string, string>();
   const notesByBatchDate = new Map<string, Set<string>>();
   const notesByBatch = new Map<string, Set<string>>();
   headers.forEach((header) => {
+    const teamId = cleanDisplayText(header.team_id);
     const batchId = cleanDisplayText(header.batch_id);
-    const dateISO = cleanDisplayText(header.date_iso);
+    const dateISO = normalizeDateISO(header.date_iso);
     const notes = cleanDisplayText(header.header_notes);
-    if (!batchId || !dateISO || !notes) return;
-    notesByKey.set(batchHeaderKey(batchId, dateISO, header.session), notes);
-    const batchDateKey = [batchId, dateISO].join("|");
+    if (!teamId || !batchId || !dateISO || !notes) return;
+    notesByKey.set(batchHeaderKey(teamId, batchId, dateISO, header.session), notes);
+    const batchDateKey = [teamId, batchId, dateISO].join("|");
     if (!notesByBatchDate.has(batchDateKey)) notesByBatchDate.set(batchDateKey, new Set());
     notesByBatchDate.get(batchDateKey)?.add(notes);
-    if (!notesByBatch.has(batchId)) notesByBatch.set(batchId, new Set());
-    notesByBatch.get(batchId)?.add(notes);
+    const batchKey = [teamId, batchId].join("|");
+    if (!notesByBatch.has(batchKey)) notesByBatch.set(batchKey, new Set());
+    notesByBatch.get(batchKey)?.add(notes);
   });
 
-  const uniqueRowsById = new Map<string, Pick<TeamWorkoutRow, "id" | "batch_id" | "date_iso" | "session" | "details">>();
+  const uniqueRowsById = new Map<string, Pick<TeamWorkoutRow, "id" | "team_id" | "batch_id" | "date_iso" | "session" | "details">>();
   workouts.forEach((workout) => {
     const workoutId = cleanDisplayText(workout.id);
     if (workoutId) uniqueRowsById.set(workoutId, workout);
@@ -48,23 +60,25 @@ export function buildBatchNotesByWorkoutId(
   const uniqueRows = Array.from(uniqueRowsById.values());
   const rowsByScope = new Map<string, typeof uniqueRows>();
   uniqueRows.forEach((workout) => {
+    const teamId = cleanDisplayText(workout.team_id);
     const batchId = cleanDisplayText(workout.batch_id);
-    const dateISO = cleanDisplayText(workout.date_iso);
-    if (!batchId || !dateISO) return;
-    const key = batchHeaderKey(batchId, dateISO, workout.session);
+    const dateISO = normalizeDateISO(workout.date_iso);
+    if (!teamId || !batchId || !dateISO) return;
+    const key = batchHeaderKey(teamId, batchId, dateISO, workout.session);
     if (!rowsByScope.has(key)) rowsByScope.set(key, []);
     rowsByScope.get(key)?.push(workout);
   });
 
   const out = new Map<string, string>();
   uniqueRows.forEach((workout) => {
+    const teamId = cleanDisplayText(workout.team_id);
     const batchId = cleanDisplayText(workout.batch_id);
-    const dateISO = cleanDisplayText(workout.date_iso);
+    const dateISO = normalizeDateISO(workout.date_iso);
     const workoutId = cleanDisplayText(workout.id);
-    if (!workoutId || !batchId || !dateISO) return;
-    const scopeKey = batchHeaderKey(batchId, dateISO, workout.session);
-    const batchDateNotes = Array.from(notesByBatchDate.get([batchId, dateISO].join("|")) ?? []);
-    const batchNotes = Array.from(notesByBatch.get(batchId) ?? []);
+    if (!workoutId || !teamId || !batchId || !dateISO) return;
+    const scopeKey = batchHeaderKey(teamId, batchId, dateISO, workout.session);
+    const batchDateNotes = Array.from(notesByBatchDate.get([teamId, batchId, dateISO].join("|")) ?? []);
+    const batchNotes = Array.from(notesByBatch.get([teamId, batchId].join("|")) ?? []);
     const notes =
       notesByKey.get(scopeKey) ||
       (batchDateNotes.length === 1 ? batchDateNotes[0] : "") ||
@@ -126,4 +140,11 @@ export function formatPrescribedLabel(value?: MileageValue | string | null): str
   if (!raw) return "";
   if (/(:|\bmi\b|\bmile\b|\bmiles\b|\bkm\b|\bkilometer\b|\bkilometers\b|\bxt\b|\bmin\b)/i.test(raw)) return raw;
   return `${raw} mi`;
+}
+
+export function formatPlannedDistanceLabel(value: unknown, unit: unknown): string {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return "";
+  const normalizedUnit = cleanDisplayText(unit).toLowerCase() === "km" ? "km" : "mi";
+  return `${Number.isInteger(numeric) ? numeric : Number(numeric.toFixed(2))} ${normalizedUnit}`;
 }

@@ -1,4 +1,6 @@
 import { loadJSON, saveJSON } from "./storage";
+import { supabase } from "./supabase";
+import { getCurrentTeamId } from "./team";
 import { saveJSONWithTeamCloudSyncStrict } from "./teamCloudSync";
 
 export const AUXILIARY_ROUTINES_KEY = "training_app_auxiliary_routines_v1";
@@ -54,6 +56,29 @@ export async function loadAuxiliaryRoutines(): Promise<AuxiliaryRoutine[]> {
     .map((item) => normalizeRoutine(item))
     .filter((item): item is AuxiliaryRoutine => !!item)
     .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function loadAuxiliaryRoutineDefinitions(): Promise<AuxiliaryRoutine[]> {
+  try {
+    const teamId = await getCurrentTeamId();
+    const { data, error } = await supabase
+      .from("team_kv_blobs")
+      .select("data")
+      .eq("team_id", teamId)
+      .eq("key", AUXILIARY_ROUTINES_KEY)
+      .maybeSingle();
+
+    if (!error && Array.isArray(data?.data)) {
+      return data.data
+        .map((item) => normalizeRoutine(item))
+        .filter((item): item is AuxiliaryRoutine => !!item)
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+    }
+  } catch {
+    // Fall back to the synced storage path below.
+  }
+
+  return loadAuxiliaryRoutines();
 }
 
 export async function saveAuxiliaryRoutines(
