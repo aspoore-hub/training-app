@@ -1320,6 +1320,18 @@ export default function PlannerScreen() {
     [activePreRoutineSlotIndex, effectivePreRoutineIds, updateManualPreFromEffectiveChange]
   );
 
+  const clearPreRoutineSlot = useCallback(() => {
+    if (activePreRoutineSlotIndex == null) return;
+    const nextEffective = effectivePreRoutineIds
+      .filter(Boolean)
+      .filter((_, index) => index !== activePreRoutineSlotIndex);
+    updateManualPreFromEffectiveChange(nextEffective);
+    setPreRoutineSlotCount((prev) => Math.max(1, prev - 1));
+    setPreRoutineDropdownOpen(false);
+    setPreRoutineSearch("");
+    setActivePreRoutineSlotIndex(null);
+  }, [activePreRoutineSlotIndex, effectivePreRoutineIds, updateManualPreFromEffectiveChange]);
+
   const selectPostRoutineIntoSlot = useCallback(
     (routineId: string) => {
       const cleaned = effectivePostRoutineIds.filter(Boolean);
@@ -1359,6 +1371,18 @@ export default function PlannerScreen() {
     },
     [activePostRoutineSlotIndex, effectivePostRoutineIds, updateManualPostFromEffectiveChange]
   );
+
+  const clearPostRoutineSlot = useCallback(() => {
+    if (activePostRoutineSlotIndex == null) return;
+    const nextEffective = effectivePostRoutineIds
+      .filter(Boolean)
+      .filter((_, index) => index !== activePostRoutineSlotIndex);
+    updateManualPostFromEffectiveChange(nextEffective);
+    setPostRoutineSlotCount((prev) => Math.max(1, prev - 1));
+    setPostRoutineDropdownOpen(false);
+    setPostRoutineSearch("");
+    setActivePostRoutineSlotIndex(null);
+  }, [activePostRoutineSlotIndex, effectivePostRoutineIds, updateManualPostFromEffectiveChange]);
 
   const removePreRoutineAtSlot = useCallback(
     (slotIndex: number) => {
@@ -2274,9 +2298,21 @@ export default function PlannerScreen() {
                         }}
                       />
 
-                      <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 220 }}>
-                        {routinesForPrePicker.map((routine) => {
-                          const alreadySelected = effectivePreRoutineIds.includes(routine.id);
+	                      <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 220 }}>
+	                        <Pressable
+	                          onPress={clearPreRoutineSlot}
+	                          style={{
+	                            paddingHorizontal: 10,
+	                            paddingVertical: 9,
+	                            borderBottomWidth: 1,
+	                            borderBottomColor: "#edf2f7",
+	                            backgroundColor: "#f8fafc",
+	                          }}
+	                        >
+	                          <Text style={{ fontSize: 13, fontWeight: "800", color: "#64748b" }}>None</Text>
+	                        </Pressable>
+	                        {routinesForPrePicker.map((routine) => {
+	                          const alreadySelected = effectivePreRoutineIds.includes(routine.id);
 
                           return (
                             <Pressable
@@ -2421,9 +2457,21 @@ export default function PlannerScreen() {
                         }}
                       />
 
-                      <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 220 }}>
-                        {routinesForPostPicker.map((routine) => {
-                          const alreadySelected = effectivePostRoutineIds.includes(routine.id);
+	                      <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 220 }}>
+	                        <Pressable
+	                          onPress={clearPostRoutineSlot}
+	                          style={{
+	                            paddingHorizontal: 10,
+	                            paddingVertical: 9,
+	                            borderBottomWidth: 1,
+	                            borderBottomColor: "#edf2f7",
+	                            backgroundColor: "#f8fafc",
+	                          }}
+	                        >
+	                          <Text style={{ fontSize: 13, fontWeight: "800", color: "#64748b" }}>None</Text>
+	                        </Pressable>
+	                        {routinesForPostPicker.map((routine) => {
+	                          const alreadySelected = effectivePostRoutineIds.includes(routine.id);
 
                           return (
                             <Pressable

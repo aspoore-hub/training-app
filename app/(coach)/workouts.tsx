@@ -5540,17 +5540,17 @@ export default function CoachWorkoutsDay() {
                                       </Text>
                                       <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
                                     </Pressable>
-                                    <Pressable
-                                      onPress={() => {
-                                        const next = preSlots.filter((_, idx) => idx !== slotIndex);
-                                        setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: next }));
-                                        applyBatchRoutineSlots("pre", next);
-                                      }}
-                                      style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && preSlots.length <= 1 ? 0.4 : 1, backgroundColor: "#fff" }}
-                                      disabled={slotIndex === 0 && preSlots.length <= 1}
-                                    >
-                                      <Text style={{ fontSize: 14, fontWeight: "900", color: "#b91c1c" }}>−</Text>
-                                    </Pressable>
+	                                    <Pressable
+	                                      onPress={() => {
+	                                        const next = preSlots.filter((_, idx) => idx !== slotIndex);
+	                                        setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: next }));
+	                                        applyBatchRoutineSlots("pre", next);
+	                                      }}
+	                                      style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && preSlots.length <= 1 && !slotValue ? 0.4 : 1, backgroundColor: "#fff" }}
+	                                      disabled={slotIndex === 0 && preSlots.length <= 1 && !slotValue}
+	                                    >
+	                                      <Text style={{ fontSize: 14, fontWeight: "900", color: "#b91c1c" }}>−</Text>
+	                                    </Pressable>
                                     <Pressable
                                       onPress={() => setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: [...preSlots, ""] }))}
                                       style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" }}
@@ -5562,10 +5562,24 @@ export default function CoachWorkoutsDay() {
                                     openBatchPicker.field === "pre" &&
                                     openBatchPicker.slotIndex === slotIndex ? (
                                       <View style={{ position: "absolute", top: 34, left: 0, right: 58, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
-                                        <TextInput value={batchPickerQuery} onChangeText={setBatchPickerQuery} placeholder="Search..." style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }} />
-                                        <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
-                                          {routineOptions.map((routine) => (
-                                            <Pressable
+	                                        <TextInput value={batchPickerQuery} onChangeText={setBatchPickerQuery} placeholder="Search..." style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }} />
+	                                        <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
+	                                          <Pressable
+	                                            key={`pre-opt-${batchRow.key}-none`}
+	                                            onPress={() => {
+	                                              const next = [...preSlots];
+	                                              next[slotIndex] = "";
+	                                              const cleaned = next.filter(Boolean);
+	                                              setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: cleaned }));
+	                                              applyBatchRoutineSlots("pre", cleaned);
+	                                              setOpenBatchPicker(null);
+	                                            }}
+	                                            style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7", backgroundColor: "#f8fafc" }}
+	                                          >
+	                                            <Text style={{ fontSize: 12, fontWeight: "800", color: "#64748b" }}>None</Text>
+	                                          </Pressable>
+	                                          {routineOptions.map((routine) => (
+	                                            <Pressable
                                               key={`pre-opt-${batchRow.key}-${routine.id}`}
                                               onPress={() => {
                                                 const next = [...preSlots];
@@ -5628,17 +5642,17 @@ export default function CoachWorkoutsDay() {
                                       </Text>
                                       <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
                                     </Pressable>
-                                    <Pressable
-                                      onPress={() => {
-                                        const next = postSlots.filter((_, idx) => idx !== slotIndex);
-                                        setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: next }));
-                                        applyBatchRoutineSlots("post", next);
-                                      }}
-                                      style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && postSlots.length <= 1 ? 0.4 : 1, backgroundColor: "#fff" }}
-                                      disabled={slotIndex === 0 && postSlots.length <= 1}
-                                    >
-                                      <Text style={{ fontSize: 14, fontWeight: "900", color: "#b91c1c" }}>−</Text>
-                                    </Pressable>
+	                                    <Pressable
+	                                      onPress={() => {
+	                                        const next = postSlots.filter((_, idx) => idx !== slotIndex);
+	                                        setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: next }));
+	                                        applyBatchRoutineSlots("post", next);
+	                                      }}
+	                                      style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && postSlots.length <= 1 && !slotValue ? 0.4 : 1, backgroundColor: "#fff" }}
+	                                      disabled={slotIndex === 0 && postSlots.length <= 1 && !slotValue}
+	                                    >
+	                                      <Text style={{ fontSize: 14, fontWeight: "900", color: "#b91c1c" }}>−</Text>
+	                                    </Pressable>
                                     <Pressable
                                       onPress={() => setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: [...postSlots, ""] }))}
                                       style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" }}
@@ -5650,10 +5664,24 @@ export default function CoachWorkoutsDay() {
                                     openBatchPicker.field === "post" &&
                                     openBatchPicker.slotIndex === slotIndex ? (
                                       <View style={{ position: "absolute", top: 34, left: 0, right: 58, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
-                                        <TextInput value={batchPickerQuery} onChangeText={setBatchPickerQuery} placeholder="Search..." style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }} />
-                                        <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
-                                          {routineOptions.map((routine) => (
-                                            <Pressable
+	                                        <TextInput value={batchPickerQuery} onChangeText={setBatchPickerQuery} placeholder="Search..." style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }} />
+	                                        <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
+	                                          <Pressable
+	                                            key={`post-opt-${batchRow.key}-none`}
+	                                            onPress={() => {
+	                                              const next = [...postSlots];
+	                                              next[slotIndex] = "";
+	                                              const cleaned = next.filter(Boolean);
+	                                              setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: cleaned }));
+	                                              applyBatchRoutineSlots("post", cleaned);
+	                                              setOpenBatchPicker(null);
+	                                            }}
+	                                            style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7", backgroundColor: "#f8fafc" }}
+	                                          >
+	                                            <Text style={{ fontSize: 12, fontWeight: "800", color: "#64748b" }}>None</Text>
+	                                          </Pressable>
+	                                          {routineOptions.map((routine) => (
+	                                            <Pressable
                                               key={`post-opt-${batchRow.key}-${routine.id}`}
                                               onPress={() => {
                                                 const next = [...postSlots];
