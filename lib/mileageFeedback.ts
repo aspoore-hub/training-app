@@ -56,8 +56,8 @@ async function upsertMileageFeedbackAsClaimedAthlete(entry: MileageSessionFeedba
   }
 
   const { data, error } = await supabase.rpc("upsert_own_mileage_feedback", {
-    p_team_id: context.teamId,
     p_entry: entry,
+    p_team_id: context.teamId,
   });
   if (error) throw error;
   if (Array.isArray(data)) {
