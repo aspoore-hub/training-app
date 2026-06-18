@@ -20,9 +20,9 @@ import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../../lib/pace";
 import { distanceUnitLabel, type DistanceUnit } from "../../../lib/units";
 import { loadAthletePaceOverrides, resolveAthletePaceSeconds, type AthletePaceOverrides } from "../../../lib/athletePace";
 import { useResponsive } from "../../../lib/useResponsive";
-import { loadCoachWeekLabels, loadCoreCoachSettings, loadWeekStartSetting, saveCoachWeekLabel } from "../../../lib/settings";
+import { loadCoachWeekLabels, loadCoreCoachSettings, loadWeekStartSetting, saveCoachWeekLabel, saveCoachWeekLabelType, type CoachWeekLabels } from "../../../lib/settings";
 import { loadJSON, saveJSON } from "../../../lib/storage";
-import { getWeekLabelTone } from "../../../lib/weekLabelStyle";
+import { getWeekLabelTone, getWeekLabelToneColors, getWeekLabelToneText, type WeekLabelType } from "../../../lib/weekLabelStyle";
 import {
   isAthleteEligibleDuringWeek,
   normalizeTeamRosterAthlete,
@@ -647,7 +647,7 @@ export default function CoachMileageTab() {
   const [jumpToWeekOpen, setJumpToWeekOpen] = useState(false);
   const [jumpDateInput, setJumpDateInput] = useState(() => toISODate(new Date()));
   const [weekClipboard, setWeekClipboard] = useState<WeekClipboard | null>(null);
-  const [weekLabelsByStart, setWeekLabelsByStart] = useState<Record<string, string>>({});
+  const [weekLabelsByStart, setWeekLabelsByStart] = useState<CoachWeekLabels>({});
   const [weekLabelDraft, setWeekLabelDraft] = useState("");
   const [isWeekLabelEditing, setIsWeekLabelEditing] = useState(false);
   const [weekLabelSaveState, setWeekLabelSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -897,30 +897,21 @@ export default function CoachMileageTab() {
     return { label: `${Math.abs(weekOffset)} weeks ago`, status: "past" as const };
   }, [weekStartISO, weekStartsOn]);
 
-  const currentWeekLabel = useMemo(
-    () => String(weekLabelsByStart[weekStartISO] ?? ""),
+  const currentWeekLabelEntry = useMemo(
+    () => weekLabelsByStart[weekStartISO] ?? null,
     [weekLabelsByStart, weekStartISO]
   );
-  const activeWeekLabelText = useMemo(
-    () => String(currentWeekLabel || weekLabelDraft || "").trim(),
-    [currentWeekLabel, weekLabelDraft]
+  const currentWeekLabel = useMemo(
+    () => String(currentWeekLabelEntry?.label ?? ""),
+    [currentWeekLabelEntry]
   );
   const activeWeekLabelTone = useMemo(
-    () => getWeekLabelTone(activeWeekLabelText),
-    [activeWeekLabelText]
+    () => getWeekLabelTone(currentWeekLabelEntry?.type ?? "training"),
+    [currentWeekLabelEntry]
   );
   const activeWeekToneColors = useMemo(() => {
-    if (activeWeekLabelTone === "competition") {
-      return { border: "rgba(220,38,38,0.34)", bg: "rgba(220,38,38,0.1)", text: "#991b1b" };
-    }
-    if (activeWeekLabelTone === "break") {
-      return { border: "rgba(14,116,144,0.34)", bg: "rgba(14,116,144,0.1)", text: "#0e7490" };
-    }
-    if (activeWeekLabelTone === "camp") {
-      return { border: "rgba(22,163,74,0.34)", bg: "rgba(22,163,74,0.1)", text: "#166534" };
-    }
-    return { border: "rgba(15,23,42,0.2)", bg: "rgba(15,23,42,0.06)", text: colors.text };
-  }, [activeWeekLabelTone, colors.text]);
+    return getWeekLabelToneColors(activeWeekLabelTone);
+  }, [activeWeekLabelTone]);
 
   const copiedWeekRangeLabel = useMemo(() => {
     if (!weekClipboard?.sourceWeekStartISO) return "";
@@ -2071,6 +2062,24 @@ export default function CoachMileageTab() {
         if (seq !== weekLabelSaveSeqRef.current) return;
         setWeekLabelSaveState("error");
         Alert.alert("Week label", String(error?.message ?? "Could not save week label."));
+      }
+    },
+    []
+  );
+
+  const persistWeekLabelType = useCallback(
+    async (targetWeekStartISO: string, nextType: WeekLabelType) => {
+      const seq = ++weekLabelSaveSeqRef.current;
+      setWeekLabelSaveState("saving");
+      try {
+        const next = await saveCoachWeekLabelType(targetWeekStartISO, nextType);
+        if (seq !== weekLabelSaveSeqRef.current) return;
+        setWeekLabelsByStart(next ?? {});
+        setWeekLabelSaveState("saved");
+      } catch (error: any) {
+        if (seq !== weekLabelSaveSeqRef.current) return;
+        setWeekLabelSaveState("error");
+        Alert.alert("Week type", String(error?.message ?? "Could not save week type."));
       }
     },
     []
@@ -3713,6 +3722,32 @@ export default function CoachMileageTab() {
                           ? "Error"
                           : ""}
                   </Text>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4 }}>
+                    {(["training", "competition", "break"] as WeekLabelType[]).map((type) => {
+                      const selected = activeWeekLabelTone === type;
+                      const toneColors = getWeekLabelToneColors(type);
+                      return (
+                        <Pressable
+                          key={`mileage-week-type-${type}`}
+                          disabled={readOnlyMileage}
+                          onPress={() => void persistWeekLabelType(weekStartISO, type)}
+                          style={{
+                            borderWidth: 1,
+                            borderColor: selected ? toneColors.border : "rgba(148,163,184,0.32)",
+                            backgroundColor: selected ? toneColors.bg : colors.card,
+                            borderRadius: 999,
+                            paddingHorizontal: 7,
+                            paddingVertical: 3,
+                            opacity: readOnlyMileage ? 0.55 : 1,
+                          }}
+                        >
+                          <Text style={{ fontSize: 9, fontWeight: "900", color: selected ? toneColors.text : colors.mutedText }}>
+                            {getWeekLabelToneText(type)}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
                 </View>
               </View>
 

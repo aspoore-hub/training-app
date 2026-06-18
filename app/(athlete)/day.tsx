@@ -37,7 +37,7 @@ import {
   parseISODate,
   toISODate,
 } from "../../lib/mileagePlan";
-import { loadWeekStartSetting } from "../../lib/settings";
+import { loadCoachWeekLabels, loadWeekStartSetting, type CoachWeekLabels } from "../../lib/settings";
 import { PrevNextNavButtons } from "../../components/shared/PrevNextNavButtons";
 import { CATEGORIES_KEY, normalizeCategories } from "../../lib/categories";
 import { AthleteQuickFeedbackSheet } from "../../components/athlete/AthleteQuickFeedbackSheet";
@@ -51,6 +51,7 @@ import {
   formatPrescribedLabel,
   getRoutineTitles,
 } from "../../lib/athleteWorkoutDisplay";
+import { getWeekLabelTone, getWeekLabelToneColors } from "../../lib/weekLabelStyle";
 
 const ATHLETE_DAY_UI_STATE_KEY = "training_app_athlete_day_ui_state_v1";
 
@@ -192,6 +193,7 @@ export default function AthleteDayScreen() {
   const [selectedAthleteName, setSelectedAthleteName] = useState<string | null>(null);
   const [selectedAthleteId, setSelectedAthleteId] = useState<string | null>(null);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
+  const [weekLabelsByStart, setWeekLabelsByStart] = useState<CoachWeekLabels>({});
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
@@ -253,6 +255,23 @@ export default function AthleteDayScreen() {
       total,
     };
   }, [currentDateISO, paceSecPerMile, selectedAthleteId, store.visibleMileageCellsByAthleteWeek, store.visibleMileageFlagsByAthleteWeek, weekStartsOn]);
+
+  const currentWeekStartISO = useMemo(
+    () => (currentDateISO ? getWeekStartISO(String(currentDateISO), weekStartsOn) : ""),
+    [currentDateISO, weekStartsOn]
+  );
+  const currentWeekLabelEntry = useMemo(
+    () => (currentWeekStartISO ? weekLabelsByStart[currentWeekStartISO] ?? null : null),
+    [currentWeekStartISO, weekLabelsByStart]
+  );
+  const currentWeekLabelText = useMemo(
+    () => String(currentWeekLabelEntry?.label ?? "").trim(),
+    [currentWeekLabelEntry]
+  );
+  const currentWeekLabelColors = useMemo(
+    () => getWeekLabelToneColors(getWeekLabelTone(currentWeekLabelEntry?.type ?? "training")),
+    [currentWeekLabelEntry]
+  );
 
   const groupMatesByWorkoutId = useMemo(() => {
     const out = new Map<string, string[]>();
@@ -324,13 +343,14 @@ export default function AthleteDayScreen() {
       inFlightRef.current = true;
       setLoadingContext(true);
       try {
-        const [ws, pace, unit, athleteSession, storedCategories, routines] = await Promise.all([
+        const [ws, pace, unit, athleteSession, storedCategories, routines, weekLabels] = await Promise.all([
           loadWeekStartSetting(),
           loadPaceSecondsPerMile(),
           loadDistanceUnit(),
           resolveAthleteSessionContext(),
           loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
           loadAuxiliaryRoutineDefinitions(),
+          loadCoachWeekLabels(),
         ]);
 
         const resolvedWeekStart: WeekStartDay = ws.normalized === "sunday" ? 0 : 1;
@@ -338,6 +358,7 @@ export default function AthleteDayScreen() {
         setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
         setDistanceUnit(unit);
         setCategories(normalizeCategories(storedCategories));
+        setWeekLabelsByStart(weekLabels ?? {});
         setRoutineById(new Map(routines.map((routine) => [routine.id, routine] as const)));
 
         const resolvedId = String(athleteSession.athleteId ?? "").trim() || null;
@@ -691,6 +712,23 @@ export default function AthleteDayScreen() {
               }}
             >
               <Text style={{ fontSize: 12, fontWeight: "900", color: "#0c4a6e" }}>Today</Text>
+            </View>
+          ) : null}
+          {currentWeekLabelText ? (
+            <View
+              style={{
+                marginTop: 8,
+                paddingHorizontal: 10,
+                paddingVertical: 5,
+                borderRadius: 999,
+                backgroundColor: currentWeekLabelColors.bg,
+                borderWidth: 1,
+                borderColor: currentWeekLabelColors.border,
+              }}
+            >
+              <Text style={{ fontSize: 12, fontWeight: "900", color: currentWeekLabelColors.text }}>
+                {currentWeekLabelText}
+              </Text>
             </View>
           ) : null}
         </View>

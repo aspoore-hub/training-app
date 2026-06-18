@@ -28,7 +28,7 @@ import {
 import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../lib/teamWorkoutsCloud";
 import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import { loadCoachWeekLabels, loadWeekStartSetting, type CoachWeekLabels } from "../../lib/settings";
-import { getWeekLabelTone } from "../../lib/weekLabelStyle";
+import { getWeekLabelTone, getWeekLabelToneColors } from "../../lib/weekLabelStyle";
 import { SegmentedViewToggle } from "../../components/shared/SegmentedViewToggle";
 
 const SELECTED_KEY = "training_app_selected_athlete_v1";
@@ -310,19 +310,6 @@ function renderRunningTextWithIcon(text: string, textStyle: any, iconSize: numbe
   );
 }
 
-function getWeekLabelToneColors(tone: "competition" | "break" | "camp" | "custom") {
-  if (tone === "competition") {
-    return { border: "rgba(220,38,38,0.34)", bg: "rgba(220,38,38,0.1)", text: "#991b1b" };
-  }
-  if (tone === "break") {
-    return { border: "rgba(14,116,144,0.34)", bg: "rgba(14,116,144,0.1)", text: "#0e7490" };
-  }
-  if (tone === "camp") {
-    return { border: "rgba(22,163,74,0.34)", bg: "rgba(22,163,74,0.1)", text: "#166534" };
-  }
-  return { border: "rgba(15,23,42,0.2)", bg: "rgba(15,23,42,0.06)", text: "#334155" };
-}
-
 function isChoiceMileageValue(v: MileageValue | undefined): v is Extract<MileageValue, { kind: "choice" }> {
   return Boolean(v && typeof v === "object" && (v as any).kind === "choice");
 }
@@ -464,14 +451,15 @@ export default function AthleteWeekView() {
   }, [weekStartISO, weekEndISO]);
 
   const currentWeekAnnotation = useMemo(() => {
-    return String(weekLabelsByStart[weekStartISO] ?? "").trim();
+    return String(weekLabelsByStart[weekStartISO]?.label ?? "").trim();
   }, [weekLabelsByStart, weekStartISO]);
 
   const currentWeekAnnotationColors = useMemo(() => {
-    if (!currentWeekAnnotation) return null;
-    const tone = getWeekLabelTone(currentWeekAnnotation);
+    const entry = weekLabelsByStart[weekStartISO] ?? null;
+    if (!currentWeekAnnotation && !entry) return null;
+    const tone = getWeekLabelTone(entry?.type ?? "training");
     return getWeekLabelToneColors(tone);
-  }, [currentWeekAnnotation]);
+  }, [currentWeekAnnotation, weekLabelsByStart, weekStartISO]);
 
   const dayRows = useMemo<DayRow[]>(() => {
     return Array.from({ length: 7 }, (_, i) => {

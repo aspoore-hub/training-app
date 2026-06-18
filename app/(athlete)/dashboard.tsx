@@ -21,7 +21,7 @@ import {
   type MileageSessionFeedback,
   upsertMileageFeedback,
 } from "../../lib/mileageFeedback";
-import { loadWeekStartSetting } from "../../lib/settings";
+import { loadCoachWeekLabels, loadWeekStartSetting, type CoachWeekLabels } from "../../lib/settings";
 import { loadJSON } from "../../lib/storage";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import {
@@ -45,6 +45,7 @@ import {
   getRoutineTitles,
 } from "../../lib/athleteWorkoutDisplay";
 import type { MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
+import { getWeekLabelTone, getWeekLabelToneColors } from "../../lib/weekLabelStyle";
 
 type TodaySessionCard = {
   key: string;
@@ -161,6 +162,7 @@ export default function AthleteDashboardScreen() {
   const [selectedAthleteId, setSelectedAthleteId] = useState<string | null>(null);
   const [selectedAthleteName, setSelectedAthleteName] = useState<string | null>(null);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
+  const [weekLabelsByStart, setWeekLabelsByStart] = useState<CoachWeekLabels>({});
   const [todayRows, setTodayRows] = useState<TeamWorkoutRow[]>([]);
   const [todayMileageFeedbackEntries, setTodayMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
   const [todayDailyLogEntries, setTodayDailyLogEntries] = useState<AthleteDailyLogEntry[]>([]);
@@ -191,15 +193,17 @@ export default function AthleteDashboardScreen() {
     activeLoadKeyRef.current = loadKey;
     setLoading(true);
     try {
-      const [weekStartResult, athleteSession, storedCategories, routines] = await Promise.all([
+      const [weekStartResult, athleteSession, storedCategories, routines, weekLabels] = await Promise.all([
         loadWeekStartSetting(),
         resolveAthleteSessionContext(),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
         loadAuxiliaryRoutineDefinitions(),
+        loadCoachWeekLabels(),
       ]);
 
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
       setWeekStartsOn(resolvedWeekStart);
+      setWeekLabelsByStart(weekLabels ?? {});
       setCategories(normalizeCategories(storedCategories));
       setRoutineById(new Map(routines.map((routine) => [routine.id, routine] as const)));
 
@@ -267,9 +271,23 @@ export default function AthleteDashboardScreen() {
     }, [loadData])
   );
 
+  const currentWeekStartISO = useMemo(() => getWeekStartISO(todayISO, weekStartsOn), [todayISO, weekStartsOn]);
+  const currentWeekLabelEntry = useMemo(
+    () => weekLabelsByStart[currentWeekStartISO] ?? null,
+    [currentWeekStartISO, weekLabelsByStart]
+  );
+  const currentWeekLabelText = useMemo(
+    () => String(currentWeekLabelEntry?.label ?? "").trim(),
+    [currentWeekLabelEntry]
+  );
+  const currentWeekLabelColors = useMemo(
+    () => getWeekLabelToneColors(getWeekLabelTone(currentWeekLabelEntry?.type ?? "training")),
+    [currentWeekLabelEntry]
+  );
+
   const todayAssignment = useMemo(() => {
     if (!selectedAthleteId) return null;
-    const weekStartISO = getWeekStartISO(todayISO, weekStartsOn);
+    const weekStartISO = currentWeekStartISO;
     const visibleMileageKey = visibleMileageAthleteWeekKey(selectedAthleteId, weekStartISO);
     const idx = getWeekIndex(todayISO, weekStartISO);
     if (idx < 0 || idx > 6) return null;
@@ -306,7 +324,7 @@ export default function AthleteDashboardScreen() {
       ncaaOff,
       hasPlan: Boolean(am || pm || ncaaOff),
     };
-  }, [selectedAthleteId, store.visibleMileageCellsByAthleteWeek, store.visibleMileageFlagsByAthleteWeek, todayISO, weekStartsOn]);
+  }, [currentWeekStartISO, selectedAthleteId, store.visibleMileageCellsByAthleteWeek, store.visibleMileageFlagsByAthleteWeek, todayISO]);
 
   const todaySessionCards = useMemo<TodaySessionCard[]>(() => {
     const workoutBySession = new Map<"AM" | "PM", TeamWorkoutRow[]>();
@@ -611,6 +629,24 @@ export default function AthleteDashboardScreen() {
           {selectedAthleteName ? `${selectedAthleteName} • ` : ""}
           {formatDisplayDate(todayISO)}
         </Text>
+        {currentWeekLabelText ? (
+          <View
+            style={{
+              marginTop: 10,
+              alignSelf: "flex-start",
+              borderRadius: 999,
+              borderWidth: 1,
+              borderColor: currentWeekLabelColors.border,
+              backgroundColor: currentWeekLabelColors.bg,
+              paddingHorizontal: 10,
+              paddingVertical: 5,
+            }}
+          >
+            <Text style={{ color: currentWeekLabelColors.text, fontSize: 12, fontWeight: "900" }}>
+              {currentWeekLabelText}
+            </Text>
+          </View>
+        ) : null}
       </View>
 
       {loading ? (

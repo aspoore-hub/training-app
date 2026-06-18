@@ -13,6 +13,7 @@ import {
 } from "./practiceDefaults";
 import { loadJSON, saveJSON } from "./storage";
 import type { WorkoutCategory } from "./types";
+import { normalizeWeekLabelType, type WeekLabelType } from "./weekLabelStyle";
 
 // Authoritative settings source: synced storage keys managed in this module
 // (backed by kv_blobs/team_kv_blobs sync). Do not add alternate settings paths.
@@ -74,22 +75,71 @@ export async function saveWeekStartSetting(next: WeekStartSetting): Promise<void
   await saveJSON<WeekStartSetting>(WEEK_START_KEY, normalizeWeekStartSetting(next));
 }
 
-export type CoachWeekLabels = Record<string, string>;
+export type CoachWeekLabelType = WeekLabelType;
+export type CoachWeekLabelEntry = {
+  label: string;
+  type: CoachWeekLabelType;
+};
+export type CoachWeekLabels = Record<string, CoachWeekLabelEntry>;
+
+function inferLegacyWeekLabelType(labelText: string): CoachWeekLabelType {
+  const normalized = String(labelText ?? "").trim().toLowerCase();
+  if (!normalized) return "training";
+  const competition = [
+    "meet",
+    "relays",
+    "open",
+    "challenge",
+    "champs",
+    "district",
+    "sectional",
+    "regional",
+    "state",
+    "invite",
+    "competition",
+    "conference",
+    "section",
+    "qualifier",
+    "ncaa",
+    "race",
+    "championship",
+    "invitational",
+  ];
+  const breakKeywords = ["break", "off", "rest", "recovery", "holiday"];
+  if (competition.some((key) => normalized.includes(key))) return "competition";
+  if (breakKeywords.some((key) => normalized.includes(key))) return "break";
+  return "training";
+}
+
+function normalizeCoachWeekLabelEntry(raw: unknown): CoachWeekLabelEntry | null {
+  if (typeof raw === "string") {
+    const label = raw.trim();
+    if (!label) return null;
+    return { label, type: inferLegacyWeekLabelType(label) };
+  }
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const label = String(obj.label ?? obj.text ?? obj.name ?? "").trim();
+  const rawType = obj.type ?? obj.category ?? obj.tone;
+  const type = normalizeWeekLabelType(rawType);
+  if (!label && type === "training") return null;
+  return { label, type };
+}
 
 function normalizeCoachWeekLabels(raw: unknown): CoachWeekLabels {
   const root = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const out: CoachWeekLabels = {};
   for (const [weekStartISO, value] of Object.entries(root)) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(weekStartISO ?? ""))) continue;
-    const text = String(value ?? "").trim();
-    if (!text) continue;
-    out[weekStartISO] = text;
+    const entry = normalizeCoachWeekLabelEntry(value);
+    if (!entry) continue;
+    out[weekStartISO] = entry;
   }
   return out;
 }
 
 export async function loadCoachWeekLabels(): Promise<CoachWeekLabels> {
-  const raw = await loadJSON<CoachWeekLabels>(COACH_WEEK_LABELS_KEY, {});
+  const raw = await loadJSON<unknown>(COACH_WEEK_LABELS_KEY, {});
   return normalizeCoachWeekLabels(raw);
 }
 
@@ -100,9 +150,25 @@ export async function saveCoachWeekLabel(weekStartISO: string, labelText: string
   }
   const current = await loadCoachWeekLabels();
   const next: CoachWeekLabels = { ...current };
+  const currentEntry = current[normalizedWeek] ?? { label: "", type: "training" as const };
   const text = String(labelText ?? "").trim();
-  if (!text) delete next[normalizedWeek];
-  else next[normalizedWeek] = text;
+  if (!text && currentEntry.type === "training") delete next[normalizedWeek];
+  else next[normalizedWeek] = { label: text, type: currentEntry.type };
+  await saveJSON<CoachWeekLabels>(COACH_WEEK_LABELS_KEY, next);
+  return next;
+}
+
+export async function saveCoachWeekLabelType(weekStartISO: string, type: CoachWeekLabelType): Promise<CoachWeekLabels> {
+  const normalizedWeek = String(weekStartISO ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedWeek)) {
+    throw new Error("Invalid week start key.");
+  }
+  const current = await loadCoachWeekLabels();
+  const next: CoachWeekLabels = { ...current };
+  const currentEntry = current[normalizedWeek] ?? { label: "", type: "training" as const };
+  const normalizedType = normalizeWeekLabelType(type);
+  if (!currentEntry.label && normalizedType === "training") delete next[normalizedWeek];
+  else next[normalizedWeek] = { label: currentEntry.label, type: normalizedType };
   await saveJSON<CoachWeekLabels>(COACH_WEEK_LABELS_KEY, next);
   return next;
 }

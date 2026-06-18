@@ -36,6 +36,8 @@ import {
   loadCoachWeekLabels,
   loadWeekStartSetting,
   saveCoachWeekLabel,
+  saveCoachWeekLabelType,
+  type CoachWeekLabels,
 } from "../../../lib/settings";
 import {
   compareAthleteDisplayNamesByLastName,
@@ -48,7 +50,7 @@ import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../../lib/auxil
 import { loadJSON, saveJSON } from "../../../lib/storage";
 import { normalizeWorkoutTimeInput } from "../../../lib/time";
 import { formatMileageForSheet, getWeekIndex, getWeekStartISO } from "../../../lib/mileagePlan";
-import { getWeekLabelTone, getWeekLabelToneText } from "../../../lib/weekLabelStyle";
+import { getWeekLabelTone, getWeekLabelToneColors, getWeekLabelToneText, type WeekLabelType } from "../../../lib/weekLabelStyle";
 import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../../lib/teamDataStore";
 import { setMileageVisibilityByDateRange } from "../../../lib/mileageCloud";
 import { canEditTraining, canExport, canPublishTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
@@ -1087,19 +1089,6 @@ function MonthWorkoutDot({ colors, size = 8 }: { colors: string[]; size?: number
   return <View style={{ ...baseStyle, backgroundColor: visible[0] }} />;
 }
 
-function getWeekLabelToneColors(tone: ReturnType<typeof getWeekLabelTone>) {
-  if (tone === "competition") {
-    return { border: "rgba(220,38,38,0.34)", bg: "rgba(220,38,38,0.1)", text: "#991b1b" };
-  }
-  if (tone === "break") {
-    return { border: "rgba(14,116,144,0.34)", bg: "rgba(14,116,144,0.1)", text: "#0e7490" };
-  }
-  if (tone === "camp") {
-    return { border: "rgba(22,163,74,0.34)", bg: "rgba(22,163,74,0.1)", text: "#166534" };
-  }
-  return { border: "rgba(15,23,42,0.2)", bg: "rgba(15,23,42,0.06)", text: "#334155" };
-}
-
 function classifyMonthWorkoutPriority(args: { title: string; categories: string[] }): 0 | 1 | 2 {
   const title = String(args.title ?? "").trim().toLowerCase();
   const categoryText = (Array.isArray(args.categories) ? args.categories : [])
@@ -1426,7 +1415,7 @@ export default function CoachCalendarMonth() {
   const [trainingVisibilityError, setTrainingVisibilityError] = useState<string | null>(null);
   const [jumpToWeekOpen, setJumpToWeekOpen] = useState(false);
   const [jumpDateInput, setJumpDateInput] = useState(() => toISODate(new Date()));
-  const [weekLabelsByStart, setWeekLabelsByStart] = useState<Record<string, string>>({});
+  const [weekLabelsByStart, setWeekLabelsByStart] = useState<CoachWeekLabels>({});
   const [weekLabelDraft, setWeekLabelDraft] = useState("");
   const [isWeekLabelEditing, setIsWeekLabelEditing] = useState(false);
   const [weekLabelSaveState, setWeekLabelSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -2210,9 +2199,17 @@ export default function CoachCalendarMonth() {
     return `${startLabel} - ${endLabel}`;
   }, [weekDates]);
 
-  const currentWeekAnnotation = useMemo(
-    () => String(weekLabelsByStart[currentWeekStartISO] ?? ""),
+  const currentWeekLabelEntry = useMemo(
+    () => weekLabelsByStart[currentWeekStartISO] ?? null,
     [currentWeekStartISO, weekLabelsByStart]
+  );
+  const currentWeekAnnotation = useMemo(
+    () => String(currentWeekLabelEntry?.label ?? ""),
+    [currentWeekLabelEntry]
+  );
+  const currentWeekLabelType = useMemo<WeekLabelType>(
+    () => getWeekLabelTone(currentWeekLabelEntry?.type ?? "training"),
+    [currentWeekLabelEntry]
   );
   const relativeWeekStatus = useMemo(() => {
     const nowWeekStartISO = toISODate(startOfWeek(new Date(), weekStartsOn));
@@ -2223,21 +2220,13 @@ export default function CoachCalendarMonth() {
     if (weekOffset === -1) return { label: "Last week", status: "past" as const };
     return { label: `${Math.abs(weekOffset)} weeks ago`, status: "past" as const };
   }, [currentWeekStartISO, weekStartsOn]);
-  const activeWeekLabelText = useMemo(
-    () => String(currentWeekAnnotation || weekLabelDraft || "").trim(),
-    [currentWeekAnnotation, weekLabelDraft]
-  );
-  const activeWeekLabelTone = useMemo(
-    () => getWeekLabelTone(activeWeekLabelText),
-    [activeWeekLabelText]
-  );
   const activeWeekLabelToneText = useMemo(
-    () => getWeekLabelToneText(activeWeekLabelTone),
-    [activeWeekLabelTone]
+    () => getWeekLabelToneText(currentWeekLabelType),
+    [currentWeekLabelType]
   );
   const activeWeekToneColors = useMemo(() => {
-    return getWeekLabelToneColors(activeWeekLabelTone);
-  }, [activeWeekLabelTone]);
+    return getWeekLabelToneColors(currentWeekLabelType);
+  }, [currentWeekLabelType]);
 
   useEffect(() => {
     const editingSameWeek = isWeekLabelEditing && weekLabelEditingWeekRef.current === currentWeekStartISO;
@@ -2988,7 +2977,7 @@ export default function CoachCalendarMonth() {
       const html = buildWeeklyHandoutHtml({
         weekLabel,
         weekAnnotation: currentWeekAnnotation || "",
-        weekAnnotationTone: getWeekLabelTone(currentWeekAnnotation || ""),
+        weekAnnotationTone: currentWeekLabelType,
         generatedAtLabel,
         days: exportDays,
         categories,
@@ -3444,6 +3433,21 @@ export default function CoachCalendarMonth() {
     }
   }, []);
 
+  const persistWeekLabelType = useCallback(async (targetWeekStartISO: string, nextType: WeekLabelType) => {
+    const seq = ++weekLabelSaveSeqRef.current;
+    setWeekLabelSaveState("saving");
+    try {
+      const next = await saveCoachWeekLabelType(targetWeekStartISO, nextType);
+      if (seq !== weekLabelSaveSeqRef.current) return;
+      setWeekLabelsByStart(next ?? {});
+      setWeekLabelSaveState("saved");
+    } catch (error: any) {
+      if (seq !== weekLabelSaveSeqRef.current) return;
+      setWeekLabelSaveState("error");
+      Alert.alert("Week type", String(error?.message ?? "Could not save week type."));
+    }
+  }, []);
+
   useEffect(() => {
     if (calendarMode !== "week" || !isWeekLabelEditing) return;
     if (weekLabelEditingWeekRef.current !== currentWeekStartISO) return;
@@ -3772,6 +3776,31 @@ export default function CoachCalendarMonth() {
                   <Text style={[styles.weekLabelToneChipText, { color: activeWeekToneColors.text }]}>
                     {activeWeekLabelToneText}
                   </Text>
+                </View>
+                <View style={styles.weekLabelTypeChoices}>
+                  {(["training", "competition", "break"] as WeekLabelType[]).map((type) => {
+                    const selected = currentWeekLabelType === type;
+                    const toneColors = getWeekLabelToneColors(type);
+                    return (
+                      <Pressable
+                        key={`week-type-${type}`}
+                        disabled={!canEditCalendarTraining}
+                        onPress={() => void persistWeekLabelType(currentWeekStartISO, type)}
+                        style={[
+                          styles.weekLabelTypeChoice,
+                          {
+                            borderColor: selected ? toneColors.border : "rgba(148,163,184,0.32)",
+                            backgroundColor: selected ? toneColors.bg : "rgba(255,255,255,0.72)",
+                            opacity: canEditCalendarTraining ? 1 : 0.55,
+                          },
+                        ]}
+                      >
+                        <Text style={[styles.weekLabelTypeChoiceText, { color: selected ? toneColors.text : "#64748b" }]}>
+                          {getWeekLabelToneText(type)}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
                 </View>
               </View>
             ) : null}
@@ -4181,8 +4210,9 @@ export default function CoachCalendarMonth() {
                     const visibleSummaries = summaries.slice(0, 4);
                     const hiddenSummaryCount = Math.max(0, summaries.length - visibleSummaries.length);
                     const rowWeekStartISO = row[0]?.dateISO ?? "";
-                    const rowWeekLabel = String(weekLabelsByStart[rowWeekStartISO] ?? "").trim();
-                    const rowWeekTone = getWeekLabelTone(rowWeekLabel);
+                    const rowWeekEntry = weekLabelsByStart[rowWeekStartISO] ?? null;
+                    const rowWeekLabel = String(rowWeekEntry?.label ?? "").trim();
+                    const rowWeekTone = getWeekLabelTone(rowWeekEntry?.type ?? "training");
                     const rowWeekToneColors = getWeekLabelToneColors(rowWeekTone);
                     const showWeekTab = cellIndex === 0;
                     return (
@@ -4268,8 +4298,9 @@ export default function CoachCalendarMonth() {
                         const iso = cell.dateISO;
                         const workoutCount = workoutCountByDate.get(iso) ?? 0;
                         const rowWeekStartISO = row[0]?.dateISO ?? "";
-                        const rowWeekLabel = String(weekLabelsByStart[rowWeekStartISO] ?? "").trim();
-                        const rowWeekTone = getWeekLabelTone(rowWeekLabel);
+                        const rowWeekEntry = weekLabelsByStart[rowWeekStartISO] ?? null;
+                        const rowWeekLabel = String(rowWeekEntry?.label ?? "").trim();
+                        const rowWeekTone = getWeekLabelTone(rowWeekEntry?.type ?? "training");
                         const rowWeekToneColors = getWeekLabelToneColors(rowWeekTone);
                         const showRowWeekLabel = cellIndex === 0 && !!rowWeekLabel;
 
@@ -4891,6 +4922,14 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: "800",
   },
+  weekLabelTypeChoices: { flexDirection: "row", alignItems: "center", gap: 4, flexWrap: "wrap" },
+  weekLabelTypeChoice: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  weekLabelTypeChoiceText: { fontSize: 9, fontWeight: "900" },
   weekActionsRow: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" },
   jumpWeekPanel: {
     borderWidth: 1,
