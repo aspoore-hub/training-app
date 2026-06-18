@@ -62,6 +62,7 @@ const COACH_MILEAGE_ATHLETE_VIEW_WEEK_RANGE_KEY = "coach_mileage_athlete_view_we
 const COACH_MILEAGE_ATHLETE_VIEW_DATE_RANGE_KEY = "coach_mileage_athlete_view_range_v2";
 const COACH_MILEAGE_ATHLETE_VIEW_DATE_RANGE_LEGACY_KEY = "coach_mileage_athlete_view_date_range_v1";
 const MAX_MILEAGE_PLAN_EXPORT_RANGE_DAYS = 365;
+const MAX_MILEAGE_RANGE_WEEKS = 156;
 
 function isTextEditingTarget(target: unknown): boolean {
   if (Platform.OS !== "web") return false;
@@ -669,6 +670,9 @@ export default function CoachMileageTab() {
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
   const [weekAnchorISO, setWeekAnchorISO] = useState(() => toISODate(new Date()));
   const [viewMode, setViewMode] = useState<MileageViewMode>("teamWeek");
+  const [mileageRangeStartISO, setMileageRangeStartISO] = useState(() => getWeekStartISO(toISODate(new Date()), 1));
+  const [mileageRangeEndISO, setMileageRangeEndISO] = useState(() => addDaysISO(getWeekStartISO(toISODate(new Date()), 1), 41));
+  const [mileageRangeInitialized, setMileageRangeInitialized] = useState(false);
   const [athleteMultiFirstWeekStartISO, setAthleteMultiFirstWeekStartISO] = useState(() => getWeekStartISO(toISODate(new Date()), 1));
   const [athleteMultiNumberOfWeeks, setAthleteMultiNumberOfWeeks] = useState(6);
   const [athleteMultiRangeStartISO, setAthleteMultiRangeStartISO] = useState(() => getWeekStartISO(toISODate(new Date()), 1));
@@ -778,10 +782,21 @@ export default function CoachMileageTab() {
         weekAnchorISO?: string;
         mode?: MileageViewMode;
         athleteMultiSelectedId?: string;
+        mileageRangeStartISO?: string;
+        mileageRangeEndISO?: string;
       }>(MILEAGE_VIEW_PREFS_KEY, {});
       if (!active) return;
       if (isValidISODate(prefs?.weekAnchorISO)) {
         setWeekAnchorISO(prefs.weekAnchorISO);
+      }
+      if (
+        isValidISODate(prefs?.mileageRangeStartISO) &&
+        isValidISODate(prefs?.mileageRangeEndISO) &&
+        prefs.mileageRangeEndISO >= prefs.mileageRangeStartISO
+      ) {
+        setMileageRangeStartISO(prefs.mileageRangeStartISO);
+        setMileageRangeEndISO(prefs.mileageRangeEndISO);
+        setMileageRangeInitialized(true);
       }
       if (prefs?.mode === "teamWeek" || prefs?.mode === "athleteMultiWeek" || prefs?.mode === "seasonMileage") {
         setViewMode(prefs.mode);
@@ -804,7 +819,7 @@ export default function CoachMileageTab() {
           const firstWeekStartISO = String(parsedWeekRange?.firstWeekStartISO ?? "").trim();
           const numberOfWeeksRaw = Number(parsedWeekRange?.numberOfWeeks ?? 6);
           const numberOfWeeks = Number.isInteger(numberOfWeeksRaw)
-            ? Math.min(52, Math.max(1, numberOfWeeksRaw))
+            ? Math.min(MAX_MILEAGE_RANGE_WEEKS, Math.max(1, numberOfWeeksRaw))
             : 6;
           if (isValidISODate(firstWeekStartISO)) {
             setAthleteMultiFirstWeekStartISO(firstWeekStartISO);
@@ -827,7 +842,7 @@ export default function CoachMileageTab() {
             const firstWeekStart = getWeekStartISO(savedStart, 1);
             const lastWeekStart = getWeekStartISO(savedEnd, 1);
             const numberOfWeeks = Math.min(
-              52,
+              MAX_MILEAGE_RANGE_WEEKS,
               Math.max(1, Math.floor((isoDayNumber(lastWeekStart) - isoDayNumber(firstWeekStart)) / 7) + 1)
             );
             setAthleteMultiFirstWeekStartISO(firstWeekStart);
@@ -850,19 +865,23 @@ export default function CoachMileageTab() {
       weekAnchorISO,
       mode: viewMode,
       athleteMultiSelectedId,
+      mileageRangeStartISO,
+      mileageRangeEndISO,
     });
   }, [
     weekAnchorISO,
     weekAnchorReady,
     viewMode,
     athleteMultiSelectedId,
+    mileageRangeStartISO,
+    mileageRangeEndISO,
   ]);
 
   useEffect(() => {
     if (!weekAnchorReady || !restoredWeekAnchorRef.current) return;
     if (!isValidISODate(athleteMultiFirstWeekStartISO)) return;
     if (!Number.isInteger(athleteMultiNumberOfWeeks) || athleteMultiNumberOfWeeks < 1) return;
-    const safeWeeks = Math.min(52, Math.max(1, athleteMultiNumberOfWeeks));
+    const safeWeeks = Math.min(MAX_MILEAGE_RANGE_WEEKS, Math.max(1, athleteMultiNumberOfWeeks));
     void AsyncStorage.setItem(
       COACH_MILEAGE_ATHLETE_VIEW_WEEK_RANGE_KEY,
       JSON.stringify({
@@ -884,7 +903,7 @@ export default function CoachMileageTab() {
     const safeFirst = isValidISODate(athleteMultiFirstWeekStartISO)
       ? getWeekStartISO(athleteMultiFirstWeekStartISO, weekStartsOn)
       : getWeekStartISO(toISODate(new Date()), weekStartsOn);
-    const safeWeeks = Math.min(52, Math.max(1, Number(athleteMultiNumberOfWeeks) || 1));
+    const safeWeeks = Math.min(MAX_MILEAGE_RANGE_WEEKS, Math.max(1, Number(athleteMultiNumberOfWeeks) || 1));
     const derivedStart = safeFirst;
     const derivedEnd = addDaysISO(safeFirst, safeWeeks * 7 - 1);
     if (athleteMultiRangeStartISO !== derivedStart) setAthleteMultiRangeStartISO(derivedStart);
@@ -1212,10 +1231,71 @@ export default function CoachMileageTab() {
   }, [selectedTrainingGroupIds, trainingGroupFilterOptions]);
 
   const selectedSeasonLabel = useMemo(() => {
-    if (!selectedSeasonId) return "Season: All";
+    if (!selectedSeasonId) return "Preset: Custom range";
     const match = seasonFilterOptions.find((option) => option.id === selectedSeasonId);
-    return match?.label ? `Season: ${match.label}` : "Season: Selected";
+    return match?.label ? `Preset: ${match.label}` : "Preset: Selected season";
   }, [seasonFilterOptions, selectedSeasonId]);
+
+  const setMileageRangeFromDates = useCallback((startISO: string, endISO: string) => {
+    setMileageRangeStartISO(startISO);
+    setMileageRangeEndISO(endISO);
+    setMileageRangeInitialized(true);
+    const firstWeekStart = isValidISODate(startISO) ? getWeekStartISO(startISO, weekStartsOn) : startISO;
+    const lastWeekStart = isValidISODate(endISO) ? getWeekStartISO(endISO, weekStartsOn) : endISO;
+    if (isValidISODate(firstWeekStart)) setAthleteMultiFirstWeekStartISO(firstWeekStart);
+    if (isValidISODate(firstWeekStart) && isValidISODate(lastWeekStart) && lastWeekStart >= firstWeekStart) {
+      const numberOfWeeks = Math.min(
+        MAX_MILEAGE_RANGE_WEEKS,
+        Math.max(1, Math.floor((isoDayNumber(lastWeekStart) - isoDayNumber(firstWeekStart)) / 7) + 1)
+      );
+      setAthleteMultiNumberOfWeeks(numberOfWeeks);
+    }
+  }, [weekStartsOn]);
+
+  const clearMileagePreset = useCallback(() => {
+    void teamDataStore.actions.setSharedSelectedSeasonId(null);
+    setAthleteMultiRangeMode("custom");
+  }, []);
+
+  const updateMileageRangeStart = useCallback((value: string) => {
+    setMileageRangeFromDates(value, mileageRangeEndISO);
+    clearMileagePreset();
+  }, [clearMileagePreset, mileageRangeEndISO, setMileageRangeFromDates]);
+
+  const updateMileageRangeEnd = useCallback((value: string) => {
+    setMileageRangeFromDates(mileageRangeStartISO, value);
+    clearMileagePreset();
+  }, [clearMileagePreset, mileageRangeStartISO, setMileageRangeFromDates]);
+
+  const applyMileageSeasonPreset = useCallback((seasonId: string) => {
+    const season = (s.teamSeasons ?? []).find((row) => String(row?.id ?? "").trim() === String(seasonId ?? "").trim());
+    const startISO = String(season?.start_date ?? "").trim();
+    const endISO = String(season?.end_date ?? "").trim();
+    if (!season || !isValidISODate(startISO) || !isValidISODate(endISO) || endISO < startISO) return;
+    void teamDataStore.actions.setSharedSelectedSeasonId(String(season.id));
+    setMileageRangeFromDates(startISO, endISO);
+    setAthleteMultiRangeMode("season");
+    setSeasonFilterOpen(false);
+  }, [s.teamSeasons, setMileageRangeFromDates]);
+
+  const applyAllSeasonsMileageRange = useCallback(() => {
+    void teamDataStore.actions.setSharedSelectedSeasonId(null);
+    setAthleteMultiRangeMode("custom");
+    let startISO = "";
+    let endISO = "";
+    (Array.isArray(s.teamSeasons) ? s.teamSeasons : []).forEach((season) => {
+      if (season?.archived_at) return;
+      const start = String(season?.start_date ?? "").trim();
+      const end = String(season?.end_date ?? "").trim();
+      if (!isValidISODate(start) || !isValidISODate(end) || end < start) return;
+      if (!startISO || start < startISO) startISO = start;
+      if (!endISO || end > endISO) endISO = end;
+    });
+    if (startISO && endISO) {
+      setMileageRangeFromDates(startISO, endISO);
+    }
+    setSeasonFilterOpen(false);
+  }, [s.teamSeasons, setMileageRangeFromDates]);
 
   const trainingGroupAthleteIdsByGroupId = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -1258,8 +1338,7 @@ export default function CoachMileageTab() {
     return (s.teamSeasons ?? []).find((season) => String(season?.id ?? "").trim() === id) ?? null;
   }, [s.teamSeasons, selectedSeasonId]);
 
-  const seasonMileageSeason = useMemo(() => {
-    if (selectedSeason) return selectedSeason;
+  const defaultMileageSeason = useMemo(() => {
     const seasons = (Array.isArray(s.teamSeasons) ? s.teamSeasons : []).filter((season) => !season?.archived_at);
     if (seasons.length === 0) return null;
     const todayISO = toISODate(new Date());
@@ -1276,23 +1355,63 @@ export default function CoachMileageTab() {
       seasons[0] ??
       null
     );
-  }, [s.teamSeasons, selectedSeason]);
+  }, [s.teamSeasons]);
+
+  const allSeasonsDateRange = useMemo(() => {
+    let startISO = "";
+    let endISO = "";
+    (Array.isArray(s.teamSeasons) ? s.teamSeasons : []).forEach((season) => {
+      if (season?.archived_at) return;
+      const start = String(season?.start_date ?? "").trim();
+      const end = String(season?.end_date ?? "").trim();
+      if (!isValidISODate(start) || !isValidISODate(end) || end < start) return;
+      if (!startISO || start < startISO) startISO = start;
+      if (!endISO || end > endISO) endISO = end;
+    });
+    return startISO && endISO ? { startISO, endISO } : null;
+  }, [s.teamSeasons]);
+
+  useEffect(() => {
+    if (mileageRangeInitialized || !s.teamSeasonsLoaded) return;
+    const season = selectedSeason ?? defaultMileageSeason;
+    const startISO = String(season?.start_date ?? "").trim();
+    const endISO = String(season?.end_date ?? "").trim();
+    if (isValidISODate(startISO) && isValidISODate(endISO) && endISO >= startISO) {
+      setMileageRangeStartISO(startISO);
+      setMileageRangeEndISO(endISO);
+      if (!selectedSeasonId && season?.id) {
+        void teamDataStore.actions.setSharedSelectedSeasonId(String(season.id));
+      }
+    } else {
+      const start = getWeekStartISO(toISODate(new Date()), weekStartsOn);
+      setMileageRangeStartISO(start);
+      setMileageRangeEndISO(addDaysISO(start, 41));
+    }
+    setMileageRangeInitialized(true);
+  }, [
+    defaultMileageSeason,
+    mileageRangeInitialized,
+    s.teamSeasonsLoaded,
+    selectedSeason,
+    selectedSeasonId,
+    weekStartsOn,
+  ]);
 
   const seasonMileageRange = useMemo(() => {
-    const startISO = String(seasonMileageSeason?.start_date ?? "").trim();
-    const endISO = String(seasonMileageSeason?.end_date ?? "").trim();
+    const startISO = String(mileageRangeStartISO ?? "").trim();
+    const endISO = String(mileageRangeEndISO ?? "").trim();
     if (!isValidISODate(startISO) || !isValidISODate(endISO) || endISO < startISO) {
       return { startISO: "", endISO: "" };
     }
     return { startISO, endISO };
-  }, [seasonMileageSeason]);
+  }, [mileageRangeEndISO, mileageRangeStartISO]);
 
   const seasonMileageWeekStarts = useMemo(() => {
     if (!seasonMileageRange.startISO || !seasonMileageRange.endISO) return [];
     const firstWeekStart = getWeekStartISO(seasonMileageRange.startISO, weekStartsOn);
     const lastWeekStart = getWeekStartISO(seasonMileageRange.endISO, weekStartsOn);
     const out: string[] = [];
-    for (let ws = firstWeekStart; ws <= lastWeekStart && out.length < 80; ws = addDaysISO(ws, 7)) {
+    for (let ws = firstWeekStart; ws <= lastWeekStart && out.length < MAX_MILEAGE_RANGE_WEEKS; ws = addDaysISO(ws, 7)) {
       out.push(ws);
     }
     return out;
@@ -1312,14 +1431,32 @@ export default function CoachMileageTab() {
 
   const resolveSeasonMileageWindowForAthlete = useCallback(
     (athleteIdRaw: string | null | undefined) => {
-      if (!seasonMileageSeason) return null;
       const athleteId = String(athleteIdRaw ?? "").trim();
-      const override = athleteId
-        ? athleteSeasonOverridesBySeasonAndAthlete.get(`${String(seasonMileageSeason.id ?? "").trim()}:${athleteId}`) ?? null
-        : null;
-      return teamDataStore.resolveAthleteSeasonWindow(seasonMileageSeason, override);
+      if (!athleteId || !seasonMileageRange.startISO || !seasonMileageRange.endISO) return null;
+
+      if (selectedSeason) {
+        const override =
+          athleteSeasonOverridesBySeasonAndAthlete.get(`${String(selectedSeason.id ?? "").trim()}:${athleteId}`) ?? null;
+        return teamDataStore.resolveAthleteSeasonWindow(selectedSeason, override);
+      }
+
+      const rawAthlete = (s.roster ?? []).find((row) => String((row as any)?.id ?? "").trim() === athleteId);
+      const athlete = normalizeTeamRosterAthlete(rawAthlete ?? {});
+      let startISO = seasonMileageRange.startISO;
+      let endISO = seasonMileageRange.endISO;
+      const athleteStart = String(athlete?.teamStartDate ?? "").trim();
+      const athleteEnd = String(athlete?.teamEndDate ?? "").trim();
+      if (isValidISODate(athleteStart) && athleteStart > startISO) startISO = athleteStart;
+      if (isValidISODate(athleteEnd) && athleteEnd < endISO) endISO = athleteEnd;
+      return { start_date: startISO, end_date: endISO };
     },
-    [athleteSeasonOverridesBySeasonAndAthlete, seasonMileageSeason]
+    [
+      athleteSeasonOverridesBySeasonAndAthlete,
+      s.roster,
+      seasonMileageRange.endISO,
+      seasonMileageRange.startISO,
+      selectedSeason,
+    ]
   );
 
   const teamWeekGroupFilteredAthletes = useMemo(() => {
@@ -1330,16 +1467,12 @@ export default function CoachMileageTab() {
   }, [athletesWithIds, selectedTrainingGroupAthleteIds, selectedTrainingGroupIds.length]);
 
   const teamWeekVisibleAthletes = useMemo(() => {
-    if (!selectedSeason) return teamWeekGroupFilteredAthletes;
-    return teamWeekGroupFilteredAthletes.filter((athlete) => {
-      const resolvedWindow = resolveSelectedSeasonWindowForAthlete(String(athlete.id ?? "").trim());
-      return seasonIntersectsWeek(weekStartISO, resolvedWindow);
-    });
-  }, [resolveSelectedSeasonWindowForAthlete, selectedSeason, teamWeekGroupFilteredAthletes, weekStartISO]);
+    return teamWeekGroupFilteredAthletes;
+  }, [teamWeekGroupFilteredAthletes]);
 
   const seasonMileageAthletes = useMemo(() => {
-    if (!seasonMileageSeason || !seasonMileageRange.startISO || !seasonMileageRange.endISO) return [];
-    const seasonId = String(seasonMileageSeason.id ?? "").trim();
+    if (!seasonMileageRange.startISO || !seasonMileageRange.endISO) return [];
+    const seasonId = String(selectedSeason?.id ?? "").trim();
     const normalized = sortRosterByName(
       (Array.isArray(s.roster) ? s.roster : [])
         .map((item) => normalizeTeamRosterAthlete(item))
@@ -1370,7 +1503,7 @@ export default function CoachMileageTab() {
     s.roster,
     seasonMileageRange.endISO,
     seasonMileageRange.startISO,
-    seasonMileageSeason,
+    selectedSeason,
     selectedTrainingGroupAthleteIds,
     selectedTrainingGroupIds.length,
   ]);
@@ -1602,7 +1735,7 @@ export default function CoachMileageTab() {
     [athleteMultiFirstWeekStartISO, weekStartsOn]
   );
   const athleteMultiSafeWeekCount = useMemo(
-    () => Math.min(52, Math.max(1, Number(athleteMultiNumberOfWeeks) || 1)),
+    () => Math.min(MAX_MILEAGE_RANGE_WEEKS, Math.max(1, Number(athleteMultiNumberOfWeeks) || 1)),
     [athleteMultiNumberOfWeeks]
   );
   const athleteMultiRangeEndWeekISO = useMemo(
@@ -2046,7 +2179,7 @@ export default function CoachMileageTab() {
       setSeasonMileageFeedbackEntries(Array.isArray(mileageEntries) ? mileageEntries : []);
       setSeasonMileageDailyLogEntries(Array.isArray(dailyLogEntries) ? dailyLogEntries : []);
     } catch (error: any) {
-      const message = String(error?.message ?? error ?? "Could not load season mileage.");
+      const message = String(error?.message ?? error ?? "Could not load range mileage.");
       setSeasonMileageWorkoutRows([]);
       setSeasonMileageFeedbackEntries([]);
       setSeasonMileageDailyLogEntries([]);
@@ -2812,8 +2945,8 @@ export default function CoachMileageTab() {
       setAthleteMultiRangeError("Weeks to show must be at least 1.");
       return;
     }
-    if (athleteMultiNumberOfWeeks > 52) {
-      setAthleteMultiRangeError("Please choose 52 weeks or less.");
+    if (athleteMultiNumberOfWeeks > MAX_MILEAGE_RANGE_WEEKS) {
+      setAthleteMultiRangeError(`Please choose ${MAX_MILEAGE_RANGE_WEEKS} weeks or less.`);
       return;
     }
     setAthleteMultiRangeError(athleteMultiExcludedSeasonMessage);
@@ -2850,14 +2983,15 @@ export default function CoachMileageTab() {
     const firstWeekStart = getWeekStartISO(resolved.start, weekStartsOn);
     const lastWeekStart = getWeekStartISO(resolved.end, weekStartsOn);
     const numberOfWeeks = Math.min(
-      52,
+      MAX_MILEAGE_RANGE_WEEKS,
       Math.max(1, Math.floor((isoDayNumber(lastWeekStart) - isoDayNumber(firstWeekStart)) / 7) + 1)
     );
     setAthleteMultiFirstWeekStartISO(firstWeekStart);
     setAthleteMultiNumberOfWeeks(numberOfWeeks);
+    setMileageRangeFromDates(resolved.start, resolved.end);
     setAthleteMultiRangeError(null);
     setAthleteMultiRangeMode("season");
-  }, [resolveAthleteSeasonRange, weekStartsOn]);
+  }, [resolveAthleteSeasonRange, setMileageRangeFromDates, weekStartsOn]);
 
   useEffect(() => {
     if (athleteMultiRangeMode !== "season") return;
@@ -2872,17 +3006,23 @@ export default function CoachMileageTab() {
     const firstWeekStart = getWeekStartISO(resolved.start, weekStartsOn);
     const lastWeekStart = getWeekStartISO(resolved.end, weekStartsOn);
     const numberOfWeeks = Math.min(
-      52,
+      MAX_MILEAGE_RANGE_WEEKS,
       Math.max(1, Math.floor((isoDayNumber(lastWeekStart) - isoDayNumber(firstWeekStart)) / 7) + 1)
     );
     if (athleteMultiFirstWeekStartISO !== firstWeekStart) setAthleteMultiFirstWeekStartISO(firstWeekStart);
     if (athleteMultiNumberOfWeeks !== numberOfWeeks) setAthleteMultiNumberOfWeeks(numberOfWeeks);
+    if (mileageRangeStartISO !== resolved.start || mileageRangeEndISO !== resolved.end) {
+      setMileageRangeFromDates(resolved.start, resolved.end);
+    }
     setAthleteMultiRangeError(null);
   }, [
     athleteMultiFirstWeekStartISO,
     athleteMultiNumberOfWeeks,
     athleteMultiRangeMode,
+    mileageRangeEndISO,
+    mileageRangeStartISO,
     resolveAthleteSeasonRange,
+    setMileageRangeFromDates,
     weekStartsOn,
   ]);
   const athleteMultiVisibleRange = useMemo(() => {
@@ -2930,18 +3070,20 @@ export default function CoachMileageTab() {
       setAthleteRangeDraftError("Weeks to show must be a whole number.");
       return;
     }
-    const safeWeeks = Math.min(52, Math.max(1, weeksRaw));
+    const safeWeeks = Math.min(MAX_MILEAGE_RANGE_WEEKS, Math.max(1, weeksRaw));
     if (safeWeeks !== weeksRaw) {
-      setAthleteRangeDraftError("Weeks to show must be between 1 and 52.");
+      setAthleteRangeDraftError(`Weeks to show must be between 1 and ${MAX_MILEAGE_RANGE_WEEKS}.`);
       return;
     }
     setAthleteMultiFirstWeekStartISO(firstWeekStart);
     setAthleteMultiNumberOfWeeks(safeWeeks);
+    setMileageRangeFromDates(firstWeekStart, addDaysISO(firstWeekStart, safeWeeks * 7 - 1));
     setAthleteMultiRangeMode("custom");
+    void teamDataStore.actions.setSharedSelectedSeasonId(null);
     setAthleteMultiExcludedSeasonMessage(null);
     setAthleteRangeEditorOpen(false);
     setAthleteRangeDraftError(null);
-  }, [athleteRangeDraftFirstWeekISO, athleteRangeDraftWeekCount, weekStartsOn]);
+  }, [athleteRangeDraftFirstWeekISO, athleteRangeDraftWeekCount, setMileageRangeFromDates, weekStartsOn]);
 
   const openMileagePlanExport = useCallback(() => {
     if (!athleteMultiSelectedId) {
@@ -3168,7 +3310,7 @@ export default function CoachMileageTab() {
       const name = String(athlete.name ?? "").trim().toLowerCase();
       if (name && athlete.id) nameToAthleteId.set(name, athlete.id);
     }
-    const seasonId = String(seasonMileageSeason?.id ?? "").trim();
+    const seasonId = String(selectedSeason?.id ?? "").trim();
     const windowByAthleteId = new Map<string, { startISO: string; endISO: string }>();
     for (const athlete of seasonMileageAthletes) {
       const athleteId = String(athlete.id ?? "").trim();
@@ -3289,7 +3431,7 @@ export default function CoachMileageTab() {
     seasonMileageMetric,
     seasonMileageRange.endISO,
     seasonMileageRange.startISO,
-    seasonMileageSeason?.id,
+    selectedSeason?.id,
     seasonMileageWeekStarts,
     seasonMileageWorkoutRows,
     weekStartsOn,
@@ -4097,7 +4239,7 @@ export default function CoachMileageTab() {
           </View>
         ) : seasonMileageWeekStarts.length === 0 ? (
           <View style={{ paddingHorizontal: 12, paddingVertical: 14, borderTopWidth: 1, borderTopColor: colors.border }}>
-            <Text style={{ fontSize: 12, fontWeight: "800", color: colors.mutedText }}>Select a season with valid dates.</Text>
+            <Text style={{ fontSize: 12, fontWeight: "800", color: colors.mutedText }}>Enter a valid date range.</Text>
           </View>
         ) : (
           <>
@@ -4294,7 +4436,7 @@ export default function CoachMileageTab() {
                 onPress={() => setViewMode("athleteMultiWeek")}
               />
               <Button
-                title="Season Mileage"
+                title="Range Mileage"
                 variant={viewMode === "seasonMileage" ? "primary" : "secondary"}
                 onPress={() => setViewMode("seasonMileage")}
               />
@@ -4502,7 +4644,7 @@ export default function CoachMileageTab() {
                   </Text>
                 </Pressable>
               </View>
-              <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>Season</Text>
+              <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>Preset</Text>
               <View
                 style={{
                   minWidth: 230,
@@ -4536,7 +4678,7 @@ export default function CoachMileageTab() {
                   </Text>
                 </Pressable>
                 <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText, marginTop: 4, marginLeft: 4 }}>
-                  Uses athlete-specific dates where set.
+                  Presets fill range views.
                 </Text>
               </View>
             </View>
@@ -4575,7 +4717,7 @@ export default function CoachMileageTab() {
                       </Text>
                     </Pressable>
                   </View>
-                  <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>Season</Text>
+                  <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>Preset</Text>
                   <View
                     style={{
                       minWidth: 230,
@@ -4608,12 +4750,54 @@ export default function CoachMileageTab() {
                         {seasonFilterOpen ? "▴" : "▾"}
                       </Text>
                     </Pressable>
-                    <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText, marginTop: 4, marginLeft: 4 }}>
-                      Uses athlete-specific dates where set.
-                    </Text>
-                  </View>
-                </View>
+                <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText, marginTop: 4, marginLeft: 4 }}>
+                  Presets fill the date range.
+                </Text>
+              </View>
+            </View>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <View style={{ minWidth: 142, gap: 3 }}>
+                    <Text style={{ fontSize: 10, fontWeight: "900", color: colors.mutedText }}>Start date</Text>
+                    <TextInput
+                      value={mileageRangeStartISO}
+                      onChangeText={updateMileageRangeStart}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      placeholder="YYYY-MM-DD"
+                      style={{
+                        height: 34,
+                        borderWidth: 1,
+                        borderColor: colors.border,
+                        borderRadius: 8,
+                        paddingHorizontal: 10,
+                        color: colors.text,
+                        backgroundColor: colors.bg,
+                        fontSize: 12,
+                        fontWeight: "700",
+                      }}
+                    />
+                  </View>
+                  <View style={{ minWidth: 142, gap: 3 }}>
+                    <Text style={{ fontSize: 10, fontWeight: "900", color: colors.mutedText }}>End date</Text>
+                    <TextInput
+                      value={mileageRangeEndISO}
+                      onChangeText={updateMileageRangeEnd}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      placeholder="YYYY-MM-DD"
+                      style={{
+                        height: 34,
+                        borderWidth: 1,
+                        borderColor: colors.border,
+                        borderRadius: 8,
+                        paddingHorizontal: 10,
+                        color: colors.text,
+                        backgroundColor: colors.bg,
+                        fontSize: 12,
+                        fontWeight: "700",
+                      }}
+                    />
+                  </View>
                   <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>
                     Range: {athleteMultiVisibleRangeLabel}
                   </Text>
@@ -4720,7 +4904,7 @@ export default function CoachMileageTab() {
                       </Text>
                     </Pressable>
                   </View>
-                  <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>Season</Text>
+                  <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>Preset</Text>
                   <View
                     style={{
                       minWidth: 230,
@@ -4747,20 +4931,60 @@ export default function CoachMileageTab() {
                       }}
                     >
                       <Text numberOfLines={1} style={{ flex: 1, fontSize: 12, fontWeight: "700", color: colors.text }}>
-                        {seasonMileageSeason
-                          ? `Season: ${String(seasonMileageSeason.name ?? "").trim() || "Selected"}`
-                          : selectedSeasonLabel}
+                        {selectedSeasonLabel}
                       </Text>
                       <Text style={{ fontSize: 11, fontWeight: "900", color: colors.mutedText }}>
                         {seasonFilterOpen ? "▴" : "▾"}
                       </Text>
                     </Pressable>
                     <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText, marginTop: 4, marginLeft: 4 }}>
-                      Uses athlete-specific dates where set.
+                      Presets fill the date range.
                     </Text>
                   </View>
                 </View>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <View style={{ minWidth: 142, gap: 3 }}>
+                    <Text style={{ fontSize: 10, fontWeight: "900", color: colors.mutedText }}>Start date</Text>
+                    <TextInput
+                      value={mileageRangeStartISO}
+                      onChangeText={updateMileageRangeStart}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      placeholder="YYYY-MM-DD"
+                      style={{
+                        height: 34,
+                        borderWidth: 1,
+                        borderColor: colors.border,
+                        borderRadius: 8,
+                        paddingHorizontal: 10,
+                        color: colors.text,
+                        backgroundColor: colors.bg,
+                        fontSize: 12,
+                        fontWeight: "700",
+                      }}
+                    />
+                  </View>
+                  <View style={{ minWidth: 142, gap: 3 }}>
+                    <Text style={{ fontSize: 10, fontWeight: "900", color: colors.mutedText }}>End date</Text>
+                    <TextInput
+                      value={mileageRangeEndISO}
+                      onChangeText={updateMileageRangeEnd}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      placeholder="YYYY-MM-DD"
+                      style={{
+                        height: 34,
+                        borderWidth: 1,
+                        borderColor: colors.border,
+                        borderRadius: 8,
+                        paddingHorizontal: 10,
+                        color: colors.text,
+                        backgroundColor: colors.bg,
+                        fontSize: 12,
+                        fontWeight: "700",
+                      }}
+                    />
+                  </View>
                   <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>Mileage type</Text>
                   <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
                     <Button
@@ -4780,7 +5004,7 @@ export default function CoachMileageTab() {
                   <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>
                     {seasonMileageRange.startISO && seasonMileageRange.endISO
                       ? `${seasonMileageRange.startISO} to ${seasonMileageRange.endISO}`
-                      : "No season range"}
+                      : "No valid range"}
                   </Text>
                   <Text style={{ fontSize: 11, fontWeight: "700", color: colors.mutedText }}>
                     {seasonMileageWeekStarts.length} week{seasonMileageWeekStarts.length === 1 ? "" : "s"} • {seasonMileageAthletes.length} athlete{seasonMileageAthletes.length === 1 ? "" : "s"}
@@ -4954,7 +5178,7 @@ export default function CoachMileageTab() {
                 }}
               >
                 <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText }}>
-                  Season Mileage: {seasonMileageActiveLoading ? "Loading..." : `${seasonMileageTableRows.length} athlete row${seasonMileageTableRows.length === 1 ? "" : "s"}`}
+                  Range Mileage: {seasonMileageActiveLoading ? "Loading..." : `${seasonMileageTableRows.length} athlete row${seasonMileageTableRows.length === 1 ? "" : "s"}`}
                 </Text>
                 <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText }}>
                   Showing {seasonMileageMetricLabel.toLowerCase()} mileage
@@ -5492,7 +5716,7 @@ export default function CoachMileageTab() {
                   borderBottomColor: colors.border,
                 }}
               >
-                <Text style={{ fontSize: 14, fontWeight: "900", color: colors.text }}>Season</Text>
+                <Text style={{ fontSize: 14, fontWeight: "900", color: colors.text }}>Date Preset</Text>
                 <Button title="Done" variant="secondary" onPress={() => setSeasonFilterOpen(false)} />
               </View>
 
@@ -5500,6 +5724,7 @@ export default function CoachMileageTab() {
                 <Pressable
                   onPress={() => {
                     void teamDataStore.actions.setSharedSelectedSeasonId(null);
+                    setAthleteMultiRangeMode("custom");
                     setSeasonFilterOpen(false);
                   }}
                   style={{
@@ -5510,14 +5735,34 @@ export default function CoachMileageTab() {
                     backgroundColor: !selectedSeasonId ? "rgba(37,99,235,0.12)" : colors.card,
                   }}
                 >
-                  <Text style={{ fontSize: 13, fontWeight: "700", color: colors.text }}>All seasons (clear)</Text>
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: colors.text }}>Custom range</Text>
+                  <Text style={{ marginTop: 2, fontSize: 11, fontWeight: "700", color: colors.mutedText }}>
+                    Keep the current start and end dates.
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={applyAllSeasonsMileageRange}
+                  style={{
+                    borderBottomWidth: 1,
+                    borderBottomColor: colors.border,
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    backgroundColor: colors.card,
+                    opacity: allSeasonsDateRange ? 1 : 0.55,
+                  }}
+                >
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: colors.text }}>All seasons date range</Text>
+                  <Text style={{ marginTop: 2, fontSize: 11, fontWeight: "700", color: colors.mutedText }}>
+                    {allSeasonsDateRange
+                      ? `${allSeasonsDateRange.startISO} to ${allSeasonsDateRange.endISO}`
+                      : "No season dates found."}
+                  </Text>
                 </Pressable>
                 {seasonFilterOptions.map((option) => (
                   <Pressable
                     key={`mileage-season-filter-modal-${option.id}`}
                     onPress={() => {
-                      void teamDataStore.actions.setSharedSelectedSeasonId(option.id);
-                      setSeasonFilterOpen(false);
+                      applyMileageSeasonPreset(option.id);
                     }}
                     style={{
                       borderBottomWidth: 1,
@@ -5531,6 +5776,16 @@ export default function CoachMileageTab() {
                       {selectedSeasonId === option.id ? "☑ " : "☐ "}
                       {option.label}
                     </Text>
+                    {(() => {
+                      const season = (s.teamSeasons ?? []).find((row) => String(row?.id ?? "").trim() === option.id);
+                      const startISO = String(season?.start_date ?? "").trim();
+                      const endISO = String(season?.end_date ?? "").trim();
+                      return isValidISODate(startISO) && isValidISODate(endISO) ? (
+                        <Text style={{ marginTop: 2, fontSize: 11, fontWeight: "700", color: colors.mutedText }}>
+                          {startISO} to {endISO}
+                        </Text>
+                      ) : null;
+                    })()}
                   </Pressable>
                 ))}
                 {seasonFilterOptions.length === 0 ? (
@@ -5574,7 +5829,7 @@ export default function CoachMileageTab() {
               <View style={{ paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border }}>
                 <Text style={{ fontSize: 14, fontWeight: "900", color: colors.text }}>Edit Athlete Range</Text>
                 <Text style={{ fontSize: 11, fontWeight: "600", color: colors.mutedText }}>
-                  {athleteMultiSelected?.name || "No athlete selected"} • Max 52 weeks
+                  {athleteMultiSelected?.name || "No athlete selected"} • Max {MAX_MILEAGE_RANGE_WEEKS} weeks
                 </Text>
               </View>
               <View style={{ padding: 10, gap: 8 }}>
@@ -5612,7 +5867,7 @@ export default function CoachMileageTab() {
                   onChangeText={setAthleteRangeDraftWeekCount}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  placeholder="1-52"
+                  placeholder={`1-${MAX_MILEAGE_RANGE_WEEKS}`}
                   keyboardType={Platform.OS === "ios" ? "number-pad" : "numeric"}
                   style={{
                     height: 36,
