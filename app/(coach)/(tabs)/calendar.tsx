@@ -1924,23 +1924,6 @@ export default function CoachCalendarMonth() {
         return "Published";
     }
   }, [calendarWeekVisibilityStatus]);
-  const setCalendarWeekVisibility = useCallback(async (visible: boolean) => {
-    setWeekVisibilityBusy(true);
-    try {
-      const athleteIds = Array.from(new Set(displayedWeekWorkouts.map((workout) => String(workout.athleteId ?? "").trim()).filter(Boolean)));
-      await setWorkoutVisibilityByDateRange({
-        startISO: currentWeekStartISO,
-        endISO: currentWeekEndISO,
-        athleteIds,
-        visible,
-      });
-      await loadCalendarData({ force: true });
-    } catch (error: any) {
-      Alert.alert("Visibility update failed", String(error?.message ?? error ?? "Could not update workout visibility."));
-    } finally {
-      setWeekVisibilityBusy(false);
-    }
-  }, [currentWeekEndISO, currentWeekStartISO, displayedWeekWorkouts, loadCalendarData]);
 
   const calendarBulkAthleteIds = useMemo(() => {
     const activeRoster = (teamStore.roster ?? []).filter((athlete) => {
@@ -1960,7 +1943,35 @@ export default function CoachCalendarMonth() {
       .filter(Boolean);
   }, [selectedAthleteIds, selectedTrainingGroupAthleteIds, selectedTrainingGroupIds.length, teamStore.roster]);
 
-  const openTrainingVisibilityModal = useCallback((content: TrainingVisibilityContent = "workouts") => {
+  const setCalendarWeekVisibility = useCallback(async (visible: boolean) => {
+    const athleteIds = calendarBulkAthleteIds;
+    if (athleteIds.length === 0) return;
+    setWeekVisibilityBusy(true);
+    try {
+      await Promise.all([
+        setWorkoutVisibilityByDateRange({
+          startISO: currentWeekStartISO,
+          endISO: currentWeekEndISO,
+          athleteIds,
+          visible,
+        }),
+        setMileageVisibilityByDateRange({
+          startISO: currentWeekStartISO,
+          endISO: currentWeekEndISO,
+          athleteIds,
+          visible,
+          weekStartsOn: weekStartsOn === 0 ? 0 : 1,
+        }),
+      ]);
+      await loadCalendarData({ force: true });
+    } catch (error: any) {
+      Alert.alert("Visibility update failed", String(error?.message ?? error ?? "Could not update week visibility."));
+    } finally {
+      setWeekVisibilityBusy(false);
+    }
+  }, [calendarBulkAthleteIds, currentWeekEndISO, currentWeekStartISO, loadCalendarData, weekStartsOn]);
+
+  const openTrainingVisibilityModal = useCallback((content: TrainingVisibilityContent = "both") => {
     setTrainingVisibilityContent(content);
     setTrainingVisibilityRange("week");
     setTrainingVisibilityStartISO(currentWeekStartISO);
@@ -3846,22 +3857,22 @@ export default function CoachCalendarMonth() {
                     <Text style={styles.visibilityText}>{calendarWeekVisibilityLabel}</Text>
                   ) : null}
                   <Pressable
-                    onPress={() => openTrainingVisibilityModal("workouts")}
+                    onPress={() => openTrainingVisibilityModal("both")}
                     style={styles.visibilityBtn}
                   >
                     <Text style={styles.visibilityBtnText}>Visibility</Text>
                   </Pressable>
                   <Pressable
                     onPress={() => void setCalendarWeekVisibility(true)}
-                    disabled={weekVisibilityBusy || displayedWeekWorkouts.length === 0}
-                    style={[styles.visibilityBtn, (weekVisibilityBusy || displayedWeekWorkouts.length === 0) && styles.visibilityBtnDisabled]}
+                    disabled={weekVisibilityBusy || calendarBulkAthleteIds.length === 0}
+                    style={[styles.visibilityBtn, (weekVisibilityBusy || calendarBulkAthleteIds.length === 0) && styles.visibilityBtnDisabled]}
                   >
                     <Text style={styles.visibilityBtnText}>Publish Week</Text>
                   </Pressable>
                   <Pressable
                     onPress={() => void setCalendarWeekVisibility(false)}
-                    disabled={weekVisibilityBusy || displayedWeekWorkouts.length === 0}
-                    style={[styles.visibilityBtn, (weekVisibilityBusy || displayedWeekWorkouts.length === 0) && styles.visibilityBtnDisabled]}
+                    disabled={weekVisibilityBusy || calendarBulkAthleteIds.length === 0}
+                    style={[styles.visibilityBtn, (weekVisibilityBusy || calendarBulkAthleteIds.length === 0) && styles.visibilityBtnDisabled]}
                   >
                     <Text style={styles.visibilityBtnText}>Hide Week</Text>
                   </Pressable>

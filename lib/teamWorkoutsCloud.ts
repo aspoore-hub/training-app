@@ -10,6 +10,69 @@ async function requireTeamId(): Promise<string> {
   return teamId;
 }
 
+function normalizeISODate(value: unknown): string {
+  const match = String(value ?? "").trim().match(/^\d{4}-\d{2}-\d{2}/);
+  return match?.[0] ?? "";
+}
+
+function getWeekStartISOForWorkoutVisibility(dateISO: string, weekStartsOn: 0 | 1): string {
+  const cleanDateISO = normalizeISODate(dateISO);
+  if (!cleanDateISO) return "";
+  const [year, month, day] = cleanDateISO.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  if (Number.isNaN(date.getTime())) return "";
+  const jsDay = date.getDay();
+  const diff = weekStartsOn === 0 ? jsDay : (jsDay + 6) % 7;
+  date.setDate(date.getDate() - diff);
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function workoutWeekVisibilityKey(athleteId: string, weekStartISO: string): string {
+  return `${athleteId}:${weekStartISO}`;
+}
+
+function possibleWorkoutWeekStartISOs(dateISO: string): string[] {
+  return Array.from(new Set([
+    getWeekStartISOForWorkoutVisibility(dateISO, 1),
+    getWeekStartISOForWorkoutVisibility(dateISO, 0),
+  ].filter(Boolean)));
+}
+
+async function loadInheritedWorkoutWeekVisibility(
+  teamId: string,
+  rows: TeamWorkoutInsertInput[]
+): Promise<Map<string, boolean>> {
+  const athleteIds = Array.from(new Set(
+    rows.map((row) => String(row.athlete_profile_id ?? "").trim()).filter(Boolean)
+  ));
+  const weekStartISOs = Array.from(new Set(
+    rows.flatMap((row) => possibleWorkoutWeekStartISOs(row.date_iso))
+  ));
+
+  const byAthleteAndWeek = new Map<string, boolean>();
+  if (athleteIds.length === 0 || weekStartISOs.length === 0) return byAthleteAndWeek;
+
+  const { data, error } = await supabase
+    .from("team_mileage_week_visibility")
+    .select("athlete_profile_id,week_start_iso,athlete_visible")
+    .eq("team_id", teamId)
+    .in("athlete_profile_id", athleteIds)
+    .in("week_start_iso", weekStartISOs);
+
+  if (error) throw error;
+
+  for (const row of data ?? []) {
+    const athleteId = String((row as any).athlete_profile_id ?? "").trim();
+    const weekStartISO = String((row as any).week_start_iso ?? "").trim();
+    if (!athleteId || !weekStartISO) continue;
+    byAthleteAndWeek.set(workoutWeekVisibilityKey(athleteId, weekStartISO), !!(row as any).athlete_visible);
+  }
+  return byAthleteAndWeek;
+}
+
 export type TeamWorkoutRow = {
   id: string;
   team_id: string;
@@ -159,9 +222,6 @@ export function buildTeamWorkoutInsertRows(params: TeamWorkoutInsertParams): Tea
     completed_time_text: null,
     splits_or_pace: null,
     additional_feedback: null,
-    athlete_visible: false,
-    athlete_visible_updated_at: new Date().toISOString(),
-    published_at: null,
   }));
 }
 
@@ -172,12 +232,23 @@ export async function createTeamWorkoutBatch(
   await requireTeamPermission("training.edit", teamId);
   if (!Array.isArray(rows) || rows.length === 0) return [];
 
+  const now = new Date().toISOString();
+  const inheritedVisibility = await loadInheritedWorkoutWeekVisibility(teamId, rows);
   const payload: TeamWorkoutInsertInput[] = rows.map((r) => ({
     ...r,
     team_id: r.team_id ?? teamId,
-    athlete_visible: r.athlete_visible ?? false,
-    athlete_visible_updated_at: r.athlete_visible_updated_at ?? new Date().toISOString(),
-    published_at: r.published_at ?? null,
+    ...(() => {
+      const athleteId = String(r.athlete_profile_id ?? "").trim();
+      const inherited = possibleWorkoutWeekStartISOs(r.date_iso).some(
+        (weekStartISO) => inheritedVisibility.get(workoutWeekVisibilityKey(athleteId, weekStartISO)) === true
+      );
+      const athleteVisible = typeof r.athlete_visible === "boolean" ? r.athlete_visible : inherited;
+      return {
+        athlete_visible: athleteVisible,
+        athlete_visible_updated_at: r.athlete_visible_updated_at ?? now,
+        published_at: r.published_at ?? (athleteVisible ? now : null),
+      };
+    })(),
   }));
 
   const { data, error } = await supabase

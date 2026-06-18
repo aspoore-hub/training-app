@@ -1264,17 +1264,20 @@ export default function CoachMileageTab() {
     if (athleteIds.length === 0) return;
     setWeekVisibilityBusy(true);
     try {
-      await setMileageVisibilityByWeeks({ athleteIds, weekStartISOs: [weekStartISO], visible });
+      await Promise.all([
+        setMileageVisibilityByWeeks({ athleteIds, weekStartISOs: [weekStartISO], visible }),
+        setWorkoutVisibilityByDateRange({ startISO: weekStartISO, endISO: weekEndISO, athleteIds, visible }),
+      ]);
       await refreshMileageWeekVisibility();
-      setActionBannerText(visible ? "Published mileage week to athletes." : "Hid mileage week from athletes.");
+      setActionBannerText(visible ? "Published this week to athletes." : "Hid this week from athletes.");
     } catch (error: any) {
-      Alert.alert("Visibility update failed", String(error?.message ?? error ?? "Could not update mileage visibility."));
+      Alert.alert("Visibility update failed", String(error?.message ?? error ?? "Could not update week visibility."));
     } finally {
       setWeekVisibilityBusy(false);
     }
-  }, [refreshMileageWeekVisibility, teamWeekVisibleAthletes, weekStartISO]);
+  }, [refreshMileageWeekVisibility, teamWeekVisibleAthletes, weekEndISO, weekStartISO]);
 
-  const openTrainingVisibilityModal = useCallback((content: TrainingVisibilityContent = "mileage") => {
+  const openTrainingVisibilityModal = useCallback((content: TrainingVisibilityContent = "both") => {
     setTrainingVisibilityContent(content);
     setTrainingVisibilityRange("week");
     setTrainingVisibilityStartISO(weekStartISO);
@@ -3783,7 +3786,7 @@ export default function CoachMileageTab() {
                   title="Visibility"
                   variant="secondary"
                   disabled={weekVisibilityBusy || teamWeekVisibleAthletes.length === 0}
-                  onPress={() => openTrainingVisibilityModal("mileage")}
+                  onPress={() => openTrainingVisibilityModal("both")}
                 />
                 <Button
                   title={weekVisibilityBusy ? "Publishing..." : "Publish Week"}
