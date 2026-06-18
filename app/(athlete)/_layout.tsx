@@ -72,7 +72,7 @@ export default function AthleteTabs() {
       <Tabs.Screen
         name="warmups"
         options={{
-          title: "Warmups",
+          title: "Drills",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="barbell" size={size} color={color} />
           ),
