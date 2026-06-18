@@ -70,11 +70,11 @@ export default function AthleteTabs() {
         }}
       />
       <Tabs.Screen
-        name="settings"
+        name="warmups"
         options={{
-          title: "Settings",
+          title: "Warmups",
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="settings" size={size} color={color} />
+            <Ionicons name="barbell" size={size} color={color} />
           ),
         }}
       />
