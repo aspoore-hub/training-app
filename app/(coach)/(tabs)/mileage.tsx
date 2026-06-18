@@ -106,6 +106,7 @@ type WeekClipboard = {
   flags: Array<{ athleteId: string; dayIdx: number; ncaaOff: boolean }>;
 };
 type MileageViewMode = "teamWeek" | "athleteMultiWeek" | "seasonMileage";
+type SeasonMileageMetric = "completed" | "planned";
 type AthleteRangeMode = "season" | "custom";
 type TrainingGroupFilterOption = {
   id: string;
@@ -333,10 +334,37 @@ function formatSeasonWeekHeaderLabel(weekStartISO: string): string {
   return `${startLabel}-${endMonthLabel} ${endLabel}`;
 }
 
-function formatSeasonMileageValue(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "";
-  const rounded = Math.round(value * 10) / 10;
-  return Number.isInteger(rounded) ? String(rounded) : String(rounded).replace(/\.0+$/, "");
+function normalizeSeasonMileageRange(value: Range | number | null | undefined): Range {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? { min: value, max: value } : { min: 0, max: 0 };
+  }
+  if (!value) return { min: 0, max: 0 };
+  const min = Number(value.min);
+  const max = Number(value.max);
+  if (!Number.isFinite(min) && !Number.isFinite(max)) return { min: 0, max: 0 };
+  return {
+    min: Number.isFinite(min) ? min : 0,
+    max: Number.isFinite(max) ? max : Number.isFinite(min) ? min : 0,
+  };
+}
+
+function hasSeasonMileageValue(value: Range | number | null | undefined): boolean {
+  const range = normalizeSeasonMileageRange(value);
+  return range.min > 0 || range.max > 0;
+}
+
+function formatSeasonMileageValue(value: Range | number): string {
+  const range = normalizeSeasonMileageRange(value);
+  if (!hasSeasonMileageValue(range)) return "";
+  const round1 = (n: number) => Math.round(n * 10) / 10;
+  const format = (n: number) => {
+    const rounded = round1(n);
+    return Number.isInteger(rounded) ? String(rounded) : String(rounded).replace(/\.0+$/, "");
+  };
+  const min = round1(range.min);
+  const max = round1(range.max);
+  if (Math.abs(max - min) < 0.05) return format(max);
+  return `${format(min)}-${format(max)}`;
 }
 
 function MiniPill({
@@ -689,8 +717,11 @@ export default function CoachMileageTab() {
   const [weekVisibilityRows, setWeekVisibilityRows] = useState<MileageWeekVisibilityRow[]>([]);
   const [weekVisibilityBusy, setWeekVisibilityBusy] = useState(false);
   const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const [seasonMileageMetric, setSeasonMileageMetric] = useState<SeasonMileageMetric>("completed");
   const [seasonMileageLoading, setSeasonMileageLoading] = useState(false);
   const [seasonMileageError, setSeasonMileageError] = useState<string | null>(null);
+  const [seasonMileagePlannedLoading, setSeasonMileagePlannedLoading] = useState(false);
+  const [seasonMileagePlannedError, setSeasonMileagePlannedError] = useState<string | null>(null);
   const [seasonMileageWorkoutRows, setSeasonMileageWorkoutRows] = useState<TeamWorkoutRow[]>([]);
   const [seasonMileageFeedbackEntries, setSeasonMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
   const [seasonMileageDailyLogEntries, setSeasonMileageDailyLogEntries] = useState<AthleteDailyLogEntry[]>([]);
@@ -720,6 +751,7 @@ export default function CoachMileageTab() {
   const editingCloudKeyRef = useRef<string | null>(null);
   const restoredWeekAnchorRef = useRef(false);
   const athleteMultiWeeksLoadSeqRef = useRef(0);
+  const seasonMileageWeeksLoadSeqRef = useRef(0);
   const readOnlyMileage = !canEditMileage(currentTeamRole);
   const canPublishMileageTraining = canPublishTraining(currentTeamRole);
   const canExportMileage = canExport(currentTeamRole);
@@ -2024,12 +2056,63 @@ export default function CoachMileageTab() {
     }
   }, [seasonMileageRange.endISO, seasonMileageRange.startISO]);
 
+  const loadSeasonMileagePlannedData = useCallback(async (force = false) => {
+    if (seasonMileageWeekStarts.length === 0) {
+      setSeasonMileagePlannedError(null);
+      setSeasonMileagePlannedLoading(false);
+      return;
+    }
+
+    const loadSeq = seasonMileageWeeksLoadSeqRef.current + 1;
+    seasonMileageWeeksLoadSeqRef.current = loadSeq;
+    setSeasonMileagePlannedLoading(true);
+    setSeasonMileagePlannedError(null);
+    try {
+      await teamDataStore.actions.loadMileageWeeks(seasonMileageWeekStarts, force);
+    } catch (error: any) {
+      if (seasonMileageWeeksLoadSeqRef.current !== loadSeq) return;
+      const message = String(error?.message ?? error ?? "Could not load planned mileage.");
+      setSeasonMileagePlannedError(message);
+    } finally {
+      if (seasonMileageWeeksLoadSeqRef.current === loadSeq) {
+        setSeasonMileagePlannedLoading(false);
+      }
+    }
+  }, [seasonMileageWeekStarts]);
+
   useFocusEffect(
     useCallback(() => {
       if (viewMode !== "seasonMileage") return;
       void loadSeasonMileageData();
-    }, [loadSeasonMileageData, viewMode])
+      void loadSeasonMileagePlannedData(false);
+    }, [loadSeasonMileageData, loadSeasonMileagePlannedData, viewMode])
   );
+
+  useEffect(() => {
+    if (viewMode !== "seasonMileage") return;
+    const missingWeekStarts = seasonMileageWeekStarts.filter((weekISO) => !s.mileageLoadedWeeks[weekISO]);
+    if (missingWeekStarts.length === 0) {
+      setSeasonMileagePlannedLoading(false);
+      return;
+    }
+
+    const loadSeq = seasonMileageWeeksLoadSeqRef.current + 1;
+    seasonMileageWeeksLoadSeqRef.current = loadSeq;
+    setSeasonMileagePlannedLoading(true);
+    setSeasonMileagePlannedError(null);
+    void teamDataStore.actions
+      .loadMileageWeeks(missingWeekStarts)
+      .catch((error: any) => {
+        if (seasonMileageWeeksLoadSeqRef.current !== loadSeq) return;
+        const message = String(error?.message ?? error ?? "Could not load planned mileage.");
+        setSeasonMileagePlannedError(message);
+      })
+      .finally(() => {
+        if (seasonMileageWeeksLoadSeqRef.current === loadSeq) {
+          setSeasonMileagePlannedLoading(false);
+        }
+      });
+  }, [s.mileageLoadedWeeks, seasonMileageWeekStarts, viewMode]);
 
   useEffect(() => {
     if (viewMode !== "athleteMultiWeek") return;
@@ -3099,13 +3182,21 @@ export default function CoachMileageTab() {
       });
     }
 
-    const totalsByAthleteWeek = new Map<string, number>();
+    const totalsByAthleteWeek = new Map<string, Range>();
     const workoutCompletedKeys = new Set<string>();
     const getCellKey = (athleteId: string, weekISO: string) => `${athleteId}|${weekISO}`;
     const isDateAllowedForAthlete = (athleteId: string, dateISO: string) => {
       const window = windowByAthleteId.get(athleteId);
       if (!window) return false;
       return dateISO >= window.startISO && dateISO <= window.endISO;
+    };
+    const addRangeTotal = (athleteId: string, weekISO: string, rangeRaw: Range) => {
+      if (!athleteIds.has(athleteId)) return;
+      if (!weekSet.has(weekISO)) return;
+      const range = normalizeSeasonMileageRange(rangeRaw);
+      if (!hasSeasonMileageValue(range)) return;
+      const key = getCellKey(athleteId, weekISO);
+      totalsByAthleteWeek.set(key, addRange(totalsByAthleteWeek.get(key) ?? { min: 0, max: 0 }, range));
     };
     const addMiles = (athleteId: string, dateISO: string, milesRaw: unknown) => {
       if (!athleteIds.has(athleteId)) return;
@@ -3116,51 +3207,67 @@ export default function CoachMileageTab() {
       if (miles == null || !Number.isFinite(miles) || miles <= 0) return;
       const weekISO = getWeekStartISO(dateISO, weekStartsOn);
       if (!weekSet.has(weekISO)) return;
-      const key = getCellKey(athleteId, weekISO);
-      totalsByAthleteWeek.set(key, (totalsByAthleteWeek.get(key) ?? 0) + miles);
+      addRangeTotal(athleteId, weekISO, { min: miles, max: miles });
     };
 
-    for (const row of seasonMileageWorkoutRows) {
-      const athleteId = String(row.athlete_profile_id ?? "").trim();
-      const dateISO = String(row.date_iso ?? "").trim().slice(0, 10);
-      const session = String(row.session ?? "PM").toUpperCase() === "AM" ? "AM" : "PM";
-      if (!athleteId || !dateISO) continue;
-      const completedMiles = parseNumericLike(row.completed_miles);
-      if (completedMiles != null) {
-        workoutCompletedKeys.add(`${athleteId}|${dateISO}|${session}`);
-        addMiles(athleteId, dateISO, completedMiles);
+    if (seasonMileageMetric === "planned") {
+      for (const weekISO of seasonMileageWeekStarts) {
+        const weekRows = s.mileageCellsByWeek[weekISO] ?? [];
+        for (const row of weekRows as any[]) {
+          if (!rowBelongsToMileageWeek(row, weekISO)) continue;
+          const athleteId = String(row?.athlete_profile_id ?? "").trim();
+          const dayIdx = Number(row?.day_idx);
+          if (!athleteId || !Number.isInteger(dayIdx) || dayIdx < 0 || dayIdx > 6) continue;
+          const dateISO = addDaysISO(weekISO, dayIdx);
+          if (dateISO < seasonMileageRange.startISO || dateISO > seasonMileageRange.endISO) continue;
+          if (!isDateAllowedForAthlete(athleteId, dateISO)) continue;
+          const pace = resolveAthletePaceSeconds(athleteId, athletePaceOverrides, paceSecPerMile);
+          addRangeTotal(athleteId, weekISO, toRange((row?.value ?? null) as MileageValue | null, pace));
+        }
       }
-    }
-
-    for (const entry of seasonMileageFeedbackEntries) {
-      const dateISO = String(entry.dateISO ?? "").trim().slice(0, 10);
-      const session = String(entry.session ?? "PM").toUpperCase() === "AM" ? "AM" : "PM";
-      let athleteId = String(entry.athleteId ?? "").trim();
-      if (!athleteId) {
-        athleteId = nameToAthleteId.get(String(entry.athleteName ?? "").trim().toLowerCase()) ?? "";
+    } else {
+      for (const row of seasonMileageWorkoutRows) {
+        const athleteId = String(row.athlete_profile_id ?? "").trim();
+        const dateISO = String(row.date_iso ?? "").trim().slice(0, 10);
+        const session = String(row.session ?? "PM").toUpperCase() === "AM" ? "AM" : "PM";
+        if (!athleteId || !dateISO) continue;
+        const completedMiles = parseNumericLike(row.completed_miles);
+        if (completedMiles != null) {
+          workoutCompletedKeys.add(`${athleteId}|${dateISO}|${session}`);
+          addMiles(athleteId, dateISO, completedMiles);
+        }
       }
-      if (!athleteId || !dateISO) continue;
-      if (workoutCompletedKeys.has(`${athleteId}|${dateISO}|${session}`)) continue;
-      addMiles(athleteId, dateISO, entry.completedMiles);
-    }
 
-    for (const entry of seasonMileageDailyLogEntries) {
-      if (entry.entryType !== "extra_activity") continue;
-      if (entry.activityKind !== "run") continue;
-      const athleteId = String(entry.athleteId ?? "").trim();
-      const dateISO = String(entry.dateISO ?? "").trim().slice(0, 10);
-      if (!athleteId || !dateISO) continue;
-      addMiles(athleteId, dateISO, entry.completedMiles);
+      for (const entry of seasonMileageFeedbackEntries) {
+        const dateISO = String(entry.dateISO ?? "").trim().slice(0, 10);
+        const session = String(entry.session ?? "PM").toUpperCase() === "AM" ? "AM" : "PM";
+        let athleteId = String(entry.athleteId ?? "").trim();
+        if (!athleteId) {
+          athleteId = nameToAthleteId.get(String(entry.athleteName ?? "").trim().toLowerCase()) ?? "";
+        }
+        if (!athleteId || !dateISO) continue;
+        if (workoutCompletedKeys.has(`${athleteId}|${dateISO}|${session}`)) continue;
+        addMiles(athleteId, dateISO, entry.completedMiles);
+      }
+
+      for (const entry of seasonMileageDailyLogEntries) {
+        if (entry.entryType !== "extra_activity") continue;
+        if (entry.activityKind !== "run") continue;
+        const athleteId = String(entry.athleteId ?? "").trim();
+        const dateISO = String(entry.dateISO ?? "").trim().slice(0, 10);
+        if (!athleteId || !dateISO) continue;
+        addMiles(athleteId, dateISO, entry.completedMiles);
+      }
     }
 
     return seasonMileageAthletes.map((athlete) => {
-      let seasonTotal = 0;
-      const weeklyTotals = new Map<string, number>();
+      let seasonTotal: Range = { min: 0, max: 0 };
+      const weeklyTotals = new Map<string, Range>();
       for (const weekISO of seasonMileageWeekStarts) {
-        const total = totalsByAthleteWeek.get(getCellKey(athlete.id, weekISO)) ?? 0;
-        if (total > 0) {
+        const total = totalsByAthleteWeek.get(getCellKey(athlete.id, weekISO)) ?? { min: 0, max: 0 };
+        if (hasSeasonMileageValue(total)) {
           weeklyTotals.set(weekISO, total);
-          seasonTotal += total;
+          seasonTotal = addRange(seasonTotal, total);
         }
       }
       return {
@@ -3172,10 +3279,14 @@ export default function CoachMileageTab() {
       };
     });
   }, [
+    athletePaceOverrides,
+    paceSecPerMile,
     resolveSeasonMileageWindowForAthlete,
+    s.mileageCellsByWeek,
     seasonMileageAthletes,
     seasonMileageDailyLogEntries,
     seasonMileageFeedbackEntries,
+    seasonMileageMetric,
     seasonMileageRange.endISO,
     seasonMileageRange.startISO,
     seasonMileageSeason?.id,
@@ -3185,22 +3296,25 @@ export default function CoachMileageTab() {
   ]);
 
   const seasonMileageTeamTotalsByWeek = useMemo(() => {
-    const map = new Map<string, number>();
+    const map = new Map<string, Range>();
     for (const weekISO of seasonMileageWeekStarts) {
-      let total = 0;
+      let total: Range = { min: 0, max: 0 };
       for (const row of seasonMileageTableRows) {
-        total += row.weeklyTotals.get(weekISO) ?? 0;
+        total = addRange(total, row.weeklyTotals.get(weekISO) ?? { min: 0, max: 0 });
       }
-      if (total > 0) map.set(weekISO, total);
+      if (hasSeasonMileageValue(total)) map.set(weekISO, total);
     }
     return map;
   }, [seasonMileageTableRows, seasonMileageWeekStarts]);
 
   const seasonMileageTeamTotal = useMemo(
-    () => seasonMileageTableRows.reduce((sum, row) => sum + row.seasonTotal, 0),
+    () => seasonMileageTableRows.reduce((sum, row) => addRange(sum, row.seasonTotal), { min: 0, max: 0 }),
     [seasonMileageTableRows]
   );
-  const seasonMileageHasData = seasonMileageTeamTotal > 0;
+  const seasonMileageHasData = hasSeasonMileageValue(seasonMileageTeamTotal);
+  const seasonMileageActiveLoading = seasonMileageMetric === "planned" ? seasonMileagePlannedLoading : seasonMileageLoading;
+  const seasonMileageActiveError = seasonMileageMetric === "planned" ? seasonMileagePlannedError : seasonMileageError;
+  const seasonMileageMetricLabel = seasonMileageMetric === "planned" ? "Planned" : "Completed";
 
   const fillAllAthleteMulti = useCallback(() => {
     if (athleteMultiRowIds.length < 2) return;
@@ -3935,7 +4049,7 @@ export default function CoachMileageTab() {
           >
             <Text style={{ fontWeight: "900", color: headerStrongTextColor, fontSize: fontHeader }}>Athlete</Text>
             <Text style={{ marginTop: 2, fontSize: fontTiny, fontWeight: "800", color: colors.mutedText }}>
-              Submitted miles
+              {seasonMileageMetric === "planned" ? "Planned miles" : "Submitted miles"}
             </Text>
           </View>
           {seasonMileageWeekStarts.map((weekISO) => (
@@ -3969,13 +4083,13 @@ export default function CoachMileageTab() {
           </View>
         </View>
 
-        {seasonMileageLoading ? (
+        {seasonMileageActiveLoading ? (
           <View style={{ paddingHorizontal: 12, paddingVertical: 14, borderTopWidth: 1, borderTopColor: colors.border }}>
-            <Text style={{ fontSize: 12, fontWeight: "800", color: colors.mutedText }}>Loading season mileage...</Text>
+            <Text style={{ fontSize: 12, fontWeight: "800", color: colors.mutedText }}>Loading {seasonMileageMetricLabel.toLowerCase()} mileage...</Text>
           </View>
-        ) : seasonMileageError ? (
+        ) : seasonMileageActiveError ? (
           <View style={{ paddingHorizontal: 12, paddingVertical: 14, borderTopWidth: 1, borderTopColor: colors.border }}>
-            <Text style={{ fontSize: 12, fontWeight: "800", color: colors.danger }}>{seasonMileageError}</Text>
+            <Text style={{ fontSize: 12, fontWeight: "800", color: colors.danger }}>{seasonMileageActiveError}</Text>
           </View>
         ) : seasonMileageAthletes.length === 0 ? (
           <View style={{ paddingHorizontal: 12, paddingVertical: 14, borderTopWidth: 1, borderTopColor: colors.border }}>
@@ -4017,7 +4131,8 @@ export default function CoachMileageTab() {
                     </Text>
                   </View>
                   {seasonMileageWeekStarts.map((weekISO) => {
-                    const value = row.weeklyTotals.get(weekISO) ?? 0;
+                    const value = row.weeklyTotals.get(weekISO) ?? { min: 0, max: 0 };
+                    const hasValue = hasSeasonMileageValue(value);
                     return (
                       <View
                         key={`season-mileage-cell-${row.athleteId}-${weekISO}`}
@@ -4036,11 +4151,11 @@ export default function CoachMileageTab() {
                         <Text
                           style={{
                             fontSize: 12,
-                            fontWeight: value > 0 ? "900" : "700",
-                            color: value > 0 ? colors.text : colors.mutedText,
+                            fontWeight: hasValue ? "900" : "700",
+                            color: hasValue ? colors.text : colors.mutedText,
                           }}
                         >
-                          {value > 0 ? formatSeasonMileageValue(value) : "—"}
+                          {hasValue ? formatSeasonMileageValue(value) : "—"}
                         </Text>
                       </View>
                     );
@@ -4054,11 +4169,11 @@ export default function CoachMileageTab() {
                       paddingVertical: 9,
                       alignItems: "flex-end",
                       justifyContent: "center",
-                      backgroundColor: row.seasonTotal > 0 ? "rgba(37,99,235,0.06)" : rowBg,
+                      backgroundColor: hasSeasonMileageValue(row.seasonTotal) ? "rgba(37,99,235,0.06)" : rowBg,
                     }}
                   >
-                    <Text style={{ fontSize: 12, fontWeight: "900", color: row.seasonTotal > 0 ? colors.text : colors.mutedText }}>
-                      {row.seasonTotal > 0 ? formatSeasonMileageValue(row.seasonTotal) : "—"}
+                    <Text style={{ fontSize: 12, fontWeight: "900", color: hasSeasonMileageValue(row.seasonTotal) ? colors.text : colors.mutedText }}>
+                      {hasSeasonMileageValue(row.seasonTotal) ? formatSeasonMileageValue(row.seasonTotal) : "—"}
                     </Text>
                   </View>
                 </View>
@@ -4087,7 +4202,8 @@ export default function CoachMileageTab() {
                 <Text style={{ fontSize: 12, fontWeight: "900", color: colors.text }}>Team total</Text>
               </View>
               {seasonMileageWeekStarts.map((weekISO) => {
-                const value = seasonMileageTeamTotalsByWeek.get(weekISO) ?? 0;
+                const value = seasonMileageTeamTotalsByWeek.get(weekISO) ?? { min: 0, max: 0 };
+                const hasValue = hasSeasonMileageValue(value);
                 return (
                   <View
                     key={`season-mileage-team-total-${weekISO}`}
@@ -4102,8 +4218,8 @@ export default function CoachMileageTab() {
                       alignItems: "flex-end",
                     }}
                   >
-                    <Text style={{ fontSize: 12, fontWeight: "900", color: value > 0 ? colors.text : colors.mutedText }}>
-                      {value > 0 ? formatSeasonMileageValue(value) : "—"}
+                    <Text style={{ fontSize: 12, fontWeight: "900", color: hasValue ? colors.text : colors.mutedText }}>
+                      {hasValue ? formatSeasonMileageValue(value) : "—"}
                     </Text>
                   </View>
                 );
@@ -4118,8 +4234,8 @@ export default function CoachMileageTab() {
                   alignItems: "flex-end",
                 }}
               >
-                <Text style={{ fontSize: 12, fontWeight: "900", color: seasonMileageTeamTotal > 0 ? colors.text : colors.mutedText }}>
-                  {seasonMileageTeamTotal > 0 ? formatSeasonMileageValue(seasonMileageTeamTotal) : "—"}
+                <Text style={{ fontSize: 12, fontWeight: "900", color: hasSeasonMileageValue(seasonMileageTeamTotal) ? colors.text : colors.mutedText }}>
+                  {hasSeasonMileageValue(seasonMileageTeamTotal) ? formatSeasonMileageValue(seasonMileageTeamTotal) : "—"}
                 </Text>
               </View>
             </View>
@@ -4127,13 +4243,15 @@ export default function CoachMileageTab() {
         )}
       </View>
 
-      {!seasonMileageLoading && !seasonMileageError && seasonMileageAthletes.length > 0 && !seasonMileageHasData ? (
+      {!seasonMileageActiveLoading && !seasonMileageActiveError && seasonMileageAthletes.length > 0 && !seasonMileageHasData ? (
         <Text style={{ marginTop: 12, fontSize: 12, fontWeight: "800", color: colors.mutedText }}>
-          No mileage data for this season
+          No {seasonMileageMetricLabel.toLowerCase()} mileage data for this season
         </Text>
       ) : null}
       <Text style={{ marginTop: 12, fontSize: 12, color: colors.mutedText, fontWeight: "700" }}>
-        This view shows submitted completed miles from athlete workout feedback, mileage logs, and extra run entries. Cross-training time is not converted into mileage.
+        {seasonMileageMetric === "planned"
+          ? "This view shows planned mileage from coach mileage cells. Cross-training time is not converted into mileage."
+          : "This view shows submitted completed miles from athlete workout feedback, mileage logs, and extra run entries. Cross-training time is not converted into mileage."}
       </Text>
     </View>
   );
@@ -4643,6 +4761,22 @@ export default function CoachMileageTab() {
                   </View>
                 </View>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>Mileage type</Text>
+                  <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
+                    <Button
+                      title="Completed"
+                      variant={seasonMileageMetric === "completed" ? "primary" : "secondary"}
+                      onPress={() => setSeasonMileageMetric("completed")}
+                    />
+                    <Button
+                      title="Planned"
+                      variant={seasonMileageMetric === "planned" ? "primary" : "secondary"}
+                      onPress={() => {
+                        setSeasonMileageMetric("planned");
+                        void loadSeasonMileagePlannedData(false);
+                      }}
+                    />
+                  </View>
                   <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>
                     {seasonMileageRange.startISO && seasonMileageRange.endISO
                       ? `${seasonMileageRange.startISO} to ${seasonMileageRange.endISO}`
@@ -4652,13 +4786,19 @@ export default function CoachMileageTab() {
                     {seasonMileageWeekStarts.length} week{seasonMileageWeekStarts.length === 1 ? "" : "s"} • {seasonMileageAthletes.length} athlete{seasonMileageAthletes.length === 1 ? "" : "s"}
                   </Text>
                   <Button
-                    title={seasonMileageLoading ? "Refreshing..." : "Refresh"}
+                    title={seasonMileageActiveLoading ? "Refreshing..." : "Refresh"}
                     variant="secondary"
-                    disabled={seasonMileageLoading}
-                    onPress={() => void loadSeasonMileageData()}
+                    disabled={seasonMileageActiveLoading}
+                    onPress={() => {
+                      if (seasonMileageMetric === "planned") {
+                        void loadSeasonMileagePlannedData(true);
+                      } else {
+                        void loadSeasonMileageData();
+                      }
+                    }}
                   />
-                  {seasonMileageError ? (
-                    <Text style={{ fontSize: 11, fontWeight: "800", color: "#b91c1c" }}>{seasonMileageError}</Text>
+                  {seasonMileageActiveError ? (
+                    <Text style={{ fontSize: 11, fontWeight: "800", color: "#b91c1c" }}>{seasonMileageActiveError}</Text>
                   ) : null}
                 </View>
               </View>
@@ -4814,10 +4954,10 @@ export default function CoachMileageTab() {
                 }}
               >
                 <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText }}>
-                  Season Mileage: {seasonMileageLoading ? "Loading..." : `${seasonMileageTableRows.length} athlete row${seasonMileageTableRows.length === 1 ? "" : "s"}`}
+                  Season Mileage: {seasonMileageActiveLoading ? "Loading..." : `${seasonMileageTableRows.length} athlete row${seasonMileageTableRows.length === 1 ? "" : "s"}`}
                 </Text>
                 <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText }}>
-                  Completed miles only
+                  Showing {seasonMileageMetricLabel.toLowerCase()} mileage
                 </Text>
               </View>
             ) : (
