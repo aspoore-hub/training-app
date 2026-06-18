@@ -25,7 +25,7 @@ import { loadRosterNameMapForTeam } from "../../../lib/rosterNameMap";
 import {
   getVisibleAthleteWorkoutById,
   listTeamWorkoutsByBatch,
-  updateTeamWorkoutById,
+  updateOwnWorkoutFeedbackById,
   type TeamWorkoutRow,
 } from "../../../lib/teamWorkoutsCloud";
 import { listTeamWorkoutBatchHeadersForDate } from "../../../lib/teamWorkoutBatchHeadersCloud";
@@ -359,7 +359,7 @@ export default function AthleteWorkoutDetail() {
       } else {
         if (!workout) return;
 
-        await updateTeamWorkoutById(workout.id, {
+        await updateOwnWorkoutFeedbackById(workout.id, String(workout.athleteId ?? athleteId ?? ""), {
           completed_miles: parsedCompletedMiles ?? null,
           completed_time_text: completedTimeText.trim() || null,
           splits_or_pace: splitsText.trim() || null,

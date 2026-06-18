@@ -476,6 +476,30 @@ export async function updateTeamWorkoutById(
   if (error) throw error;
 }
 
+export type TeamWorkoutFeedbackPatch = Pick<
+  TeamWorkoutRow,
+  "completed_miles" | "completed_time_text" | "splits_or_pace" | "additional_feedback"
+>;
+
+export async function updateOwnWorkoutFeedbackById(
+  id: string,
+  athleteProfileId: string,
+  patch: Partial<TeamWorkoutFeedbackPatch>
+): Promise<void> {
+  const teamId = await requireTeamId();
+  const { error } = await supabase.rpc("update_own_workout_feedback", {
+    p_team_id: teamId,
+    p_workout_id: id,
+    p_athlete_profile_id: athleteProfileId,
+    p_completed_miles: patch.completed_miles ?? null,
+    p_completed_time_text: patch.completed_time_text ?? null,
+    p_splits_or_pace: patch.splits_or_pace ?? null,
+    p_additional_feedback: patch.additional_feedback ?? null,
+  });
+
+  if (error) throw error;
+}
+
 export async function updateTeamWorkoutsByBatchId(
   batchId: string,
   patch: Partial<TeamWorkoutRow>

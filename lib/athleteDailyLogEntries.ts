@@ -1,4 +1,7 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { getActiveAccountContext } from "./accountContexts";
 import { loadJSON, saveJSON } from "./storage";
+import { supabase } from "./supabase";
 
 export const ATHLETE_DAILY_LOG_ENTRIES_KEY = "training_app_athlete_daily_log_entries_v1";
 
@@ -112,6 +115,24 @@ export async function listAthleteDailyLogEntriesForWeek(
 
 export async function upsertAthleteDailyLogEntry(entry: AthleteDailyLogEntry) {
   const sanitized = sanitizeEntry(entry);
+  const context = await getActiveAccountContext();
+  if (
+    context?.kind === "athlete" &&
+    context.teamId &&
+    context.athleteId &&
+    context.athleteId === sanitized.athleteId
+  ) {
+    const { data, error } = await supabase.rpc("upsert_own_athlete_daily_log_entry", {
+      p_team_id: context.teamId,
+      p_entry: sanitized,
+    });
+    if (error) throw error;
+    if (Array.isArray(data)) {
+      await AsyncStorage.setItem(ATHLETE_DAILY_LOG_ENTRIES_KEY, JSON.stringify(data));
+    }
+    return sanitized;
+  }
+
   const entries = await loadAthleteDailyLogEntries();
   const byId = new Map<string, AthleteDailyLogEntry>();
   for (const existing of entries) {
@@ -125,6 +146,19 @@ export async function upsertAthleteDailyLogEntry(entry: AthleteDailyLogEntry) {
 export async function deleteAthleteDailyLogEntry(id: string) {
   const normalizedId = String(id ?? "").trim();
   if (!normalizedId) return;
+  const context = await getActiveAccountContext();
+  if (context?.kind === "athlete" && context.teamId && context.athleteId) {
+    const { data, error } = await supabase.rpc("delete_own_athlete_daily_log_entry", {
+      p_team_id: context.teamId,
+      p_entry_id: normalizedId,
+    });
+    if (error) throw error;
+    if (Array.isArray(data)) {
+      await AsyncStorage.setItem(ATHLETE_DAILY_LOG_ENTRIES_KEY, JSON.stringify(data));
+    }
+    return;
+  }
+
   const entries = await loadAthleteDailyLogEntries();
   await saveAthleteDailyLogEntries(entries.filter((entry) => entry.id !== normalizedId));
 }

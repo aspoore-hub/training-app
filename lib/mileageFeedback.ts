@@ -1,4 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { getActiveAccountContext } from "./accountContexts";
+import { supabase } from "./supabase";
 import { loadJSON, saveJSON } from "./storage";
 
 export const MILEAGE_FEEDBACK_KEY = "training_app_mileage_feedback_v1";
@@ -46,7 +48,28 @@ export async function saveMileageFeedback(list: MileageSessionFeedback[]) {
   await saveJSON(MILEAGE_FEEDBACK_KEY, list);
 }
 
+async function upsertMileageFeedbackAsClaimedAthlete(entry: MileageSessionFeedback) {
+  const context = await getActiveAccountContext();
+  const athleteId = String(entry.athleteId ?? "").trim();
+  if (context?.kind !== "athlete" || !context.teamId || !context.athleteId || context.athleteId !== athleteId) {
+    return null;
+  }
+
+  const { data, error } = await supabase.rpc("upsert_own_mileage_feedback", {
+    p_team_id: context.teamId,
+    p_entry: entry,
+  });
+  if (error) throw error;
+  if (Array.isArray(data)) {
+    await AsyncStorage.setItem(MILEAGE_FEEDBACK_KEY, JSON.stringify(data));
+  }
+  return entry;
+}
+
 export async function upsertMileageFeedback(entry: MileageSessionFeedback) {
+  const athleteSaved = await upsertMileageFeedbackAsClaimedAthlete(entry);
+  if (athleteSaved) return;
+
   const list = await loadMileageFeedback();
   const next = [...list.filter((item) => item.id !== entry.id), entry];
   await saveMileageFeedback(next);
@@ -97,12 +120,18 @@ export async function migrateLocalMileageFeedbackToTeamForAthlete(input: {
     const existingUpdatedAt = Number(existing?.updatedAt ?? 0);
     const localUpdatedAt = Number(entry.updatedAt ?? 0);
     if (!existing || localUpdatedAt >= existingUpdatedAt) {
-      byId.set(entry.id, entry);
+      byId.set(entry.id, athleteId ? { ...entry, athleteId } : entry);
       changed = true;
     }
   }
 
   if (changed) {
-    await saveMileageFeedback(Array.from(byId.values()));
+    const entriesToSave = Array.from(byId.values()).filter((entry) => {
+      const entryAthleteId = String(entry.athleteId ?? "").trim();
+      return athleteId ? entryAthleteId === athleteId : !entryAthleteId;
+    });
+    for (const entry of entriesToSave) {
+      await upsertMileageFeedback(entry);
+    }
   }
 }

@@ -15,7 +15,7 @@ import {
   listTeamWorkoutsByBatch,
   listVisibleAthleteWorkoutsInRange,
   type TeamWorkoutRow,
-  updateTeamWorkoutById,
+  updateOwnWorkoutFeedbackById,
 } from "../../lib/teamWorkoutsCloud";
 import { listTeamWorkoutBatchHeadersForDate } from "../../lib/teamWorkoutBatchHeadersCloud";
 import {
@@ -581,7 +581,7 @@ export default function AthleteDayScreen() {
     try {
       const workout = editor.workout;
       if (workout) {
-        await updateTeamWorkoutById(workout.id, {
+        await updateOwnWorkoutFeedbackById(workout.id, String(workout.athleteId ?? selectedAthleteId ?? ""), {
           completed_miles: parsedCompletedMiles ?? null,
           completed_time_text: completedTimeText || null,
           splits_or_pace: splitsText || null,

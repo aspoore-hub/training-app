@@ -27,7 +27,7 @@ import {
 import { loadWeekStartSetting } from "../../lib/settings";
 import { loadJSON, saveJSON } from "../../lib/storage";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
-import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow, updateTeamWorkoutById } from "../../lib/teamWorkoutsCloud";
+import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow, updateOwnWorkoutFeedbackById } from "../../lib/teamWorkoutsCloud";
 import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import {
   computeWeeklyPlannedMileageAndXtTotals,
@@ -855,7 +855,7 @@ export default function FeedbackHub() {
       const workout = card.workouts[0];
 
       if (workout) {
-        await updateTeamWorkoutById(workout.id, {
+        await updateOwnWorkoutFeedbackById(workout.id, workout.athlete_profile_id, {
           completed_miles: parsedCompletedMiles ?? null,
           completed_time_text: completedTimeText || null,
           splits_or_pace: splitsText || null,

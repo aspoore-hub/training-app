@@ -28,7 +28,7 @@ import {
   listTeamWorkoutsByBatch,
   listVisibleAthleteWorkoutsInRange,
   type TeamWorkoutRow,
-  updateTeamWorkoutById,
+  updateOwnWorkoutFeedbackById,
 } from "../../lib/teamWorkoutsCloud";
 import { listTeamWorkoutBatchHeadersForDate } from "../../lib/teamWorkoutBatchHeadersCloud";
 import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
@@ -482,7 +482,7 @@ export default function AthleteDashboardScreen() {
       const workout = card.workouts[0];
 
       if (workout) {
-        await updateTeamWorkoutById(workout.id, {
+        await updateOwnWorkoutFeedbackById(workout.id, workout.athlete_profile_id, {
           completed_miles: parsedCompletedMiles ?? null,
           completed_time_text: completedTimeText || null,
           splits_or_pace: splitsText || null,
