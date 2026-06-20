@@ -1418,6 +1418,7 @@ export default function CoachCalendarMonth() {
   const [jumpDateInput, setJumpDateInput] = useState(() => toISODate(new Date()));
   const [weekLabelsByStart, setWeekLabelsByStart] = useState<CoachWeekLabels>({});
   const [weekLabelDraft, setWeekLabelDraft] = useState("");
+  const [weekLabelEditorOpen, setWeekLabelEditorOpen] = useState(false);
   const [isWeekLabelEditing, setIsWeekLabelEditing] = useState(false);
   const [weekLabelSaveState, setWeekLabelSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [weeklyBatchHeaderNotesByKey, setWeeklyBatchHeaderNotesByKey] = useState<Record<string, string>>({});
@@ -3489,6 +3490,30 @@ export default function CoachCalendarMonth() {
     setWeekLabelSaveState("idle");
   }, [currentWeekStartISO]);
 
+  const openWeekLabelEditor = useCallback(() => {
+    weekLabelEditingWeekRef.current = currentWeekStartISO;
+    setWeekLabelDraft(currentWeekAnnotation);
+    setWeekLabelEditorOpen(true);
+    setIsWeekLabelEditing(true);
+    setWeekLabelSaveState("idle");
+  }, [currentWeekAnnotation, currentWeekStartISO]);
+
+  const closeWeekLabelEditor = useCallback(() => {
+    if (weekLabelSaveTimerRef.current) {
+      clearTimeout(weekLabelSaveTimerRef.current);
+      weekLabelSaveTimerRef.current = null;
+    }
+    const editingWeek = weekLabelEditingWeekRef.current ?? currentWeekStartISO;
+    const draftAtClose = weekLabelDraft;
+    const savedAtClose = currentWeekAnnotation;
+    setIsWeekLabelEditing(false);
+    setWeekLabelEditorOpen(false);
+    weekLabelEditingWeekRef.current = null;
+    if (editingWeek && draftAtClose !== savedAtClose) {
+      void persistWeekLabelDraft(editingWeek, draftAtClose);
+    }
+  }, [currentWeekAnnotation, currentWeekStartISO, persistWeekLabelDraft, weekLabelDraft]);
+
   const handleWeekLabelBlur = useCallback(() => {
     if (weekLabelSaveTimerRef.current) {
       clearTimeout(weekLabelSaveTimerRef.current);
@@ -3765,60 +3790,6 @@ export default function CoachCalendarMonth() {
             <Pressable onPress={() => commitSwipe("prev")} style={styles.todayBtn}>
               <Text style={styles.todayBtnText}>Prev</Text>
             </Pressable>
-            {calendarMode === "week" ? (
-              <View style={styles.weekLabelInlineWrap}>
-                <Text style={styles.weekLabelInlineLabel}>Week label</Text>
-                <TextInput
-                  value={weekLabelDraft}
-                  onChangeText={setWeekLabelDraft}
-                  placeholder="Week label"
-                  autoCorrect={false}
-                  onFocus={handleWeekLabelFocus}
-                  onBlur={handleWeekLabelBlur}
-                  editable={canEditCalendarTraining}
-                  style={[styles.weekLabelInlineInput, { borderColor: activeWeekToneColors.border }]}
-                />
-                <Text style={styles.weekLabelSaveText}>
-                  {weekLabelSaveState === "saving"
-                    ? "Saving..."
-                    : weekLabelSaveState === "saved"
-                      ? "Saved"
-                      : weekLabelSaveState === "error"
-                        ? "Error"
-                        : ""}
-                </Text>
-                <View style={[styles.weekLabelToneChip, { borderColor: activeWeekToneColors.border, backgroundColor: activeWeekToneColors.bg }]}>
-                  <Text style={[styles.weekLabelToneChipText, { color: activeWeekToneColors.text }]}>
-                    {activeWeekLabelToneText}
-                  </Text>
-                </View>
-                <View style={styles.weekLabelTypeChoices}>
-                  {(["training", "competition", "break"] as WeekLabelType[]).map((type) => {
-                    const selected = currentWeekLabelType === type;
-                    const toneColors = getWeekLabelToneColors(type);
-                    return (
-                      <Pressable
-                        key={`week-type-${type}`}
-                        disabled={!canEditCalendarTraining}
-                        onPress={() => void persistWeekLabelType(currentWeekStartISO, type)}
-                        style={[
-                          styles.weekLabelTypeChoice,
-                          {
-                            borderColor: selected ? toneColors.border : "rgba(148,163,184,0.32)",
-                            backgroundColor: selected ? toneColors.bg : "rgba(255,255,255,0.72)",
-                            opacity: canEditCalendarTraining ? 1 : 0.55,
-                          },
-                        ]}
-                      >
-                        <Text style={[styles.weekLabelTypeChoiceText, { color: selected ? toneColors.text : "#64748b" }]}>
-                          {getWeekLabelToneText(type)}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-            ) : null}
           </View>
 
           <View style={styles.headerCenter}>
@@ -3862,6 +3833,24 @@ export default function CoachCalendarMonth() {
                 >
                   {relativeWeekStatus.label}
                 </Text>
+              </View>
+            ) : null}
+            {calendarMode === "week" ? (
+              <View style={styles.weekLabelSummaryRow}>
+                <View style={[styles.weekLabelSummaryChip, { borderColor: activeWeekToneColors.border, backgroundColor: activeWeekToneColors.bg }]}>
+                  <Text
+                    style={[styles.weekLabelSummaryText, { color: activeWeekToneColors.text }]}
+                    numberOfLines={1}
+                  >
+                    {String(currentWeekAnnotation ?? "").trim() || activeWeekLabelToneText}
+                  </Text>
+                </View>
+                {canEditCalendarTraining ? (
+                  <Pressable onPress={weekLabelEditorOpen ? closeWeekLabelEditor : openWeekLabelEditor} style={styles.weekLabelEditBtn}>
+                    <Ionicons name={weekLabelEditorOpen ? "checkmark" : "pencil"} size={11} color="#334155" />
+                    <Text style={styles.weekLabelEditBtnText}>{weekLabelEditorOpen ? "Done" : "Edit label"}</Text>
+                  </Pressable>
+                ) : null}
               </View>
             ) : null}
           </View>
@@ -3945,6 +3934,58 @@ export default function CoachCalendarMonth() {
             </Pressable>
           </View>
         </View>
+
+        {calendarMode === "week" && weekLabelEditorOpen ? (
+          <View style={styles.weekLabelEditorPanel}>
+            <View style={styles.weekLabelEditorInputWrap}>
+              <Text style={styles.weekLabelInlineLabel}>Week label</Text>
+              <TextInput
+                value={weekLabelDraft}
+                onChangeText={setWeekLabelDraft}
+                placeholder="Optional label"
+                autoCorrect={false}
+                onFocus={handleWeekLabelFocus}
+                onBlur={handleWeekLabelBlur}
+                editable={canEditCalendarTraining}
+                style={[styles.weekLabelInlineInput, { borderColor: activeWeekToneColors.border }]}
+              />
+              <Text style={styles.weekLabelSaveText}>
+                {weekLabelSaveState === "saving"
+                  ? "Saving..."
+                  : weekLabelSaveState === "saved"
+                    ? "Saved"
+                    : weekLabelSaveState === "error"
+                      ? "Error"
+                      : ""}
+              </Text>
+            </View>
+            <View style={styles.weekLabelTypeChoices}>
+              {(["training", "competition", "break"] as WeekLabelType[]).map((type) => {
+                const selected = currentWeekLabelType === type;
+                const toneColors = getWeekLabelToneColors(type);
+                return (
+                  <Pressable
+                    key={`week-type-${type}`}
+                    disabled={!canEditCalendarTraining}
+                    onPress={() => void persistWeekLabelType(currentWeekStartISO, type)}
+                    style={[
+                      styles.weekLabelTypeChoice,
+                      {
+                        borderColor: selected ? toneColors.border : "rgba(148,163,184,0.32)",
+                        backgroundColor: selected ? toneColors.bg : "rgba(255,255,255,0.72)",
+                        opacity: canEditCalendarTraining ? 1 : 0.55,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.weekLabelTypeChoiceText, { color: selected ? toneColors.text : "#64748b" }]}>
+                      {getWeekLabelToneText(type)}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
 
         {calendarMode === "week" && jumpToWeekOpen ? (
           <View style={styles.jumpWeekPanel}>
@@ -4885,10 +4926,10 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     gap: 6,
   },
-  headerTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  headerTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" },
   headerLeftGroup: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0 },
-  headerCenter: { alignItems: "center", flex: 1, minWidth: 220, gap: 0 },
-  headerRight: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" },
+  headerCenter: { alignItems: "center", flex: 1, minWidth: 210, gap: 3 },
+  headerRight: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", flexShrink: 1, minWidth: 0 },
   todayBtn: {
     height: 32,
     paddingHorizontal: 10,
@@ -4902,20 +4943,52 @@ const styles = StyleSheet.create({
   todayBtnText: { fontSize: 12, fontWeight: "800", color: "#222" },
   monthLabel: { fontSize: 18, fontWeight: "800", color: "#111" },
   subLabel: { marginTop: 1, fontSize: 11, fontWeight: "600", color: "#6b6b6b" },
-  weekLabelInlineWrap: {
+  weekLabelSummaryRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 5,
+    justifyContent: "center",
+    gap: 6,
+    flexWrap: "wrap",
+    maxWidth: "100%",
+  },
+  weekLabelSummaryChip: {
+    maxWidth: 260,
     borderWidth: 1,
-    borderColor: "rgba(15,23,42,0.12)",
     borderRadius: 999,
-    backgroundColor: "#fff",
-    paddingHorizontal: 7,
+    paddingHorizontal: 9,
     paddingVertical: 3,
   },
+  weekLabelSummaryText: { fontSize: 10, fontWeight: "900" },
+  weekLabelEditBtn: {
+    height: 24,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.42)",
+    backgroundColor: "#fff",
+  },
+  weekLabelEditBtnText: { fontSize: 10, fontWeight: "900", color: "#334155" },
+  weekLabelEditorPanel: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    flexWrap: "wrap",
+    borderWidth: 1,
+    borderColor: "rgba(15,23,42,0.1)",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  weekLabelEditorInputWrap: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0, flexShrink: 1 },
   weekLabelInlineLabel: { fontSize: 10, fontWeight: "700", color: "#6b7280" },
   weekLabelInlineInput: {
-    width: 118,
+    width: 180,
+    maxWidth: 220,
     height: 26,
     borderWidth: 1,
     borderColor: "#d1d5db",
