@@ -1,4 +1,5 @@
 import type { DailyMileageTarget, MileageValue, WeekStartDay, WeeklyMileagePlan } from "./types";
+import { distanceUnitLabel, type DistanceUnit } from "./units";
 import {
   parseWorkoutEntryValue,
   type ParsedWorkoutEntry,
@@ -286,12 +287,37 @@ function hasMileageRangeTotal(total: MileageRangeTotal) {
   return Number.isFinite(total.min) && Number.isFinite(total.max) && (total.min > 0 || total.max > 0);
 }
 
+export function hasCoachMileageTotal(total: MileageRangeTotal | number | null | undefined): boolean {
+  if (typeof total === "number") return Number.isFinite(total) && total > 0;
+  if (!total) return false;
+  const min = Number(total.min);
+  const max = Number(total.max);
+  return Number.isFinite(min) && Number.isFinite(max) && (min > 0 || max > 0);
+}
+
+export function formatCoachMileageTotalForDisplay(
+  total: MileageRangeTotal | number | null | undefined,
+  unit: DistanceUnit = "mi",
+  emptyText = "—"
+) {
+  if (!hasCoachMileageTotal(total)) return emptyText;
+  const range =
+    typeof total === "number"
+      ? { min: total, max: total }
+      : {
+          min: Number(total?.min ?? 0),
+          max: Number(total?.max ?? 0),
+        };
+  const min = Math.round(range.min);
+  const max = Math.round(range.max);
+  const suffix = distanceUnitLabel(unit);
+  if (min === max) return `${min} ${suffix}`;
+  return `${min}–${max} ${suffix}`;
+}
+
 function formatCoachWeekMileageTotal(total: MileageRangeTotal) {
   if (!hasMileageRangeTotal(total)) return "—";
-  const min = Math.round(total.min);
-  const max = Math.round(total.max);
-  if (min === max) return `${min} mi`;
-  return `${min}–${max} mi`;
+  return formatCoachMileageTotalForDisplay(total, "mi", "—");
 }
 
 function formatCoachWeekXTTotal(total: MileageRangeTotal) {

@@ -17,7 +17,7 @@ import { useAppTheme } from "../../../components/ui/useAppTheme";
 import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../../lib/teamDataStore";
 import type { WeekStartDay } from "../../../lib/types";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../../lib/pace";
-import { distanceUnitLabel, type DistanceUnit } from "../../../lib/units";
+import type { DistanceUnit } from "../../../lib/units";
 import { loadAthletePaceOverrides, resolveAthletePaceSeconds, type AthletePaceOverrides } from "../../../lib/athletePace";
 import { useResponsive } from "../../../lib/useResponsive";
 import { loadAthleteDailyLogEntries, type AthleteDailyLogEntry } from "../../../lib/athleteDailyLogEntries";
@@ -34,6 +34,8 @@ import {
   sortRosterByName,
 } from "../../../lib/teamRoster";
 import {
+  formatCoachMileageTotalForDisplay,
+  hasCoachMileageTotal,
   formatMileageForSheet,
   getWeekStartISO,
   parseMileageInput,
@@ -277,14 +279,7 @@ function sumWeekMilesRange(days: MileageDay[] | undefined, paceSecPerMile: numbe
 }
 
 function formatWeekTotalRoundedDistance(r: Range, unit: DistanceUnit): string {
-  if ((r.min === 0 && r.max === 0) || (!Number.isFinite(r.min) && !Number.isFinite(r.max))) return "";
-
-  const a = Math.round(r.min);
-  const b = Math.round(r.max);
-  const suffix = distanceUnitLabel(unit);
-
-  if (a === b) return `${a} ${suffix}`;
-  return `${a}–${b} ${suffix}`;
+  return formatCoachMileageTotalForDisplay(r, unit, "");
 }
 
 function addDaysISO(iso: string, days: number) {
@@ -351,22 +346,11 @@ function normalizeSeasonMileageRange(value: Range | number | null | undefined): 
 }
 
 function hasSeasonMileageValue(value: Range | number | null | undefined): boolean {
-  const range = normalizeSeasonMileageRange(value);
-  return range.min > 0 || range.max > 0;
+  return hasCoachMileageTotal(normalizeSeasonMileageRange(value));
 }
 
-function formatSeasonMileageValue(value: Range | number): string {
-  const range = normalizeSeasonMileageRange(value);
-  if (!hasSeasonMileageValue(range)) return "";
-  const round1 = (n: number) => Math.round(n * 10) / 10;
-  const format = (n: number) => {
-    const rounded = round1(n);
-    return Number.isInteger(rounded) ? String(rounded) : String(rounded).replace(/\.0+$/, "");
-  };
-  const min = round1(range.min);
-  const max = round1(range.max);
-  if (Math.abs(max - min) < 0.05) return format(max);
-  return `${format(min)}-${format(max)}`;
+function formatSeasonMileageValue(value: Range | number, unit: DistanceUnit): string {
+  return formatCoachMileageTotalForDisplay(normalizeSeasonMileageRange(value), unit, "");
 }
 
 function MiniPill({
@@ -4299,7 +4283,7 @@ export default function CoachMileageTab() {
                             color: hasValue ? colors.text : colors.mutedText,
                           }}
                         >
-                          {hasValue ? formatSeasonMileageValue(value) : "—"}
+                          {hasValue ? formatSeasonMileageValue(value, distanceUnit) : "—"}
                         </Text>
                       </View>
                     );
@@ -4317,7 +4301,7 @@ export default function CoachMileageTab() {
                     }}
                   >
                     <Text style={{ fontSize: 12, fontWeight: "900", color: hasSeasonMileageValue(row.seasonTotal) ? colors.text : colors.mutedText }}>
-                      {hasSeasonMileageValue(row.seasonTotal) ? formatSeasonMileageValue(row.seasonTotal) : "—"}
+                      {hasSeasonMileageValue(row.seasonTotal) ? formatSeasonMileageValue(row.seasonTotal, distanceUnit) : "—"}
                     </Text>
                   </View>
                 </View>
@@ -4363,7 +4347,7 @@ export default function CoachMileageTab() {
                     }}
                   >
                     <Text style={{ fontSize: 12, fontWeight: "900", color: hasValue ? colors.text : colors.mutedText }}>
-                      {hasValue ? formatSeasonMileageValue(value) : "—"}
+                      {hasValue ? formatSeasonMileageValue(value, distanceUnit) : "—"}
                     </Text>
                   </View>
                 );
@@ -4379,7 +4363,7 @@ export default function CoachMileageTab() {
                 }}
               >
                 <Text style={{ fontSize: 12, fontWeight: "900", color: hasSeasonMileageValue(seasonMileageTeamTotal) ? colors.text : colors.mutedText }}>
-                  {hasSeasonMileageValue(seasonMileageTeamTotal) ? formatSeasonMileageValue(seasonMileageTeamTotal) : "—"}
+                  {hasSeasonMileageValue(seasonMileageTeamTotal) ? formatSeasonMileageValue(seasonMileageTeamTotal, distanceUnit) : "—"}
                 </Text>
               </View>
             </View>
