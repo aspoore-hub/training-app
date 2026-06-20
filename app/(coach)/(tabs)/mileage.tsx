@@ -111,6 +111,9 @@ type WeekClipboard = {
 };
 type MileageViewMode = "teamWeek" | "athleteMultiWeek" | "seasonMileage";
 type SeasonMileageMetric = "completed" | "planned";
+type SeasonMileageSort =
+  | { column: "athlete"; direction: "asc" | "desc" }
+  | { column: "week"; weekISO: string; direction: "asc" | "desc" };
 type AthleteRangeMode = "season" | "custom";
 type TrainingGroupFilterOption = {
   id: string;
@@ -351,6 +354,24 @@ function hasSeasonMileageValue(value: Range | number | null | undefined): boolea
 
 function formatSeasonMileageValue(value: Range | number, unit: DistanceUnit): string {
   return formatCoachMileageTotalForDisplay(normalizeSeasonMileageRange(value), unit, "");
+}
+
+function getSeasonMileageSortMax(value: Range | number | null | undefined): number | null {
+  const range = normalizeSeasonMileageRange(value);
+  if (!hasSeasonMileageValue(range)) return null;
+  return Math.max(range.min, range.max);
+}
+
+function getSeasonMileageSortIndicator(
+  sort: SeasonMileageSort,
+  column: "athlete" | "week",
+  weekISO?: string
+): string {
+  const active =
+    sort.column === column &&
+    (column === "athlete" || (sort.column === "week" && sort.weekISO === weekISO));
+  if (!active) return "";
+  return sort.direction === "asc" ? " ↑" : " ↓";
 }
 
 function MiniPill({
@@ -714,6 +735,7 @@ export default function CoachMileageTab() {
   const [seasonMileageWorkoutRows, setSeasonMileageWorkoutRows] = useState<TeamWorkoutRow[]>([]);
   const [seasonMileageFeedbackEntries, setSeasonMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
   const [seasonMileageDailyLogEntries, setSeasonMileageDailyLogEntries] = useState<AthleteDailyLogEntry[]>([]);
+  const [seasonMileageSort, setSeasonMileageSort] = useState<SeasonMileageSort>({ column: "athlete", direction: "asc" });
   const [trainingVisibilityOpen, setTrainingVisibilityOpen] = useState(false);
   const [trainingVisibilityAction, setTrainingVisibilityAction] = useState<TrainingVisibilityAction>("publish");
   const [trainingVisibilityContent, setTrainingVisibilityContent] = useState<TrainingVisibilityContent>("mileage");
@@ -1401,6 +1423,13 @@ export default function CoachMileageTab() {
     }
     return out;
   }, [seasonMileageRange.endISO, seasonMileageRange.startISO, weekStartsOn]);
+
+  const seasonMileageTableRange = useMemo(() => {
+    const firstWeekStart = seasonMileageWeekStarts[0] ?? "";
+    const lastWeekStart = seasonMileageWeekStarts[seasonMileageWeekStarts.length - 1] ?? "";
+    if (!firstWeekStart || !lastWeekStart) return { startISO: "", endISO: "" };
+    return { startISO: firstWeekStart, endISO: addDaysISO(lastWeekStart, 6) };
+  }, [seasonMileageWeekStarts]);
 
   const resolveSelectedSeasonWindowForAthlete = useCallback(
     (athleteIdRaw: string | null | undefined) => {
@@ -2144,7 +2173,7 @@ export default function CoachMileageTab() {
   );
 
   const loadSeasonMileageData = useCallback(async () => {
-    if (!seasonMileageRange.startISO || !seasonMileageRange.endISO) {
+    if (!seasonMileageTableRange.startISO || !seasonMileageTableRange.endISO) {
       setSeasonMileageWorkoutRows([]);
       setSeasonMileageFeedbackEntries([]);
       setSeasonMileageDailyLogEntries([]);
@@ -2157,7 +2186,7 @@ export default function CoachMileageTab() {
     setSeasonMileageError(null);
     try {
       const [workoutRows, mileageEntries, dailyLogEntries] = await Promise.all([
-        listTeamWorkoutsInRange(seasonMileageRange.startISO, seasonMileageRange.endISO),
+        listTeamWorkoutsInRange(seasonMileageTableRange.startISO, seasonMileageTableRange.endISO),
         loadMileageFeedback(),
         loadAthleteDailyLogEntries(),
       ]);
@@ -2165,7 +2194,7 @@ export default function CoachMileageTab() {
       setSeasonMileageFeedbackEntries(Array.isArray(mileageEntries) ? mileageEntries : []);
       setSeasonMileageDailyLogEntries(Array.isArray(dailyLogEntries) ? dailyLogEntries : []);
     } catch (error: any) {
-      const message = String(error?.message ?? error ?? "Could not load range mileage.");
+      const message = String(error?.message ?? error ?? "Could not load season view mileage.");
       setSeasonMileageWorkoutRows([]);
       setSeasonMileageFeedbackEntries([]);
       setSeasonMileageDailyLogEntries([]);
@@ -2173,7 +2202,7 @@ export default function CoachMileageTab() {
     } finally {
       setSeasonMileageLoading(false);
     }
-  }, [seasonMileageRange.endISO, seasonMileageRange.startISO]);
+  }, [seasonMileageTableRange.endISO, seasonMileageTableRange.startISO]);
 
   const loadSeasonMileagePlannedData = useCallback(async (force = false) => {
     if (seasonMileageWeekStarts.length === 0) {
@@ -3302,11 +3331,19 @@ export default function CoachMileageTab() {
       const athleteId = String(athlete.id ?? "").trim();
       if (!athleteId) continue;
       const resolved = resolveSeasonMileageWindowForAthlete(athleteId);
-      const startISO = String(resolved?.start_date ?? seasonMileageRange.startISO).trim();
-      const endISO = String(resolved?.end_date ?? seasonMileageRange.endISO).trim();
+      const resolvedStartISO = String(resolved?.start_date ?? seasonMileageRange.startISO).trim();
+      const resolvedEndISO = String(resolved?.end_date ?? seasonMileageRange.endISO).trim();
+      const startISO =
+        isValidISODate(resolvedStartISO) && resolvedStartISO <= seasonMileageRange.startISO
+          ? seasonMileageTableRange.startISO
+          : resolvedStartISO;
+      const endISO =
+        isValidISODate(resolvedEndISO) && resolvedEndISO >= seasonMileageRange.endISO
+          ? seasonMileageTableRange.endISO
+          : resolvedEndISO;
       windowByAthleteId.set(athleteId, {
-        startISO: isValidISODate(startISO) ? startISO : seasonMileageRange.startISO,
-        endISO: isValidISODate(endISO) ? endISO : seasonMileageRange.endISO,
+        startISO: isValidISODate(startISO) ? startISO : seasonMileageTableRange.startISO,
+        endISO: isValidISODate(endISO) ? endISO : seasonMileageTableRange.endISO,
       });
     }
 
@@ -3329,7 +3366,7 @@ export default function CoachMileageTab() {
     const addMiles = (athleteId: string, dateISO: string, milesRaw: unknown) => {
       if (!athleteIds.has(athleteId)) return;
       if (!isValidISODate(dateISO)) return;
-      if (dateISO < seasonMileageRange.startISO || dateISO > seasonMileageRange.endISO) return;
+      if (dateISO < seasonMileageTableRange.startISO || dateISO > seasonMileageTableRange.endISO) return;
       if (!isDateAllowedForAthlete(athleteId, dateISO)) return;
       const miles = parseNumericLike(milesRaw);
       if (miles == null || !Number.isFinite(miles) || miles <= 0) return;
@@ -3347,7 +3384,7 @@ export default function CoachMileageTab() {
           const dayIdx = Number(row?.day_idx);
           if (!athleteId || !Number.isInteger(dayIdx) || dayIdx < 0 || dayIdx > 6) continue;
           const dateISO = addDaysISO(weekISO, dayIdx);
-          if (dateISO < seasonMileageRange.startISO || dateISO > seasonMileageRange.endISO) continue;
+          if (dateISO < seasonMileageTableRange.startISO || dateISO > seasonMileageTableRange.endISO) continue;
           if (!isDateAllowedForAthlete(athleteId, dateISO)) continue;
           const pace = resolveAthletePaceSeconds(athleteId, athletePaceOverrides, paceSecPerMile);
           addRangeTotal(athleteId, weekISO, toRange((row?.value ?? null) as MileageValue | null, pace));
@@ -3417,11 +3454,59 @@ export default function CoachMileageTab() {
     seasonMileageMetric,
     seasonMileageRange.endISO,
     seasonMileageRange.startISO,
+    seasonMileageTableRange.endISO,
+    seasonMileageTableRange.startISO,
     selectedSeason?.id,
     seasonMileageWeekStarts,
     seasonMileageWorkoutRows,
     weekStartsOn,
   ]);
+
+  const sortedSeasonMileageTableRows = useMemo(() => {
+    const rows = [...seasonMileageTableRows];
+    rows.sort((a, b) => {
+      if (seasonMileageSort.column === "athlete") {
+        const nameCompare = String(a.athleteName ?? "").localeCompare(String(b.athleteName ?? ""), undefined, {
+          sensitivity: "base",
+        });
+        if (nameCompare !== 0) return seasonMileageSort.direction === "asc" ? nameCompare : -nameCompare;
+        return String(a.athleteId ?? "").localeCompare(String(b.athleteId ?? ""));
+      }
+
+      const aValue = getSeasonMileageSortMax(a.weeklyTotals.get(seasonMileageSort.weekISO));
+      const bValue = getSeasonMileageSortMax(b.weeklyTotals.get(seasonMileageSort.weekISO));
+      const aMissing = aValue == null;
+      const bMissing = bValue == null;
+      if (aMissing && bMissing) {
+        return String(a.athleteName ?? "").localeCompare(String(b.athleteName ?? ""), undefined, { sensitivity: "base" });
+      }
+      if (aMissing) return 1;
+      if (bMissing) return -1;
+      if (aValue !== bValue) {
+        return seasonMileageSort.direction === "asc" ? aValue - bValue : bValue - aValue;
+      }
+      return String(a.athleteName ?? "").localeCompare(String(b.athleteName ?? ""), undefined, { sensitivity: "base" });
+    });
+    return rows;
+  }, [seasonMileageSort, seasonMileageTableRows]);
+
+  const toggleSeasonMileageNameSort = useCallback(() => {
+    setSeasonMileageSort((prev) =>
+      prev.column === "athlete"
+        ? { column: "athlete", direction: prev.direction === "asc" ? "desc" : "asc" }
+        : { column: "athlete", direction: "asc" }
+    );
+  }, []);
+
+  const toggleSeasonMileageWeekSort = useCallback((weekISO: string) => {
+    const normalizedWeekISO = String(weekISO ?? "").trim();
+    if (!normalizedWeekISO) return;
+    setSeasonMileageSort((prev) =>
+      prev.column === "week" && prev.weekISO === normalizedWeekISO
+        ? { column: "week", weekISO: normalizedWeekISO, direction: prev.direction === "desc" ? "asc" : "desc" }
+        : { column: "week", weekISO: normalizedWeekISO, direction: "desc" }
+    );
+  }, []);
 
   const seasonMileageTeamTotalsByWeek = useMemo(() => {
     const map = new Map<string, Range>();
@@ -4175,7 +4260,11 @@ export default function CoachMileageTab() {
               ...(showStickyAthleteCol ? ({ position: "sticky", left: 0, zIndex: 100 } as any) : null),
             }}
           >
-            <Text style={{ fontWeight: "900", color: headerStrongTextColor, fontSize: fontHeader }}>Athlete</Text>
+            <Pressable onPress={toggleSeasonMileageNameSort} style={{ alignSelf: "flex-start" }}>
+              <Text style={{ fontWeight: "900", color: headerStrongTextColor, fontSize: fontHeader }}>
+                Athlete{getSeasonMileageSortIndicator(seasonMileageSort, "athlete")}
+              </Text>
+            </Pressable>
             <Text style={{ marginTop: 2, fontSize: fontTiny, fontWeight: "800", color: colors.mutedText }}>
               {seasonMileageMetric === "planned" ? "Planned miles" : "Submitted miles"}
             </Text>
@@ -4193,9 +4282,12 @@ export default function CoachMileageTab() {
                 backgroundColor: stickyHeaderRow1Bg,
               }}
             >
-              <Text style={{ fontWeight: "900", color: headerStrongTextColor, fontSize: 10 }} numberOfLines={2}>
-                {formatSeasonWeekHeaderLabel(weekISO)}
-              </Text>
+              <Pressable onPress={() => toggleSeasonMileageWeekSort(weekISO)} style={{ alignSelf: "stretch" }}>
+                <Text style={{ fontWeight: "900", color: headerStrongTextColor, fontSize: 10 }} numberOfLines={2}>
+                  {formatSeasonWeekHeaderLabel(weekISO)}
+                  {getSeasonMileageSortIndicator(seasonMileageSort, "week", weekISO)}
+                </Text>
+              </Pressable>
             </View>
           ))}
           <View
@@ -4229,7 +4321,7 @@ export default function CoachMileageTab() {
           </View>
         ) : (
           <>
-            {seasonMileageTableRows.map((row, rowIndex) => {
+            {sortedSeasonMileageTableRows.map((row, rowIndex) => {
               const rowBg = rowIndex % 2 === 0 ? colors.card : colors.bg;
               return (
                 <View
@@ -4422,7 +4514,7 @@ export default function CoachMileageTab() {
                 onPress={() => setViewMode("athleteMultiWeek")}
               />
               <Button
-                title="Range Mileage"
+                title="Season View"
                 variant={viewMode === "seasonMileage" ? "primary" : "secondary"}
                 onPress={() => setViewMode("seasonMileage")}
               />
@@ -4744,45 +4836,81 @@ export default function CoachMileageTab() {
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <View style={{ minWidth: 142, gap: 3 }}>
                     <Text style={{ fontSize: 10, fontWeight: "900", color: colors.mutedText }}>Start date</Text>
-                    <TextInput
-                      value={mileageRangeStartISO}
-                      onChangeText={updateMileageRangeStart}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      placeholder="YYYY-MM-DD"
-                      style={{
-                        height: 34,
-                        borderWidth: 1,
-                        borderColor: colors.border,
-                        borderRadius: 8,
-                        paddingHorizontal: 10,
-                        color: colors.text,
-                        backgroundColor: colors.bg,
-                        fontSize: 12,
-                        fontWeight: "700",
-                      }}
-                    />
+                    {Platform.OS === "web" ? (
+                      <input
+                        type="date"
+                        value={mileageRangeStartISO}
+                        onChange={(event) => updateMileageRangeStart(String((event.target as HTMLInputElement)?.value ?? "").trim())}
+                        style={{
+                          height: 34,
+                          border: `1px solid ${colors.border}`,
+                          borderRadius: 8,
+                          padding: "0 10px",
+                          color: colors.text,
+                          background: colors.bg,
+                          fontSize: 12,
+                          fontWeight: 700,
+                        }}
+                      />
+                    ) : (
+                      <TextInput
+                        value={mileageRangeStartISO}
+                        onChangeText={updateMileageRangeStart}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        placeholder="YYYY-MM-DD"
+                        style={{
+                          height: 34,
+                          borderWidth: 1,
+                          borderColor: colors.border,
+                          borderRadius: 8,
+                          paddingHorizontal: 10,
+                          color: colors.text,
+                          backgroundColor: colors.bg,
+                          fontSize: 12,
+                          fontWeight: "700",
+                        }}
+                      />
+                    )}
                   </View>
                   <View style={{ minWidth: 142, gap: 3 }}>
                     <Text style={{ fontSize: 10, fontWeight: "900", color: colors.mutedText }}>End date</Text>
-                    <TextInput
-                      value={mileageRangeEndISO}
-                      onChangeText={updateMileageRangeEnd}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      placeholder="YYYY-MM-DD"
-                      style={{
-                        height: 34,
-                        borderWidth: 1,
-                        borderColor: colors.border,
-                        borderRadius: 8,
-                        paddingHorizontal: 10,
-                        color: colors.text,
-                        backgroundColor: colors.bg,
-                        fontSize: 12,
-                        fontWeight: "700",
-                      }}
-                    />
+                    {Platform.OS === "web" ? (
+                      <input
+                        type="date"
+                        value={mileageRangeEndISO}
+                        onChange={(event) => updateMileageRangeEnd(String((event.target as HTMLInputElement)?.value ?? "").trim())}
+                        style={{
+                          height: 34,
+                          border: `1px solid ${colors.border}`,
+                          borderRadius: 8,
+                          padding: "0 10px",
+                          color: colors.text,
+                          background: colors.bg,
+                          fontSize: 12,
+                          fontWeight: 700,
+                        }}
+                      />
+                    ) : (
+                      <TextInput
+                        value={mileageRangeEndISO}
+                        onChangeText={updateMileageRangeEnd}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        placeholder="YYYY-MM-DD"
+                        style={{
+                          height: 34,
+                          borderWidth: 1,
+                          borderColor: colors.border,
+                          borderRadius: 8,
+                          paddingHorizontal: 10,
+                          color: colors.text,
+                          backgroundColor: colors.bg,
+                          fontSize: 12,
+                          fontWeight: "700",
+                        }}
+                      />
+                    )}
                   </View>
                   <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>
                     Range: {athleteMultiVisibleRangeLabel}
@@ -4931,45 +5059,81 @@ export default function CoachMileageTab() {
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <View style={{ minWidth: 142, gap: 3 }}>
                     <Text style={{ fontSize: 10, fontWeight: "900", color: colors.mutedText }}>Start date</Text>
-                    <TextInput
-                      value={mileageRangeStartISO}
-                      onChangeText={updateMileageRangeStart}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      placeholder="YYYY-MM-DD"
-                      style={{
-                        height: 34,
-                        borderWidth: 1,
-                        borderColor: colors.border,
-                        borderRadius: 8,
-                        paddingHorizontal: 10,
-                        color: colors.text,
-                        backgroundColor: colors.bg,
-                        fontSize: 12,
-                        fontWeight: "700",
-                      }}
-                    />
+                    {Platform.OS === "web" ? (
+                      <input
+                        type="date"
+                        value={mileageRangeStartISO}
+                        onChange={(event) => updateMileageRangeStart(String((event.target as HTMLInputElement)?.value ?? "").trim())}
+                        style={{
+                          height: 34,
+                          border: `1px solid ${colors.border}`,
+                          borderRadius: 8,
+                          padding: "0 10px",
+                          color: colors.text,
+                          background: colors.bg,
+                          fontSize: 12,
+                          fontWeight: 700,
+                        }}
+                      />
+                    ) : (
+                      <TextInput
+                        value={mileageRangeStartISO}
+                        onChangeText={updateMileageRangeStart}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        placeholder="YYYY-MM-DD"
+                        style={{
+                          height: 34,
+                          borderWidth: 1,
+                          borderColor: colors.border,
+                          borderRadius: 8,
+                          paddingHorizontal: 10,
+                          color: colors.text,
+                          backgroundColor: colors.bg,
+                          fontSize: 12,
+                          fontWeight: "700",
+                        }}
+                      />
+                    )}
                   </View>
                   <View style={{ minWidth: 142, gap: 3 }}>
                     <Text style={{ fontSize: 10, fontWeight: "900", color: colors.mutedText }}>End date</Text>
-                    <TextInput
-                      value={mileageRangeEndISO}
-                      onChangeText={updateMileageRangeEnd}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      placeholder="YYYY-MM-DD"
-                      style={{
-                        height: 34,
-                        borderWidth: 1,
-                        borderColor: colors.border,
-                        borderRadius: 8,
-                        paddingHorizontal: 10,
-                        color: colors.text,
-                        backgroundColor: colors.bg,
-                        fontSize: 12,
-                        fontWeight: "700",
-                      }}
-                    />
+                    {Platform.OS === "web" ? (
+                      <input
+                        type="date"
+                        value={mileageRangeEndISO}
+                        onChange={(event) => updateMileageRangeEnd(String((event.target as HTMLInputElement)?.value ?? "").trim())}
+                        style={{
+                          height: 34,
+                          border: `1px solid ${colors.border}`,
+                          borderRadius: 8,
+                          padding: "0 10px",
+                          color: colors.text,
+                          background: colors.bg,
+                          fontSize: 12,
+                          fontWeight: 700,
+                        }}
+                      />
+                    ) : (
+                      <TextInput
+                        value={mileageRangeEndISO}
+                        onChangeText={updateMileageRangeEnd}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        placeholder="YYYY-MM-DD"
+                        style={{
+                          height: 34,
+                          borderWidth: 1,
+                          borderColor: colors.border,
+                          borderRadius: 8,
+                          paddingHorizontal: 10,
+                          color: colors.text,
+                          backgroundColor: colors.bg,
+                          fontSize: 12,
+                          fontWeight: "700",
+                        }}
+                      />
+                    )}
                   </View>
                   <Text style={{ fontSize: 11, fontWeight: "800", color: colors.mutedText }}>Mileage type</Text>
                   <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
@@ -5164,7 +5328,7 @@ export default function CoachMileageTab() {
                 }}
               >
                 <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText }}>
-                  Range Mileage: {seasonMileageActiveLoading ? "Loading..." : `${seasonMileageTableRows.length} athlete row${seasonMileageTableRows.length === 1 ? "" : "s"}`}
+                  Season View: {seasonMileageActiveLoading ? "Loading..." : `${seasonMileageTableRows.length} athlete row${seasonMileageTableRows.length === 1 ? "" : "s"}`}
                 </Text>
                 <Text style={{ fontSize: 10, fontWeight: "700", color: colors.mutedText }}>
                   Showing {seasonMileageMetricLabel.toLowerCase()} mileage
