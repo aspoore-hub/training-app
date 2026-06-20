@@ -21,7 +21,6 @@ import {
 import { CategoriesContent } from "./categories";
 import { formatPace, loadPaceSecondsPerMile, parsePace, savePaceSecondsPerMile } from "../../../lib/pace";
 import { loadJSON } from "../../../lib/storage";
-import type { WorkoutCategory } from "../../../lib/types";
 import {
   convertDistance,
   convertPaceSecondsPerUnit,
@@ -51,13 +50,6 @@ import {
 // use loadPracticeTimeDefaults/savePracticeTimeDefaults and do not bind
 // this editor directly to coachSettings.defaultSessionTimes.
 import { normalizeWorkoutTimeInput } from "../../../lib/time";
-import {
-  createAuxiliaryRoutine,
-  deleteAuxiliaryRoutine,
-  loadAuxiliaryRoutines,
-  updateAuxiliaryRoutine,
-  type AuxiliaryRoutine,
-} from "../../../lib/auxiliaryRoutines";
 import {
   COACH_SETTINGS_SAVE_SOURCE,
   getLastCoachSettingsLoadSource,
@@ -151,7 +143,6 @@ export default function CoachSettingsTab() {
   const [lastCoachInviteToken, setLastCoachInviteToken] = useState("");
 
   const [workoutTypesOpen, setWorkoutTypesOpen] = useState(false);
-  const [categoryAutoRoutinesOpen, setCategoryAutoRoutinesOpen] = useState(false);
   const [customGroupsOpen, setCustomGroupsOpen] = useState(false);
   const [seasonsOpen, setSeasonsOpen] = useState(false);
   const [individualPaceOpen, setIndividualPaceOpen] = useState(false);
@@ -160,8 +151,6 @@ export default function CoachSettingsTab() {
   const [paceMenuOpen, setPaceMenuOpen] = useState(false);
 
   const [roster, setRoster] = useState<TeamRosterAthlete[]>([]);
-  const [categories, setCategories] = useState<WorkoutCategory[]>([]);
-  const [auxiliaryRoutines, setAuxiliaryRoutines] = useState<AuxiliaryRoutine[]>([]);
   const teamStore = teamDataStore.use();
   const [trainingGroups, setTrainingGroups] = useState<TeamTrainingGroup[]>([]);
   const [teamSeasons, setTeamSeasons] = useState<TeamSeason[]>([]);
@@ -179,22 +168,6 @@ export default function CoachSettingsTab() {
   const [seasonStartDateText, setSeasonStartDateText] = useState("");
   const [seasonEndDateText, setSeasonEndDateText] = useState("");
   const [seasonColorText, setSeasonColorText] = useState("");
-  const [selectedAuxiliaryRoutineId, setSelectedAuxiliaryRoutineId] = useState<string | null>(null);
-  const [auxiliaryTitleDraft, setAuxiliaryTitleDraft] = useState("");
-  const [auxiliaryDetailsDraft, setAuxiliaryDetailsDraft] = useState("");
-  const [auxiliaryPreCategoryNamesDraft, setAuxiliaryPreCategoryNamesDraft] = useState<string[]>([]);
-  const [auxiliaryPostCategoryNamesDraft, setAuxiliaryPostCategoryNamesDraft] = useState<string[]>([]);
-  const [auxiliaryAutosaveStatus, setAuxiliaryAutosaveStatus] = useState<"idle" | "dirty" | "saving" | "saved" | "error">("idle");
-  const [auxiliaryDeleteBusy, setAuxiliaryDeleteBusy] = useState(false);
-  const lastAuxiliarySavedSnapshotRef = React.useRef("");
-  const auxiliarySaveSeqRef = React.useRef(0);
-  const auxiliaryCommitInFlightRef = React.useRef<Promise<boolean> | null>(null);
-  const selectedAuxiliaryRoutineIdRef = React.useRef<string | null>(null);
-  const auxiliaryTitleDraftRef = React.useRef("");
-  const auxiliaryDetailsDraftRef = React.useRef("");
-  const auxiliaryPreCategoryNamesDraftRef = React.useRef<string[]>([]);
-  const auxiliaryPostCategoryNamesDraftRef = React.useRef<string[]>([]);
-  const currentTeamRoleRef = React.useRef<TeamRole | null>(null);
 
   const loadStaffAccess = useCallback(async () => {
     const role = await getCurrentTeamRole();
@@ -217,13 +190,12 @@ export default function CoachSettingsTab() {
   const loadSettingsScreenData = useCallback(
     async (isActive?: () => boolean) => {
       try {
-        const [paceSec, coreSettings, loadedRoster, loadedOverrides, weekStartResult, loadedRoutines, feedbackFlagSettings] = await Promise.all([
+        const [paceSec, coreSettings, loadedRoster, loadedOverrides, weekStartResult, feedbackFlagSettings] = await Promise.all([
           loadPaceSecondsPerMile(),
           loadCoreCoachSettings(),
           getSortableRoster(),
           loadAthletePaceOverrides(),
           loadWeekStartSetting(),
-          loadAuxiliaryRoutines(),
           loadFeedbackFlagSettings(),
         ]);
         await Promise.all([
@@ -251,8 +223,6 @@ export default function CoachSettingsTab() {
         });
         setWeekStartSetting(normalizedWeekStart);
         setRoster(loadedRoster);
-        setCategories(coreSettings.categories ?? []);
-        setAuxiliaryRoutines(loadedRoutines);
         setFeedbackFlagsEnabled(!!feedbackFlagSettings.enabled);
         setFeedbackWarningMode(feedbackFlagSettings.mode ?? "all");
         setFeedbackStartDateText(String(feedbackFlagSettings.startDateISO ?? ""));
@@ -292,7 +262,6 @@ export default function CoachSettingsTab() {
       void loadSettingsScreenData(() => !cancelled);
       return () => {
         cancelled = true;
-        void commitAuxiliaryRoutineDraft("screen-blur");
       };
     }, [loadSettingsScreenData])
   );
@@ -320,24 +289,6 @@ export default function CoachSettingsTab() {
   useEffect(() => {
     setTeamSeasons(Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []);
   }, [teamStore.teamSeasons]);
-
-  useEffect(() => {
-    currentTeamRoleRef.current = currentTeamRole;
-  }, [currentTeamRole]);
-
-  useEffect(() => {
-    selectedAuxiliaryRoutineIdRef.current = selectedAuxiliaryRoutineId;
-    auxiliaryTitleDraftRef.current = auxiliaryTitleDraft;
-    auxiliaryDetailsDraftRef.current = auxiliaryDetailsDraft;
-    auxiliaryPreCategoryNamesDraftRef.current = auxiliaryPreCategoryNamesDraft;
-    auxiliaryPostCategoryNamesDraftRef.current = auxiliaryPostCategoryNamesDraft;
-  }, [
-    selectedAuxiliaryRoutineId,
-    auxiliaryTitleDraft,
-    auxiliaryDetailsDraft,
-    auxiliaryPreCategoryNamesDraft,
-    auxiliaryPostCategoryNamesDraft,
-  ]);
 
   const sortedGroups = useMemo(() => {
     return [...trainingGroups].sort((a, b) => a.name.localeCompare(b.name));
@@ -369,306 +320,12 @@ export default function CoachSettingsTab() {
     return counts;
   }, [teamStore.athleteSeasonOverrides]);
 
-  const sortedCategories = useMemo(
-    () => [...categories].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
-    [categories]
-  );
-
-  const sortedAuxiliaryRoutines = useMemo(
-    () => [...auxiliaryRoutines].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? ""))),
-    [auxiliaryRoutines]
-  );
-
-  const selectedAuxiliaryRoutine = useMemo(
-    () => sortedAuxiliaryRoutines.find((routine) => routine.id === selectedAuxiliaryRoutineId) ?? null,
-    [sortedAuxiliaryRoutines, selectedAuxiliaryRoutineId]
-  );
-
-  function buildAuxiliaryDraftSnapshotFrom(
-    id: string | null,
-    title: string,
-    details: string,
-    preCategoryNames: string[],
-    postCategoryNames: string[]
-  ) {
-    return JSON.stringify({
-      id,
-      title: String(title ?? "").trim(),
-      details: String(details ?? "").trim(),
-      pre: [...preCategoryNames].sort(),
-      post: [...postCategoryNames].sort(),
-    });
-  }
-
-  function buildAuxiliaryDraftSnapshot() {
-    return buildAuxiliaryDraftSnapshotFrom(
-      selectedAuxiliaryRoutineId,
-      auxiliaryTitleDraft,
-      auxiliaryDetailsDraft,
-      auxiliaryPreCategoryNamesDraft,
-      auxiliaryPostCategoryNamesDraft
-    );
-  }
-
-  function loadAuxiliaryRoutineIntoDrafts(routine: AuxiliaryRoutine | null) {
-    if (!routine) {
-      setAuxiliaryTitleDraft("");
-      setAuxiliaryDetailsDraft("");
-      setAuxiliaryPreCategoryNamesDraft([]);
-      setAuxiliaryPostCategoryNamesDraft([]);
-      lastAuxiliarySavedSnapshotRef.current = "";
-      setAuxiliaryAutosaveStatus("idle");
-      return;
-    }
-    setAuxiliaryTitleDraft(String(routine.title ?? ""));
-    setAuxiliaryDetailsDraft(String(routine.details ?? ""));
-    setAuxiliaryPreCategoryNamesDraft(Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : []);
-    setAuxiliaryPostCategoryNamesDraft(Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : []);
-
-    lastAuxiliarySavedSnapshotRef.current = JSON.stringify({
-      id: routine.id,
-      title: String(routine.title ?? "").trim(),
-      details: String(routine.details ?? "").trim(),
-      pre: [...(Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : [])].sort(),
-      post: [...(Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : [])].sort(),
-    });
-
-    setAuxiliaryAutosaveStatus("idle");
-  }
-
-  function setSelectedAuxiliaryRoutine(routine: AuxiliaryRoutine | null) {
-    const nextId = routine?.id ?? null;
-    selectedAuxiliaryRoutineIdRef.current = nextId;
-    setSelectedAuxiliaryRoutineId(nextId);
-    loadAuxiliaryRoutineIntoDrafts(routine);
-  }
-
-  async function selectAuxiliaryRoutineById(routineId: string | null) {
-    if (routineId === selectedAuxiliaryRoutineIdRef.current) return;
-    const committed = await commitAuxiliaryRoutineDraft("routine-selection");
-    if (!committed) return;
-    setSelectedAuxiliaryRoutineId(routineId);
-    const routine = sortedAuxiliaryRoutines.find((item) => item.id === routineId) ?? null;
-    loadAuxiliaryRoutineIntoDrafts(routine);
-  }
-
-  async function reloadAuxiliaryRoutines(preferredRoutineId?: string | null) {
-    const loaded = await loadAuxiliaryRoutines();
-    const sorted = [...loaded].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
-    setAuxiliaryRoutines(sorted);
-    const targetId = preferredRoutineId ?? selectedAuxiliaryRoutineId;
-    const selected = sorted.find((routine) => routine.id === targetId) ?? null;
-    if (selected) {
-      setSelectedAuxiliaryRoutineId(selected.id);
-      loadAuxiliaryRoutineIntoDrafts(selected);
-      return;
-    }
-    setSelectedAuxiliaryRoutineId(null);
-    loadAuxiliaryRoutineIntoDrafts(null);
-  }
-
-  function toggleDraftCategory(
-    setList: React.Dispatch<React.SetStateAction<string[]>>,
-    categoryName: string
-  ) {
-    const key = String(categoryName ?? "").trim();
-    if (!key) return;
-
-    setList((prev) =>
-      prev.includes(key) ? prev.filter((name) => name !== key) : [...prev, key]
-    );
-  }
-
-  async function createNewAuxiliaryRoutine() {
-    const committed = await commitAuxiliaryRoutineDraft("create-new-routine");
-    if (!committed) return;
-    const created = await createAuxiliaryRoutine({
-      title: "New Routine",
-      details: "",
-      preCategoryNames: [],
-      postCategoryNames: [],
-    });
-    await reloadAuxiliaryRoutines(created.id);
-    setAuxiliaryAutosaveStatus("idle");
-    setCategoryAutoRoutinesOpen(true);
-  }
-
-  async function toggleAuxiliaryRoutinesSection() {
-    if (categoryAutoRoutinesOpen) {
-      const committed = await commitAuxiliaryRoutineDraft("aux-section-collapse");
-      if (!committed) return;
-      setCategoryAutoRoutinesOpen(false);
-      return;
-    }
-    setCategoryAutoRoutinesOpen(true);
-  }
-
-  async function toggleSettingsSection(
-    reason: string,
+  function toggleSettingsSection(
+    _reason: string,
     setter: React.Dispatch<React.SetStateAction<boolean>>
   ) {
-    const committed = await commitAuxiliaryRoutineDraft(reason);
-    if (!committed) return;
     setter((prev) => !prev);
   }
-
-  async function commitAuxiliaryRoutineDraft(reason: string, options?: { alertOnTitleRequired?: boolean }): Promise<boolean> {
-    if (!canManageCoaches(currentTeamRoleRef.current) && normalizeTeamRole(currentTeamRoleRef.current) === "viewer") {
-      return true;
-    }
-
-    if (auxiliaryCommitInFlightRef.current) {
-      await auxiliaryCommitInFlightRef.current.catch(() => false);
-    }
-
-    const routineId = selectedAuxiliaryRoutineIdRef.current;
-    if (!routineId) return true;
-
-    const titleDraft = auxiliaryTitleDraftRef.current;
-    const detailsDraft = auxiliaryDetailsDraftRef.current;
-    const preDraft = auxiliaryPreCategoryNamesDraftRef.current;
-    const postDraft = auxiliaryPostCategoryNamesDraftRef.current;
-    const savedSnapshot = buildAuxiliaryDraftSnapshotFrom(routineId, titleDraft, detailsDraft, preDraft, postDraft);
-    if (savedSnapshot === lastAuxiliarySavedSnapshotRef.current) return true;
-
-    const title = String(titleDraft ?? "").trim();
-    if (!title) {
-      setAuxiliaryAutosaveStatus("error");
-      if (options?.alertOnTitleRequired) {
-        Alert.alert("Title required", "Enter a routine title.");
-      }
-      return false;
-    }
-
-    const saveSeq = ++auxiliarySaveSeqRef.current;
-    const pre = Array.from(new Set(preDraft.map((name) => String(name ?? "").trim()).filter(Boolean)));
-    const post = Array.from(new Set(postDraft.map((name) => String(name ?? "").trim()).filter(Boolean)));
-    const details = String(detailsDraft ?? "").trim();
-
-    const commitPromise = (async () => {
-      setAuxiliaryAutosaveStatus("saving");
-      await updateAuxiliaryRoutine(routineId, {
-        title,
-        details,
-        preCategoryNames: pre,
-        postCategoryNames: post,
-        categoryNames: Array.from(new Set([...pre, ...post])),
-      });
-
-      const loaded = await loadAuxiliaryRoutines();
-      const sorted = [...loaded].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
-      setAuxiliaryRoutines(sorted);
-
-      const latestDraftSnapshot = buildAuxiliaryDraftSnapshotFrom(
-        selectedAuxiliaryRoutineIdRef.current,
-        auxiliaryTitleDraftRef.current,
-        auxiliaryDetailsDraftRef.current,
-        auxiliaryPreCategoryNamesDraftRef.current,
-        auxiliaryPostCategoryNamesDraftRef.current
-      );
-      const stillEditingSameRoutine = selectedAuxiliaryRoutineIdRef.current === routineId;
-      const localDraftUnchangedSinceSave = latestDraftSnapshot === savedSnapshot;
-      if (saveSeq === auxiliarySaveSeqRef.current && stillEditingSameRoutine && localDraftUnchangedSinceSave) {
-        lastAuxiliarySavedSnapshotRef.current = savedSnapshot;
-        setAuxiliaryAutosaveStatus("saved");
-      } else if (stillEditingSameRoutine) {
-        setAuxiliaryAutosaveStatus("dirty");
-      }
-      return true;
-    })();
-
-    auxiliaryCommitInFlightRef.current = commitPromise;
-    try {
-      return await commitPromise;
-    } catch (error: any) {
-      console.error("[settings-aux] save failed", { reason, error });
-      setAuxiliaryAutosaveStatus("error");
-      Alert.alert("Routine save failed", "Couldn't save routine. Your draft is still here.");
-      return false;
-    } finally {
-      if (auxiliaryCommitInFlightRef.current === commitPromise) {
-        auxiliaryCommitInFlightRef.current = null;
-      }
-    }
-  }
-
-  async function saveSelectedAuxiliaryRoutine() {
-    if (!selectedAuxiliaryRoutineIdRef.current) {
-      Alert.alert("Select a routine", "Choose or create a routine to edit.");
-      return;
-    }
-    await commitAuxiliaryRoutineDraft("explicit-save", { alertOnTitleRequired: true });
-  }
-
-  function confirmDeleteSelectedAuxiliaryRoutine() {
-    if (auxiliaryDeleteBusy) return;
-    if (!selectedAuxiliaryRoutineId) {
-      Alert.alert("Select a routine", "Choose a routine to delete.");
-      return;
-    }
-
-    const routineId = selectedAuxiliaryRoutineId;
-    const routine = sortedAuxiliaryRoutines.find((item) => item.id === routineId) ?? null;
-    if (!routine) {
-      Alert.alert("Routine not found", "Refresh Settings and try again.");
-      void reloadAuxiliaryRoutines(null);
-      return;
-    }
-
-    const runDelete = async () => {
-      const previous = [...sortedAuxiliaryRoutines];
-      const index = previous.findIndex((item) => item.id === routineId);
-      const next = previous.filter((item) => item.id !== routineId);
-      const fallback = next[index] ?? next[index - 1] ?? next[0] ?? null;
-
-      setAuxiliaryDeleteBusy(true);
-      setAuxiliaryRoutines(next);
-      setSelectedAuxiliaryRoutine(fallback);
-
-      try {
-        await deleteAuxiliaryRoutine(routineId, { requireCloudSync: true });
-        const refreshed = await loadAuxiliaryRoutines();
-        const sorted = [...refreshed].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
-        setAuxiliaryRoutines(sorted);
-        const selected = fallback ? sorted.find((item) => item.id === fallback.id) ?? sorted[0] ?? null : sorted[0] ?? null;
-        setSelectedAuxiliaryRoutine(selected);
-      } catch (error: any) {
-        const message = getErrorMessage(error);
-        console.error("[settings-aux] delete failed", { routineId, error });
-        setAuxiliaryRoutines(previous);
-        setSelectedAuxiliaryRoutine(routine);
-        Alert.alert("Routine delete failed", message || "Couldn't delete routine. Please try again.");
-      } finally {
-        setAuxiliaryDeleteBusy(false);
-      }
-    };
-
-    const message = `"${routine.title || "Routine"}" will be removed from auxiliary routines.`;
-    if (Platform.OS === "web" && typeof window !== "undefined" && typeof window.confirm === "function") {
-      if (window.confirm(`Delete routine?\n\n${message}`)) void runDelete();
-      return;
-    }
-
-    Alert.alert("Delete routine?", message, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: () => void runDelete() },
-    ]);
-  }
-
-  useEffect(() => {
-    if (!selectedAuxiliaryRoutineId) return;
-    const snapshot = buildAuxiliaryDraftSnapshot();
-    if (snapshot !== lastAuxiliarySavedSnapshotRef.current && auxiliaryAutosaveStatus !== "saving") {
-      setAuxiliaryAutosaveStatus("dirty");
-    }
-  }, [
-    selectedAuxiliaryRoutineId,
-    auxiliaryTitleDraft,
-    auxiliaryDetailsDraft,
-    auxiliaryPreCategoryNamesDraft,
-    auxiliaryPostCategoryNamesDraft,
-    auxiliaryAutosaveStatus,
-  ]);
 
   async function switchDistanceUnit(nextUnit: DistanceUnit) {
     if (nextUnit === distanceUnit) return;
@@ -1808,185 +1465,16 @@ export default function CoachSettingsTab() {
         </View>
 
         <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
+          <Text style={styles.cardTitle}>Auxiliary Routines</Text>
+          <Text style={styles.cardHint}>
+            Warmups, cooldowns, drills, mobility work, plyos, and strength routines now live in their own coach tab.
+          </Text>
           <Pressable
-            style={styles.sectionHeader}
-            hitSlop={10}
-            onPress={() => void toggleAuxiliaryRoutinesSection()}
+            onPress={() => router.push("/(coach)/(tabs)/auxiliary-routines")}
+            style={[styles.groupActionBtn, { alignSelf: "flex-start" }]}
           >
-            <Text style={styles.cardTitle}>Auxiliary Routines</Text>
-            <View style={styles.chevronTapTarget}>
-              <Text style={styles.chev}>{categoryAutoRoutinesOpen ? "▾" : "▸"}</Text>
-            </View>
+            <Text style={styles.groupActionBtnText}>Open Auxiliary Routines</Text>
           </Pressable>
-          <Text style={styles.cardHint}>Create and assign pre/post-run routines for Planner auto-application.</Text>
-
-          {categoryAutoRoutinesOpen ? (
-            <View style={styles.collapsibleBody}>
-              <View style={[styles.placeholder, isDesktopWeb && styles.auxWorkspaceDesktop]}>
-                <View style={[styles.auxListPane, isDesktopWeb && styles.auxListPaneDesktop]}>
-                  <View style={styles.auxListHeader}>
-                    <Text style={styles.auxListTitle}>Auxiliary Routines</Text>
-                    <Pressable onPress={createNewAuxiliaryRoutine} style={styles.groupActionBtn}>
-                      <Text style={styles.groupActionBtnText}>New Routine</Text>
-                    </Pressable>
-                  </View>
-
-                  <View style={styles.auxListBody}>
-                    {sortedAuxiliaryRoutines.length === 0 ? (
-                      <Text style={styles.cardHint}>No routines yet. Create one to get started.</Text>
-                    ) : (
-                      sortedAuxiliaryRoutines.map((routine) => {
-                        const preCount = Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames.length : 0;
-                        const postCount = Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames.length : 0;
-                        const active = routine.id === selectedAuxiliaryRoutineId;
-                        return (
-                          <Pressable
-                            key={routine.id}
-                            onPress={() => void selectAuxiliaryRoutineById(routine.id)}
-                            style={[styles.auxListRow, active && styles.auxListRowActive]}
-                          >
-                            <Text style={[styles.auxListRowTitle, active && styles.auxListRowTitleActive]}>
-                              {routine.title || "Routine"}
-                            </Text>
-                            <Text style={styles.auxListRowMeta}>
-                              {preCount} pre • {postCount} post
-                            </Text>
-                          </Pressable>
-                        );
-                      })
-                    )}
-                  </View>
-                </View>
-
-                <View style={[styles.auxEditorPane, isDesktopWeb && styles.auxEditorPaneDesktop]}>
-                  {selectedAuxiliaryRoutine ? (
-                    <>
-                      <Text style={styles.auxEditorTitle}>Routine Editor</Text>
-                      <Text style={styles.label}>Title</Text>
-                      <TextInput
-                        value={auxiliaryTitleDraft}
-                        onChangeText={setAuxiliaryTitleDraft}
-                        onBlur={() => void commitAuxiliaryRoutineDraft("title-blur")}
-                        placeholder="Routine name"
-                        style={styles.input}
-                      />
-
-                      <Text style={[styles.label, { marginTop: 10 }]}>Details</Text>
-                      <TextInput
-                        value={auxiliaryDetailsDraft}
-                        onChangeText={setAuxiliaryDetailsDraft}
-                        onBlur={() => void commitAuxiliaryRoutineDraft("details-blur")}
-                        placeholder="Notes or instructions"
-                        style={[styles.input, { minHeight: 90, textAlignVertical: "top" }]}
-                        multiline
-                      />
-
-                      <Text style={[styles.label, { marginTop: 10 }]}>Pre-run categories</Text>
-                      <View style={styles.auxChipWrap}>
-                        {sortedCategories.map((category) => {
-                          const active = auxiliaryPreCategoryNamesDraft.includes(category.name);
-                          return (
-                            <Pressable
-                              key={`aux-pre-${selectedAuxiliaryRoutine.id}-${category.id}`}
-                              onPress={() =>
-                                toggleDraftCategory(
-                                  setAuxiliaryPreCategoryNamesDraft,
-                                  category.name
-                                )
-                              }
-                              style={[styles.autoRoutineChip, active && styles.autoRoutineChipActive]}
-                            >
-                              <Text style={[styles.autoRoutineChipText, active && styles.autoRoutineChipTextActive]}>
-                                {category.name}
-                              </Text>
-                            </Pressable>
-                          );
-                        })}
-                      </View>
-
-                      <Text style={[styles.label, { marginTop: 10 }]}>Post-run categories</Text>
-                      <View style={styles.auxChipWrap}>
-                        {sortedCategories.map((category) => {
-                          const active = auxiliaryPostCategoryNamesDraft.includes(category.name);
-                          return (
-                            <Pressable
-                              key={`aux-post-${selectedAuxiliaryRoutine.id}-${category.id}`}
-                              onPress={() =>
-                                toggleDraftCategory(
-                                  setAuxiliaryPostCategoryNamesDraft,
-                                  category.name
-                                )
-                              }
-                              style={[styles.autoRoutineChip, active && styles.autoRoutineChipActive]}
-                            >
-                              <Text style={[styles.autoRoutineChipText, active && styles.autoRoutineChipTextActive]}>
-                                {category.name}
-                              </Text>
-                            </Pressable>
-                          );
-                        })}
-                      </View>
-
-                      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
-                        <Text style={{ fontSize: 12, fontWeight: "800", color: auxiliaryAutosaveStatus === "error" ? "#b00020" : "#666" }}>
-                          {auxiliaryAutosaveStatus === "saving"
-                            ? "Saving..."
-                            : auxiliaryAutosaveStatus === "dirty"
-                            ? "Unsaved changes"
-                            : auxiliaryAutosaveStatus === "saved"
-                            ? "Saved"
-                            : auxiliaryAutosaveStatus === "error"
-                            ? "Save failed"
-                            : "Ready"}
-                        </Text>
-
-                        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                          <Pressable
-                            onPress={() => void saveSelectedAuxiliaryRoutine()}
-                            disabled={auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy}
-                            style={[
-                              styles.groupActionBtn,
-                              { alignItems: "center", justifyContent: "center" },
-                              (auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy) && styles.disabledBtn,
-                            ]}
-                          >
-                            <Text style={styles.groupActionBtnText}>
-                              {auxiliaryAutosaveStatus === "saving" ? "Saving..." : "Save Routine"}
-                            </Text>
-                          </Pressable>
-
-                          <Pressable
-                            onPress={confirmDeleteSelectedAuxiliaryRoutine}
-                            disabled={auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy}
-                            style={[
-                              styles.groupDeleteBtn,
-                              { alignItems: "center", justifyContent: "center" },
-                              (auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy) && styles.disabledBtn,
-                            ]}
-                          >
-                            <Text style={styles.groupDeleteBtnText}>{auxiliaryDeleteBusy ? "Deleting..." : "Delete"}</Text>
-                          </Pressable>
-                        </View>
-                      </View>
-                      {auxiliaryAutosaveStatus === "error" ? (
-                        <Text style={[styles.errorText, { marginTop: 8 }]}>
-                          Couldn't save routine. Your draft is still here.
-                        </Text>
-                      ) : null}
-                    </>
-                  ) : (
-                    <View style={styles.auxEmpty}>
-                      <Text style={styles.cardTitle}>No routine selected</Text>
-                      <Text style={styles.cardHint}>Select a routine on the left, or create a new routine to begin editing.</Text>
-                      <Pressable onPress={createNewAuxiliaryRoutine} style={[styles.groupActionBtn, { alignSelf: "flex-start" }]}>
-                        <Text style={styles.groupActionBtnText}>Create Routine</Text>
-                      </Pressable>
-                    </View>
-                  )}
-                </View>
-              </View>
-            </View>
-          ) : null}
         </View>
 
         <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}> 

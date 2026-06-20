@@ -1,0 +1,779 @@
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
+import { useFocusEffect } from "expo-router";
+import {
+  createAuxiliaryRoutine,
+  deleteAuxiliaryRoutine,
+  loadAuxiliaryRoutines,
+  updateAuxiliaryRoutine,
+  type AuxiliaryRoutine,
+} from "../../lib/auxiliaryRoutines";
+import { loadCoreCoachSettings } from "../../lib/settings";
+import { getCurrentTeamRole, normalizeTeamRole, type TeamRole } from "../../lib/teamPermissions";
+import type { WorkoutCategory } from "../../lib/types";
+
+type AutosaveStatus = "idle" | "dirty" | "saving" | "saved" | "error";
+
+function getErrorMessage(error: unknown): string {
+  if (!error) return "Unknown error";
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object") {
+    const anyError = error as any;
+    return (
+      anyError.message ||
+      anyError.error_description ||
+      anyError.details ||
+      anyError.hint ||
+      anyError.code ||
+      JSON.stringify(error)
+    );
+  }
+  return String(error);
+}
+
+function buildDraftSnapshotFrom(
+  id: string | null,
+  title: string,
+  details: string,
+  preCategoryNames: string[],
+  postCategoryNames: string[]
+) {
+  return JSON.stringify({
+    id,
+    title: String(title ?? "").trim(),
+    details: String(details ?? "").trim(),
+    pre: [...preCategoryNames].sort(),
+    post: [...postCategoryNames].sort(),
+  });
+}
+
+function toggleDraftCategory(
+  setList: React.Dispatch<React.SetStateAction<string[]>>,
+  categoryName: string
+) {
+  const key = String(categoryName ?? "").trim();
+  if (!key) return;
+
+  setList((prev) =>
+    prev.includes(key) ? prev.filter((name) => name !== key) : [...prev, key]
+  );
+}
+
+export function AuxiliaryRoutinesManager() {
+  const { width } = useWindowDimensions();
+  const isDesktopWeb = Platform.OS === "web" && width >= 900;
+  const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const readOnly = normalizeTeamRole(currentTeamRole) === "viewer";
+  const [categories, setCategories] = useState<WorkoutCategory[]>([]);
+  const [auxiliaryRoutines, setAuxiliaryRoutines] = useState<AuxiliaryRoutine[]>([]);
+  const [selectedAuxiliaryRoutineId, setSelectedAuxiliaryRoutineId] = useState<string | null>(null);
+  const [auxiliaryTitleDraft, setAuxiliaryTitleDraft] = useState("");
+  const [auxiliaryDetailsDraft, setAuxiliaryDetailsDraft] = useState("");
+  const [auxiliaryPreCategoryNamesDraft, setAuxiliaryPreCategoryNamesDraft] = useState<string[]>([]);
+  const [auxiliaryPostCategoryNamesDraft, setAuxiliaryPostCategoryNamesDraft] = useState<string[]>([]);
+  const [auxiliaryAutosaveStatus, setAuxiliaryAutosaveStatus] = useState<AutosaveStatus>("idle");
+  const [auxiliaryDeleteBusy, setAuxiliaryDeleteBusy] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const lastSavedSnapshotRef = React.useRef("");
+  const saveSeqRef = React.useRef(0);
+  const commitInFlightRef = React.useRef<Promise<boolean> | null>(null);
+  const selectedRoutineIdRef = React.useRef<string | null>(null);
+  const titleDraftRef = React.useRef("");
+  const detailsDraftRef = React.useRef("");
+  const preCategoryNamesDraftRef = React.useRef<string[]>([]);
+  const postCategoryNamesDraftRef = React.useRef<string[]>([]);
+  const currentTeamRoleRef = React.useRef<TeamRole | null>(null);
+
+  const sortedCategories = useMemo(
+    () => [...categories].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
+    [categories]
+  );
+
+  const sortedAuxiliaryRoutines = useMemo(
+    () => [...auxiliaryRoutines].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? ""))),
+    [auxiliaryRoutines]
+  );
+
+  const selectedAuxiliaryRoutine = useMemo(
+    () => sortedAuxiliaryRoutines.find((routine) => routine.id === selectedAuxiliaryRoutineId) ?? null,
+    [sortedAuxiliaryRoutines, selectedAuxiliaryRoutineId]
+  );
+
+  useEffect(() => {
+    currentTeamRoleRef.current = currentTeamRole;
+  }, [currentTeamRole]);
+
+  useEffect(() => {
+    selectedRoutineIdRef.current = selectedAuxiliaryRoutineId;
+    titleDraftRef.current = auxiliaryTitleDraft;
+    detailsDraftRef.current = auxiliaryDetailsDraft;
+    preCategoryNamesDraftRef.current = auxiliaryPreCategoryNamesDraft;
+    postCategoryNamesDraftRef.current = auxiliaryPostCategoryNamesDraft;
+  }, [
+    selectedAuxiliaryRoutineId,
+    auxiliaryTitleDraft,
+    auxiliaryDetailsDraft,
+    auxiliaryPreCategoryNamesDraft,
+    auxiliaryPostCategoryNamesDraft,
+  ]);
+
+  const loadRoutineIntoDrafts = useCallback((routine: AuxiliaryRoutine | null) => {
+    if (!routine) {
+      setAuxiliaryTitleDraft("");
+      setAuxiliaryDetailsDraft("");
+      setAuxiliaryPreCategoryNamesDraft([]);
+      setAuxiliaryPostCategoryNamesDraft([]);
+      lastSavedSnapshotRef.current = "";
+      setAuxiliaryAutosaveStatus("idle");
+      return;
+    }
+
+    setAuxiliaryTitleDraft(String(routine.title ?? ""));
+    setAuxiliaryDetailsDraft(String(routine.details ?? ""));
+    setAuxiliaryPreCategoryNamesDraft(Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : []);
+    setAuxiliaryPostCategoryNamesDraft(Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : []);
+    lastSavedSnapshotRef.current = buildDraftSnapshotFrom(
+      routine.id,
+      String(routine.title ?? ""),
+      String(routine.details ?? ""),
+      Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : [],
+      Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : []
+    );
+    setAuxiliaryAutosaveStatus("idle");
+  }, []);
+
+  const setSelectedRoutine = useCallback(
+    (routine: AuxiliaryRoutine | null) => {
+      const nextId = routine?.id ?? null;
+      selectedRoutineIdRef.current = nextId;
+      setSelectedAuxiliaryRoutineId(nextId);
+      loadRoutineIntoDrafts(routine);
+    },
+    [loadRoutineIntoDrafts]
+  );
+
+  const reloadAuxiliaryRoutines = useCallback(
+    async (preferredRoutineId?: string | null) => {
+      const loaded = await loadAuxiliaryRoutines();
+      const sorted = [...loaded].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
+      setAuxiliaryRoutines(sorted);
+      const targetId = preferredRoutineId ?? selectedRoutineIdRef.current;
+      const selected = sorted.find((routine) => routine.id === targetId) ?? null;
+      if (selected) {
+        setSelectedAuxiliaryRoutineId(selected.id);
+        loadRoutineIntoDrafts(selected);
+        return;
+      }
+      setSelectedAuxiliaryRoutineId(null);
+      loadRoutineIntoDrafts(null);
+    },
+    [loadRoutineIntoDrafts]
+  );
+
+  const loadManagerData = useCallback(
+    async (isActive?: () => boolean) => {
+      try {
+        setLoadError(null);
+        const [role, coreSettings, routines] = await Promise.all([
+          getCurrentTeamRole(),
+          loadCoreCoachSettings(),
+          loadAuxiliaryRoutines(),
+        ]);
+        if (isActive && !isActive()) return;
+        setCurrentTeamRole(role);
+        setCategories(coreSettings.categories ?? []);
+        setAuxiliaryRoutines(routines);
+        const selected = routines.find((routine) => routine.id === selectedRoutineIdRef.current) ?? routines[0] ?? null;
+        setSelectedRoutine(selected);
+      } catch (error) {
+        if (isActive && !isActive()) return;
+        const message = getErrorMessage(error);
+        console.error("[auxiliary-routines] load failed", error);
+        setLoadError(message);
+        Alert.alert("Auxiliary routines load failed", message);
+      }
+    },
+    [setSelectedRoutine]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadManagerData(() => !cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [loadManagerData]);
+
+  const commitDraft = useCallback(
+    async (reason: string, options?: { alertOnTitleRequired?: boolean }): Promise<boolean> => {
+      if (normalizeTeamRole(currentTeamRoleRef.current) === "viewer") return true;
+
+      if (commitInFlightRef.current) {
+        await commitInFlightRef.current.catch(() => false);
+      }
+
+      const routineId = selectedRoutineIdRef.current;
+      if (!routineId) return true;
+
+      const titleDraft = titleDraftRef.current;
+      const detailsDraft = detailsDraftRef.current;
+      const preDraft = preCategoryNamesDraftRef.current;
+      const postDraft = postCategoryNamesDraftRef.current;
+      const savedSnapshot = buildDraftSnapshotFrom(routineId, titleDraft, detailsDraft, preDraft, postDraft);
+      if (savedSnapshot === lastSavedSnapshotRef.current) return true;
+
+      const title = String(titleDraft ?? "").trim();
+      if (!title) {
+        setAuxiliaryAutosaveStatus("error");
+        if (options?.alertOnTitleRequired) {
+          Alert.alert("Title required", "Enter a routine title.");
+        }
+        return false;
+      }
+
+      const saveSeq = ++saveSeqRef.current;
+      const pre = Array.from(new Set(preDraft.map((name) => String(name ?? "").trim()).filter(Boolean)));
+      const post = Array.from(new Set(postDraft.map((name) => String(name ?? "").trim()).filter(Boolean)));
+      const details = String(detailsDraft ?? "").trim();
+
+      const commitPromise = (async () => {
+        setAuxiliaryAutosaveStatus("saving");
+        await updateAuxiliaryRoutine(routineId, {
+          title,
+          details,
+          preCategoryNames: pre,
+          postCategoryNames: post,
+          categoryNames: Array.from(new Set([...pre, ...post])),
+        });
+
+        const loaded = await loadAuxiliaryRoutines();
+        const sorted = [...loaded].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
+        setAuxiliaryRoutines(sorted);
+
+        const latestDraftSnapshot = buildDraftSnapshotFrom(
+          selectedRoutineIdRef.current,
+          titleDraftRef.current,
+          detailsDraftRef.current,
+          preCategoryNamesDraftRef.current,
+          postCategoryNamesDraftRef.current
+        );
+        const stillEditingSameRoutine = selectedRoutineIdRef.current === routineId;
+        const localDraftUnchangedSinceSave = latestDraftSnapshot === savedSnapshot;
+        if (saveSeq === saveSeqRef.current && stillEditingSameRoutine && localDraftUnchangedSinceSave) {
+          lastSavedSnapshotRef.current = savedSnapshot;
+          setAuxiliaryAutosaveStatus("saved");
+        } else if (stillEditingSameRoutine) {
+          setAuxiliaryAutosaveStatus("dirty");
+        }
+        return true;
+      })();
+
+      commitInFlightRef.current = commitPromise;
+      try {
+        return await commitPromise;
+      } catch (error) {
+        console.error("[auxiliary-routines] save failed", { reason, error });
+        setAuxiliaryAutosaveStatus("error");
+        Alert.alert("Routine save failed", "Couldn't save routine. Your draft is still here.");
+        return false;
+      } finally {
+        if (commitInFlightRef.current === commitPromise) {
+          commitInFlightRef.current = null;
+        }
+      }
+    },
+    []
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      void loadManagerData(() => !cancelled);
+      return () => {
+        cancelled = true;
+        void commitDraft("screen-blur");
+      };
+    }, [commitDraft, loadManagerData])
+  );
+
+  useEffect(() => {
+    if (!selectedAuxiliaryRoutineId) return;
+    const snapshot = buildDraftSnapshotFrom(
+      selectedAuxiliaryRoutineId,
+      auxiliaryTitleDraft,
+      auxiliaryDetailsDraft,
+      auxiliaryPreCategoryNamesDraft,
+      auxiliaryPostCategoryNamesDraft
+    );
+    if (snapshot !== lastSavedSnapshotRef.current && auxiliaryAutosaveStatus !== "saving") {
+      setAuxiliaryAutosaveStatus("dirty");
+    }
+  }, [
+    selectedAuxiliaryRoutineId,
+    auxiliaryTitleDraft,
+    auxiliaryDetailsDraft,
+    auxiliaryPreCategoryNamesDraft,
+    auxiliaryPostCategoryNamesDraft,
+    auxiliaryAutosaveStatus,
+  ]);
+
+  const selectAuxiliaryRoutineById = useCallback(
+    async (routineId: string | null) => {
+      if (routineId === selectedRoutineIdRef.current) return;
+      const committed = await commitDraft("routine-selection");
+      if (!committed) return;
+      setSelectedAuxiliaryRoutineId(routineId);
+      const routine = sortedAuxiliaryRoutines.find((item) => item.id === routineId) ?? null;
+      loadRoutineIntoDrafts(routine);
+    },
+    [commitDraft, loadRoutineIntoDrafts, sortedAuxiliaryRoutines]
+  );
+
+  const createNewAuxiliaryRoutine = useCallback(async () => {
+    if (readOnly) {
+      Alert.alert("Viewer access", "Only Owners and Editors can manage auxiliary routines.");
+      return;
+    }
+    const committed = await commitDraft("create-new-routine");
+    if (!committed) return;
+    const created = await createAuxiliaryRoutine({
+      title: "New Routine",
+      details: "",
+      preCategoryNames: [],
+      postCategoryNames: [],
+    });
+    await reloadAuxiliaryRoutines(created.id);
+    setAuxiliaryAutosaveStatus("idle");
+  }, [commitDraft, readOnly, reloadAuxiliaryRoutines]);
+
+  const saveSelectedAuxiliaryRoutine = useCallback(async () => {
+    if (!selectedRoutineIdRef.current) {
+      Alert.alert("Select a routine", "Choose or create a routine to edit.");
+      return;
+    }
+    await commitDraft("explicit-save", { alertOnTitleRequired: true });
+  }, [commitDraft]);
+
+  const confirmDeleteSelectedAuxiliaryRoutine = useCallback(() => {
+    if (readOnly) {
+      Alert.alert("Viewer access", "Only Owners and Editors can manage auxiliary routines.");
+      return;
+    }
+    if (auxiliaryDeleteBusy) return;
+    if (!selectedAuxiliaryRoutineId) {
+      Alert.alert("Select a routine", "Choose a routine to delete.");
+      return;
+    }
+
+    const routineId = selectedAuxiliaryRoutineId;
+    const routine = sortedAuxiliaryRoutines.find((item) => item.id === routineId) ?? null;
+    if (!routine) {
+      Alert.alert("Routine not found", "Refresh Auxiliary Routines and try again.");
+      void reloadAuxiliaryRoutines(null);
+      return;
+    }
+
+    const runDelete = async () => {
+      const previous = [...sortedAuxiliaryRoutines];
+      const index = previous.findIndex((item) => item.id === routineId);
+      const next = previous.filter((item) => item.id !== routineId);
+      const fallback = next[index] ?? next[index - 1] ?? next[0] ?? null;
+
+      setAuxiliaryDeleteBusy(true);
+      setAuxiliaryRoutines(next);
+      setSelectedRoutine(fallback);
+
+      try {
+        await deleteAuxiliaryRoutine(routineId, { requireCloudSync: true });
+        const refreshed = await loadAuxiliaryRoutines();
+        const sorted = [...refreshed].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
+        setAuxiliaryRoutines(sorted);
+        const selected = fallback ? sorted.find((item) => item.id === fallback.id) ?? sorted[0] ?? null : sorted[0] ?? null;
+        setSelectedRoutine(selected);
+      } catch (error) {
+        const message = getErrorMessage(error);
+        console.error("[auxiliary-routines] delete failed", { routineId, error });
+        setAuxiliaryRoutines(previous);
+        setSelectedRoutine(routine);
+        Alert.alert("Routine delete failed", message || "Couldn't delete routine. Please try again.");
+      } finally {
+        setAuxiliaryDeleteBusy(false);
+      }
+    };
+
+    const message = `"${routine.title || "Routine"}" will be removed from auxiliary routines.`;
+    if (Platform.OS === "web" && typeof window !== "undefined" && typeof window.confirm === "function") {
+      if (window.confirm(`Delete routine?\n\n${message}`)) void runDelete();
+      return;
+    }
+
+    Alert.alert("Delete routine?", message, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: () => void runDelete() },
+    ]);
+  }, [
+    auxiliaryDeleteBusy,
+    readOnly,
+    reloadAuxiliaryRoutines,
+    selectedAuxiliaryRoutineId,
+    setSelectedRoutine,
+    sortedAuxiliaryRoutines,
+  ]);
+
+  return (
+    <View style={styles.card}>
+      <View style={styles.headerRow}>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.cardTitle}>Auxiliary Routines</Text>
+          <Text style={styles.cardHint}>
+            Manage warmups, cooldowns, drills, plyos, strength routines, and category auto-application.
+          </Text>
+        </View>
+        <Pressable
+          onPress={createNewAuxiliaryRoutine}
+          disabled={readOnly}
+          style={[styles.actionBtn, readOnly && styles.disabledBtn]}
+        >
+          <Text style={styles.actionBtnText}>New Routine</Text>
+        </Pressable>
+      </View>
+
+      {readOnly ? (
+        <Text style={styles.warningText}>Viewer access: routine editing is disabled.</Text>
+      ) : null}
+      {loadError ? <Text style={styles.errorText}>{loadError}</Text> : null}
+
+      <View style={[styles.workspace, isDesktopWeb && styles.workspaceDesktop]}>
+        <View style={[styles.listPane, isDesktopWeb && styles.listPaneDesktop]}>
+          <View style={styles.listHeader}>
+            <Text style={styles.listTitle}>Routine Library</Text>
+            <Text style={styles.listCount}>{sortedAuxiliaryRoutines.length}</Text>
+          </View>
+
+          <ScrollView style={styles.listBody} contentContainerStyle={{ gap: 8 }} keyboardShouldPersistTaps="handled">
+            {sortedAuxiliaryRoutines.length === 0 ? (
+              <Text style={styles.cardHint}>No routines yet. Create one to get started.</Text>
+            ) : (
+              sortedAuxiliaryRoutines.map((routine) => {
+                const preCount = Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames.length : 0;
+                const postCount = Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames.length : 0;
+                const active = routine.id === selectedAuxiliaryRoutineId;
+                return (
+                  <Pressable
+                    key={routine.id}
+                    onPress={() => void selectAuxiliaryRoutineById(routine.id)}
+                    style={[styles.listRow, active && styles.listRowActive]}
+                  >
+                    <Text style={[styles.listRowTitle, active && styles.listRowTitleActive]}>
+                      {routine.title || "Routine"}
+                    </Text>
+                    <Text style={styles.listRowMeta}>
+                      {preCount} pre • {postCount} post
+                    </Text>
+                  </Pressable>
+                );
+              })
+            )}
+          </ScrollView>
+        </View>
+
+        <View style={[styles.editorPane, isDesktopWeb && styles.editorPaneDesktop]}>
+          {selectedAuxiliaryRoutine ? (
+            <>
+              <Text style={styles.editorTitle}>Routine Editor</Text>
+              <Text style={styles.label}>Title</Text>
+              <TextInput
+                value={auxiliaryTitleDraft}
+                onChangeText={setAuxiliaryTitleDraft}
+                onBlur={() => void commitDraft("title-blur")}
+                placeholder="Routine name"
+                style={[styles.input, readOnly && styles.inputDisabled]}
+                editable={!readOnly}
+              />
+
+              <Text style={[styles.label, { marginTop: 10 }]}>Details</Text>
+              <TextInput
+                value={auxiliaryDetailsDraft}
+                onChangeText={setAuxiliaryDetailsDraft}
+                onBlur={() => void commitDraft("details-blur")}
+                placeholder="Notes or instructions"
+                style={[styles.input, styles.detailsInput, readOnly && styles.inputDisabled]}
+                multiline
+                editable={!readOnly}
+              />
+
+              <Text style={[styles.label, { marginTop: 10 }]}>Pre-run categories</Text>
+              <View style={styles.chipWrap}>
+                {sortedCategories.length === 0 ? (
+                  <Text style={styles.cardHint}>No workout categories found.</Text>
+                ) : (
+                  sortedCategories.map((category) => {
+                    const active = auxiliaryPreCategoryNamesDraft.includes(category.name);
+                    return (
+                      <Pressable
+                        key={`aux-pre-${selectedAuxiliaryRoutine.id}-${category.id}`}
+                        disabled={readOnly}
+                        onPress={() => toggleDraftCategory(setAuxiliaryPreCategoryNamesDraft, category.name)}
+                        style={[styles.autoRoutineChip, active && styles.autoRoutineChipActive, readOnly && styles.disabledBtn]}
+                      >
+                        <Text style={[styles.autoRoutineChipText, active && styles.autoRoutineChipTextActive]}>
+                          {category.name}
+                        </Text>
+                      </Pressable>
+                    );
+                  })
+                )}
+              </View>
+
+              <Text style={[styles.label, { marginTop: 10 }]}>Post-run categories</Text>
+              <View style={styles.chipWrap}>
+                {sortedCategories.length === 0 ? (
+                  <Text style={styles.cardHint}>No workout categories found.</Text>
+                ) : (
+                  sortedCategories.map((category) => {
+                    const active = auxiliaryPostCategoryNamesDraft.includes(category.name);
+                    return (
+                      <Pressable
+                        key={`aux-post-${selectedAuxiliaryRoutine.id}-${category.id}`}
+                        disabled={readOnly}
+                        onPress={() => toggleDraftCategory(setAuxiliaryPostCategoryNamesDraft, category.name)}
+                        style={[styles.autoRoutineChip, active && styles.autoRoutineChipActive, readOnly && styles.disabledBtn]}
+                      >
+                        <Text style={[styles.autoRoutineChipText, active && styles.autoRoutineChipTextActive]}>
+                          {category.name}
+                        </Text>
+                      </Pressable>
+                    );
+                  })
+                )}
+              </View>
+
+              <View style={styles.editorFooter}>
+                <Text style={[styles.statusText, auxiliaryAutosaveStatus === "error" && styles.statusError]}>
+                  {auxiliaryAutosaveStatus === "saving"
+                    ? "Saving..."
+                    : auxiliaryAutosaveStatus === "dirty"
+                    ? "Unsaved changes"
+                    : auxiliaryAutosaveStatus === "saved"
+                    ? "Saved"
+                    : auxiliaryAutosaveStatus === "error"
+                    ? "Save failed"
+                    : "Ready"}
+                </Text>
+
+                <View style={styles.buttonRow}>
+                  <Pressable
+                    onPress={() => void saveSelectedAuxiliaryRoutine()}
+                    disabled={readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy}
+                    style={[
+                      styles.actionBtn,
+                      (readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy) && styles.disabledBtn,
+                    ]}
+                  >
+                    <Text style={styles.actionBtnText}>
+                      {auxiliaryAutosaveStatus === "saving" ? "Saving..." : "Save Routine"}
+                    </Text>
+                  </Pressable>
+
+                  <Pressable
+                    onPress={confirmDeleteSelectedAuxiliaryRoutine}
+                    disabled={readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy}
+                    style={[
+                      styles.deleteBtn,
+                      (readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy) && styles.disabledBtn,
+                    ]}
+                  >
+                    <Text style={styles.deleteBtnText}>{auxiliaryDeleteBusy ? "Deleting..." : "Delete"}</Text>
+                  </Pressable>
+                </View>
+              </View>
+              {auxiliaryAutosaveStatus === "error" ? (
+                <Text style={[styles.errorText, { marginTop: 8 }]}>
+                  Couldn't save routine. Your draft is still here.
+                </Text>
+              ) : null}
+            </>
+          ) : (
+            <View style={styles.emptyEditor}>
+              <Text style={styles.cardTitle}>No routine selected</Text>
+              <Text style={styles.cardHint}>Select a routine on the left, or create a new routine to begin editing.</Text>
+              <Pressable
+                onPress={createNewAuxiliaryRoutine}
+                disabled={readOnly}
+                style={[styles.actionBtn, { alignSelf: "flex-start" }, readOnly && styles.disabledBtn]}
+              >
+                <Text style={styles.actionBtnText}>Create Routine</Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  card: {
+    borderWidth: 1,
+    borderColor: "#dbe3ef",
+    borderRadius: 16,
+    backgroundColor: "#fff",
+    padding: 16,
+    gap: 12,
+  },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    flexWrap: "wrap",
+  },
+  cardTitle: { fontSize: 18, fontWeight: "900", color: "#172033" },
+  cardHint: { color: "#68758d", lineHeight: 19, fontWeight: "700" },
+  workspace: {
+    borderWidth: 1,
+    borderColor: "#e1e7f2",
+    borderRadius: 14,
+    backgroundColor: "#f8faff",
+    overflow: "hidden",
+  },
+  workspaceDesktop: {
+    flexDirection: "row",
+    minHeight: 560,
+  },
+  listPane: {
+    borderBottomWidth: 1,
+    borderBottomColor: "#e1e7f2",
+    backgroundColor: "#fff",
+  },
+  listPaneDesktop: {
+    width: 300,
+    borderBottomWidth: 0,
+    borderRightWidth: 1,
+    borderRightColor: "#e1e7f2",
+  },
+  listHeader: {
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#e1e7f2",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  listTitle: { fontWeight: "900", color: "#172033" },
+  listCount: { fontWeight: "900", color: "#6b7280" },
+  listBody: {
+    maxHeight: 480,
+    padding: 12,
+  },
+  listRow: {
+    borderWidth: 1,
+    borderColor: "#e1e7f2",
+    borderRadius: 12,
+    padding: 10,
+    backgroundColor: "#fff",
+  },
+  listRowActive: {
+    borderColor: "#1f2a44",
+    backgroundColor: "#eef3ff",
+  },
+  listRowTitle: { fontWeight: "900", color: "#172033" },
+  listRowTitleActive: { color: "#111827" },
+  listRowMeta: { marginTop: 4, color: "#64748b", fontSize: 12, fontWeight: "800" },
+  editorPane: {
+    padding: 14,
+    backgroundColor: "#fff",
+  },
+  editorPaneDesktop: {
+    flex: 1,
+    minWidth: 0,
+  },
+  editorTitle: { fontSize: 16, fontWeight: "900", color: "#172033", marginBottom: 10 },
+  label: { fontSize: 12, fontWeight: "900", color: "#4f5f7a", marginBottom: 6 },
+  input: {
+    borderWidth: 1,
+    borderColor: "#d7deeb",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: "#fff",
+    color: "#111827",
+    fontWeight: "700",
+  },
+  inputDisabled: {
+    backgroundColor: "#f3f4f6",
+    color: "#6b7280",
+  },
+  detailsInput: {
+    minHeight: 110,
+    textAlignVertical: "top",
+  },
+  chipWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  autoRoutineChip: {
+    borderWidth: 1,
+    borderColor: "#d7deeb",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: "#fff",
+  },
+  autoRoutineChipActive: {
+    borderColor: "#111827",
+    backgroundColor: "#111827",
+  },
+  autoRoutineChipText: { fontWeight: "800", color: "#222" },
+  autoRoutineChipTextActive: { color: "#fff" },
+  editorFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginTop: 14,
+    flexWrap: "wrap",
+  },
+  statusText: { fontSize: 12, fontWeight: "900", color: "#666" },
+  statusError: { color: "#b00020" },
+  buttonRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+  },
+  actionBtn: {
+    borderWidth: 1,
+    borderColor: "#d3dbe8",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: "#f8faff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  actionBtnText: { fontWeight: "900", color: "#111" },
+  deleteBtn: {
+    borderWidth: 1,
+    borderColor: "#f1c3c3",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  deleteBtnText: { fontWeight: "900", color: "#b00020" },
+  disabledBtn: { opacity: 0.55 },
+  warningText: { color: "#92400e", fontWeight: "800" },
+  errorText: { color: "#b00020", fontWeight: "800" },
+  emptyEditor: {
+    gap: 10,
+    minHeight: 220,
+    justifyContent: "center",
+  },
+});
