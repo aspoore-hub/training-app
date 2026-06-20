@@ -6,9 +6,9 @@ export default function CoachAuxiliaryRoutinesTab() {
     <View style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
         <View style={styles.pageHeader}>
-          <Text style={styles.title}>Auxiliary Routines</Text>
+          <Text style={styles.title}>Drill Routines</Text>
           <Text style={styles.subtitle}>
-            Create and maintain the warmups, cooldowns, drills, mobility, plyos, and strength routines coaches assign to workouts.
+            Create and maintain warmups, cooldowns, drills, mobility, plyos, and strength routines coaches assign to workouts.
           </Text>
         </View>
         <AuxiliaryRoutinesManager />

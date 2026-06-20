@@ -13,6 +13,7 @@ import { getCurrentTeamRole, normalizeTeamRole, type TeamRole } from "../../lib/
 import type { WorkoutCategory } from "../../lib/types";
 
 type AutosaveStatus = "idle" | "dirty" | "saving" | "saved" | "error";
+type CategoryAssignmentTarget = "pre" | "post";
 
 function getErrorMessage(error: unknown): string {
   if (!error) return "Unknown error";
@@ -75,6 +76,7 @@ export function AuxiliaryRoutinesManager() {
   const [auxiliaryAutosaveStatus, setAuxiliaryAutosaveStatus] = useState<AutosaveStatus>("idle");
   const [auxiliaryDeleteBusy, setAuxiliaryDeleteBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [openCategorySelector, setOpenCategorySelector] = useState<CategoryAssignmentTarget | null>(null);
   const lastSavedSnapshotRef = React.useRef("");
   const saveSeqRef = React.useRef(0);
   const commitInFlightRef = React.useRef<Promise<boolean> | null>(null);
@@ -191,7 +193,7 @@ export function AuxiliaryRoutinesManager() {
         const message = getErrorMessage(error);
         console.error("[auxiliary-routines] load failed", error);
         setLoadError(message);
-        Alert.alert("Auxiliary routines load failed", message);
+        Alert.alert("Drill routines load failed", message);
       }
     },
     [setSelectedRoutine]
@@ -332,7 +334,7 @@ export function AuxiliaryRoutinesManager() {
 
   const createNewAuxiliaryRoutine = useCallback(async () => {
     if (readOnly) {
-      Alert.alert("Viewer access", "Only Owners and Editors can manage auxiliary routines.");
+      Alert.alert("Viewer access", "Only Owners and Editors can manage drill routines.");
       return;
     }
     const committed = await commitDraft("create-new-routine");
@@ -357,7 +359,7 @@ export function AuxiliaryRoutinesManager() {
 
   const confirmDeleteSelectedAuxiliaryRoutine = useCallback(() => {
     if (readOnly) {
-      Alert.alert("Viewer access", "Only Owners and Editors can manage auxiliary routines.");
+      Alert.alert("Viewer access", "Only Owners and Editors can manage drill routines.");
       return;
     }
     if (auxiliaryDeleteBusy) return;
@@ -369,7 +371,7 @@ export function AuxiliaryRoutinesManager() {
     const routineId = selectedAuxiliaryRoutineId;
     const routine = sortedAuxiliaryRoutines.find((item) => item.id === routineId) ?? null;
     if (!routine) {
-      Alert.alert("Routine not found", "Refresh Auxiliary Routines and try again.");
+      Alert.alert("Routine not found", "Refresh Drill Routines and try again.");
       void reloadAuxiliaryRoutines(null);
       return;
     }
@@ -402,7 +404,7 @@ export function AuxiliaryRoutinesManager() {
       }
     };
 
-    const message = `"${routine.title || "Routine"}" will be removed from auxiliary routines.`;
+    const message = `"${routine.title || "Routine"}" will be removed from drill routines.`;
     if (Platform.OS === "web" && typeof window !== "undefined" && typeof window.confirm === "function") {
       if (window.confirm(`Delete routine?\n\n${message}`)) void runDelete();
       return;
@@ -421,13 +423,112 @@ export function AuxiliaryRoutinesManager() {
     sortedAuxiliaryRoutines,
   ]);
 
+  function formatCategorySummary(selectedNames: string[]) {
+    if (selectedNames.length === 0) return "No categories selected";
+    const preview = selectedNames.slice(0, 3).join(", ");
+    return selectedNames.length > 3 ? `${preview} +${selectedNames.length - 3}` : preview;
+  }
+
+  function renderCategorySelector({
+    label,
+    target,
+    selectedNames,
+    setSelectedNames,
+  }: {
+    label: string;
+    target: CategoryAssignmentTarget;
+    selectedNames: string[];
+    setSelectedNames: React.Dispatch<React.SetStateAction<string[]>>;
+  }) {
+    const open = openCategorySelector === target;
+    const selectedSet = new Set(selectedNames);
+    const visibleSelectedNames = selectedNames.slice(0, 4);
+    const extraSelectedCount = Math.max(0, selectedNames.length - visibleSelectedNames.length);
+
+    return (
+      <View style={styles.assignmentBlock}>
+        <View style={styles.assignmentHeaderRow}>
+          <Pressable
+            onPress={() => setOpenCategorySelector((current) => (current === target ? null : target))}
+            style={styles.assignmentSummaryButton}
+          >
+            <Text style={styles.assignmentLabel}>{label}</Text>
+            <Text style={styles.assignmentSummary}>
+              {selectedNames.length} selected • {formatCategorySummary(selectedNames)}
+            </Text>
+          </Pressable>
+
+          <View style={styles.assignmentActions}>
+            {selectedNames.length > 0 && !readOnly ? (
+              <Pressable onPress={() => setSelectedNames([])} style={styles.smallGhostBtn}>
+                <Text style={styles.smallGhostBtnText}>Clear</Text>
+              </Pressable>
+            ) : null}
+            <Pressable
+              onPress={() => setOpenCategorySelector((current) => (current === target ? null : target))}
+              style={styles.smallActionBtn}
+            >
+              <Text style={styles.smallActionBtnText}>{open ? "Done" : "Edit"}</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        {selectedNames.length > 0 ? (
+          <View style={styles.selectedChipRow}>
+            {visibleSelectedNames.map((name) => (
+              <View key={`${target}-selected-${name}`} style={styles.selectedCategoryChip}>
+                <Text style={styles.selectedCategoryChipText}>{name}</Text>
+              </View>
+            ))}
+            {extraSelectedCount > 0 ? (
+              <View style={styles.selectedCategoryChip}>
+                <Text style={styles.selectedCategoryChipText}>+{extraSelectedCount}</Text>
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+
+        {open ? (
+          <View style={styles.selectorPanel}>
+            {sortedCategories.length === 0 ? (
+              <Text style={styles.cardHint}>No workout categories found.</Text>
+            ) : (
+              <ScrollView
+                nestedScrollEnabled
+                style={styles.selectorScroll}
+                contentContainerStyle={styles.selectorChipWrap}
+                keyboardShouldPersistTaps="handled"
+              >
+                {sortedCategories.map((category) => {
+                  const active = selectedSet.has(category.name);
+                  return (
+                    <Pressable
+                      key={`${target}-${category.id}`}
+                      disabled={readOnly}
+                      onPress={() => toggleDraftCategory(setSelectedNames, category.name)}
+                      style={[styles.autoRoutineChip, active && styles.autoRoutineChipActive, readOnly && styles.disabledBtn]}
+                    >
+                      <Text style={[styles.autoRoutineChipText, active && styles.autoRoutineChipTextActive]}>
+                        {category.name}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            )}
+          </View>
+        ) : null}
+      </View>
+    );
+  }
+
   return (
     <View style={styles.card}>
       <View style={styles.headerRow}>
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={styles.cardTitle}>Auxiliary Routines</Text>
+          <Text style={styles.cardTitle}>Drill Routines</Text>
           <Text style={styles.cardHint}>
-            Manage warmups, cooldowns, drills, plyos, strength routines, and category auto-application.
+            Create and maintain warmups, cooldowns, drills, mobility, plyos, and strength routines coaches assign to workouts.
           </Text>
         </View>
         <Pressable
@@ -447,7 +548,7 @@ export function AuxiliaryRoutinesManager() {
       <View style={[styles.workspace, isDesktopWeb && styles.workspaceDesktop]}>
         <View style={[styles.listPane, isDesktopWeb && styles.listPaneDesktop]}>
           <View style={styles.listHeader}>
-            <Text style={styles.listTitle}>Routine Library</Text>
+            <Text style={styles.listTitle}>Drill Library</Text>
             <Text style={styles.listCount}>{sortedAuxiliaryRoutines.length}</Text>
           </View>
 
@@ -498,55 +599,24 @@ export function AuxiliaryRoutinesManager() {
                 onChangeText={setAuxiliaryDetailsDraft}
                 onBlur={() => void commitDraft("details-blur")}
                 placeholder="Notes or instructions"
-                style={[styles.input, styles.detailsInput, readOnly && styles.inputDisabled]}
+                style={[styles.input, styles.detailsInput, isDesktopWeb && styles.detailsInputDesktop, readOnly && styles.inputDisabled]}
                 multiline
                 editable={!readOnly}
               />
 
-              <Text style={[styles.label, { marginTop: 10 }]}>Pre-run categories</Text>
-              <View style={styles.chipWrap}>
-                {sortedCategories.length === 0 ? (
-                  <Text style={styles.cardHint}>No workout categories found.</Text>
-                ) : (
-                  sortedCategories.map((category) => {
-                    const active = auxiliaryPreCategoryNamesDraft.includes(category.name);
-                    return (
-                      <Pressable
-                        key={`aux-pre-${selectedAuxiliaryRoutine.id}-${category.id}`}
-                        disabled={readOnly}
-                        onPress={() => toggleDraftCategory(setAuxiliaryPreCategoryNamesDraft, category.name)}
-                        style={[styles.autoRoutineChip, active && styles.autoRoutineChipActive, readOnly && styles.disabledBtn]}
-                      >
-                        <Text style={[styles.autoRoutineChipText, active && styles.autoRoutineChipTextActive]}>
-                          {category.name}
-                        </Text>
-                      </Pressable>
-                    );
-                  })
-                )}
-              </View>
-
-              <Text style={[styles.label, { marginTop: 10 }]}>Post-run categories</Text>
-              <View style={styles.chipWrap}>
-                {sortedCategories.length === 0 ? (
-                  <Text style={styles.cardHint}>No workout categories found.</Text>
-                ) : (
-                  sortedCategories.map((category) => {
-                    const active = auxiliaryPostCategoryNamesDraft.includes(category.name);
-                    return (
-                      <Pressable
-                        key={`aux-post-${selectedAuxiliaryRoutine.id}-${category.id}`}
-                        disabled={readOnly}
-                        onPress={() => toggleDraftCategory(setAuxiliaryPostCategoryNamesDraft, category.name)}
-                        style={[styles.autoRoutineChip, active && styles.autoRoutineChipActive, readOnly && styles.disabledBtn]}
-                      >
-                        <Text style={[styles.autoRoutineChipText, active && styles.autoRoutineChipTextActive]}>
-                          {category.name}
-                        </Text>
-                      </Pressable>
-                    );
-                  })
-                )}
+              <View style={styles.assignmentStack}>
+                {renderCategorySelector({
+                  label: "Pre-run auto-assign",
+                  target: "pre",
+                  selectedNames: auxiliaryPreCategoryNamesDraft,
+                  setSelectedNames: setAuxiliaryPreCategoryNamesDraft,
+                })}
+                {renderCategorySelector({
+                  label: "Post-run auto-assign",
+                  target: "post",
+                  selectedNames: auxiliaryPostCategoryNamesDraft,
+                  setSelectedNames: setAuxiliaryPostCategoryNamesDraft,
+                })}
               </View>
 
               <View style={styles.editorFooter}>
@@ -707,13 +777,82 @@ const styles = StyleSheet.create({
     color: "#6b7280",
   },
   detailsInput: {
-    minHeight: 110,
+    minHeight: 220,
     textAlignVertical: "top",
   },
-  chipWrap: {
+  detailsInputDesktop: {
+    minHeight: 280,
+  },
+  assignmentStack: {
+    gap: 10,
+    marginTop: 12,
+  },
+  assignmentBlock: {
+    borderWidth: 1,
+    borderColor: "#e1e7f2",
+    borderRadius: 12,
+    backgroundColor: "#f8faff",
+    padding: 10,
+    gap: 8,
+  },
+  assignmentHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  assignmentSummaryButton: {
+    flex: 1,
+    minWidth: 220,
+    gap: 3,
+  },
+  assignmentLabel: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#172033",
+  },
+  assignmentSummary: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#64748b",
+  },
+  assignmentActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  selectedChipRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  selectedCategoryChip: {
+    borderWidth: 1,
+    borderColor: "#d7deeb",
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: "#fff",
+  },
+  selectedCategoryChipText: {
+    color: "#475569",
+    fontSize: 11,
+    fontWeight: "900",
+  },
+  selectorPanel: {
+    borderTopWidth: 1,
+    borderTopColor: "#e1e7f2",
+    paddingTop: 8,
+  },
+  selectorScroll: {
+    maxHeight: 170,
+  },
+  selectorChipWrap: {
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 8,
+    paddingBottom: 2,
   },
   autoRoutineChip: {
     borderWidth: 1,
@@ -729,6 +868,30 @@ const styles = StyleSheet.create({
   },
   autoRoutineChipText: { fontWeight: "800", color: "#222" },
   autoRoutineChipTextActive: { color: "#fff" },
+  smallActionBtn: {
+    borderWidth: 1,
+    borderColor: "#1f2a44",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: "#1f2a44",
+  },
+  smallActionBtnText: {
+    color: "#fff",
+    fontWeight: "900",
+  },
+  smallGhostBtn: {
+    borderWidth: 1,
+    borderColor: "#d3dbe8",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: "#fff",
+  },
+  smallGhostBtnText: {
+    color: "#475569",
+    fontWeight: "900",
+  },
   editorFooter: {
     flexDirection: "row",
     alignItems: "center",

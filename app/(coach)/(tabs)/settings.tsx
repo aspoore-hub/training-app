@@ -1465,7 +1465,7 @@ export default function CoachSettingsTab() {
         </View>
 
         <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
-          <Text style={styles.cardTitle}>Auxiliary Routines</Text>
+          <Text style={styles.cardTitle}>Drill Routines</Text>
           <Text style={styles.cardHint}>
             Warmups, cooldowns, drills, mobility work, plyos, and strength routines now live in their own coach tab.
           </Text>
@@ -1473,7 +1473,7 @@ export default function CoachSettingsTab() {
             onPress={() => router.push("/(coach)/(tabs)/auxiliary-routines")}
             style={[styles.groupActionBtn, { alignSelf: "flex-start" }]}
           >
-            <Text style={styles.groupActionBtnText}>Open Auxiliary Routines</Text>
+            <Text style={styles.groupActionBtnText}>Open Drill Routines</Text>
           </Pressable>
         </View>
 

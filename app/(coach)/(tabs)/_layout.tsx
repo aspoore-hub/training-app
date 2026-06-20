@@ -85,7 +85,7 @@ export default function CoachTabs() {
       <Tabs.Screen
         name="auxiliary-routines"
         options={{
-          title: "Auxiliary Routines",
+          title: "Drill Routines",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="fitness-outline" size={size} color={color} />
           ),
