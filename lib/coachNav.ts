@@ -11,7 +11,6 @@ export type CoachNavItem = {
 export const COACH_NAV_ITEMS: CoachNavItem[] = [
   { key: "calendar", label: "Calendar", href: "/(coach)/(tabs)/calendar", icon: "calendar-outline" },
   { key: "training-logs", label: "Training Logs", href: "/(coach)/(tabs)/training-logs", icon: "document-text-outline" },
-  { key: "planner", label: "Create Session", href: "/(coach)/(tabs)/planner", icon: "create-outline" },
   { key: "mileage", label: "Mileage", href: "/(coach)/(tabs)/mileage", icon: "grid-outline" },
   { key: "roster", label: "Roster", href: "/(coach)/(tabs)/roster", icon: "people-outline" },
   { key: "workout-catalog", label: "Workout Catalog", href: "/(coach)/(tabs)/workout-catalog", icon: "library-outline" },
