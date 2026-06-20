@@ -1414,6 +1414,9 @@ export default function CoachCalendarMonth() {
   const [trainingVisibilityEndISO, setTrainingVisibilityEndISO] = useState(() => toISODate(addDays(startOfWeek(new Date(), 1), 6)));
   const [trainingVisibilityApplying, setTrainingVisibilityApplying] = useState(false);
   const [trainingVisibilityError, setTrainingVisibilityError] = useState<string | null>(null);
+  const [visibilityMenuOpen, setVisibilityMenuOpen] = useState(false);
+  const [weekActionsMenuOpen, setWeekActionsMenuOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [jumpToWeekOpen, setJumpToWeekOpen] = useState(false);
   const [jumpDateInput, setJumpDateInput] = useState(() => toISODate(new Date()));
   const [weekLabelsByStart, setWeekLabelsByStart] = useState<CoachWeekLabels>({});
@@ -3785,155 +3788,278 @@ export default function CoachCalendarMonth() {
   return (
     <View style={styles.container}>
       <View style={[styles.headerCard, calendarMode === "month" && isWebDesktop && styles.monthDesktopInset]}>
-        <View style={styles.headerTopRow}>
-          <View style={styles.headerLeftGroup}>
-            <Pressable onPress={() => commitSwipe("prev")} style={styles.todayBtn}>
-              <Text style={styles.todayBtnText}>Prev</Text>
-            </Pressable>
-          </View>
-
-          <View style={styles.headerCenter}>
-            <Text style={styles.monthLabel}>{calendarMode === "month" ? monthLabel : weekLabel}</Text>
-            {calendarMode === "month" ? (
-              <Text style={styles.subLabel}>Tap a day to view all workouts</Text>
-            ) : null}
-            {calendarMode === "week" ? (
-              <View
-                style={{
-                  marginTop: 2,
-                  paddingHorizontal: 8,
-                  paddingVertical: 2,
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  borderColor:
-                    relativeWeekStatus.status === "current"
-                      ? "rgba(34,197,94,0.35)"
-                      : relativeWeekStatus.status === "past"
-                        ? "rgba(100,116,139,0.35)"
-                        : "rgba(245,158,11,0.4)",
-                  backgroundColor:
-                    relativeWeekStatus.status === "current"
-                      ? "rgba(34,197,94,0.12)"
-                      : relativeWeekStatus.status === "past"
-                        ? "rgba(100,116,139,0.1)"
-                        : "rgba(245,158,11,0.12)",
-                }}
-              >
-                <Text
-                  style={{
-                    fontSize: 10,
-                    fontWeight: "800",
-                    color:
-                      relativeWeekStatus.status === "current"
-                        ? "#166534"
-                        : relativeWeekStatus.status === "past"
-                          ? "#64748b"
-                          : "#b45309",
-                  }}
-                >
-                  {relativeWeekStatus.label}
-                </Text>
-              </View>
-            ) : null}
-            {calendarMode === "week" ? (
-              <View style={styles.weekLabelSummaryRow}>
-                <View style={[styles.weekLabelSummaryChip, { borderColor: activeWeekToneColors.border, backgroundColor: activeWeekToneColors.bg }]}>
-                  <Text
-                    style={[styles.weekLabelSummaryText, { color: activeWeekToneColors.text }]}
-                    numberOfLines={1}
-                  >
-                    {String(currentWeekAnnotation ?? "").trim() || activeWeekLabelToneText}
-                  </Text>
+        <View style={calendarMode === "week" ? styles.weekHeaderTopRow : styles.headerTopRow}>
+          {calendarMode === "week" ? (
+            <>
+              <View style={styles.weekNavCluster}>
+                <Pressable onPress={() => commitSwipe("prev")} style={styles.todayBtn}>
+                  <Text style={styles.todayBtnText}>Prev</Text>
+                </Pressable>
+                <View style={[styles.headerCenter, styles.weekHeaderCenter]}>
+                  <Text style={styles.monthLabel} numberOfLines={2}>{weekLabel}</Text>
+                  <View style={styles.weekHeaderChipsRow}>
+                    <View
+                      style={[
+                        styles.relativeWeekChip,
+                        relativeWeekStatus.status === "current"
+                          ? styles.relativeWeekChipCurrent
+                          : relativeWeekStatus.status === "past"
+                            ? styles.relativeWeekChipPast
+                            : styles.relativeWeekChipFuture,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.relativeWeekChipText,
+                          relativeWeekStatus.status === "current"
+                            ? styles.relativeWeekChipTextCurrent
+                            : relativeWeekStatus.status === "past"
+                              ? styles.relativeWeekChipTextPast
+                              : styles.relativeWeekChipTextFuture,
+                        ]}
+                      >
+                        {relativeWeekStatus.label}
+                      </Text>
+                    </View>
+                    <View style={[styles.weekLabelSummaryChip, { borderColor: activeWeekToneColors.border, backgroundColor: activeWeekToneColors.bg }]}>
+                      <Text
+                        style={[styles.weekLabelSummaryText, { color: activeWeekToneColors.text }]}
+                        numberOfLines={1}
+                      >
+                        {String(currentWeekAnnotation ?? "").trim() || activeWeekLabelToneText}
+                      </Text>
+                    </View>
+                    {canEditCalendarTraining ? (
+                      <Pressable onPress={weekLabelEditorOpen ? closeWeekLabelEditor : openWeekLabelEditor} style={styles.weekLabelEditBtn}>
+                        <Ionicons name={weekLabelEditorOpen ? "checkmark" : "pencil"} size={11} color="#334155" />
+                        <Text style={styles.weekLabelEditBtnText}>{weekLabelEditorOpen ? "Done" : "Edit label"}</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
                 </View>
+                <Pressable onPress={() => commitSwipe("next")} style={styles.todayBtn}>
+                  <Text style={styles.todayBtnText}>Next</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.headerPrimaryActions}>
                 {canEditCalendarTraining ? (
-                  <Pressable onPress={weekLabelEditorOpen ? closeWeekLabelEditor : openWeekLabelEditor} style={styles.weekLabelEditBtn}>
-                    <Ionicons name={weekLabelEditorOpen ? "checkmark" : "pencil"} size={11} color="#334155" />
-                    <Text style={styles.weekLabelEditBtnText}>{weekLabelEditorOpen ? "Done" : "Edit label"}</Text>
+                  <Pressable
+                    onPress={() =>
+                      router.push({
+                        pathname: "/(coach)/(tabs)/planner",
+                        params: { date: quickNewSessionDateISO, returnTo: "calendar" },
+                      })
+                    }
+                    style={styles.createSessionTopBtn}
+                  >
+                    <Ionicons name="create-outline" size={12} color="#fff" />
+                    <Text style={styles.createSessionTopBtnText}>Create Session</Text>
                   </Pressable>
                 ) : null}
               </View>
-            ) : null}
-          </View>
-
-          <View style={styles.headerRight}>
-            {canEditCalendarTraining ? (
-              <Pressable
-                onPress={() =>
-                  router.push({
-                    pathname: "/(coach)/(tabs)/planner",
-                    params: { date: quickNewSessionDateISO, returnTo: "calendar" },
-                  })
-                }
-                style={styles.createSessionTopBtn}
-              >
-                <Ionicons name="create-outline" size={12} color="#fff" />
-                <Text style={styles.createSessionTopBtnText}>Create Session</Text>
-              </Pressable>
-            ) : null}
-            {calendarMode === "week" ? (
-              <>
-                {canPublishCalendarTraining ? (
-                  <View style={styles.visibilityControl}>
-                  {calendarWeekVisibilityStatus === "mixed" ? (
-                    <View style={[styles.weekVisibilityBadge, styles.weekVisibilityBadgeMixed]}>
-                      <Text style={[styles.weekVisibilityBadgeText, styles.weekVisibilityBadgeTextMixed]}>
-                        Mixed visibility
-                      </Text>
-                    </View>
-                  ) : calendarWeekVisibilityStatus === "published" ? (
-                    <View style={[styles.weekVisibilityBadge, styles.weekVisibilityBadgePublished]}>
-                      <Text style={[styles.weekVisibilityBadgeText, styles.weekVisibilityBadgeTextPublished]}>
-                        Published
-                      </Text>
-                    </View>
-                  ) : calendarWeekVisibilityStatus === "empty" ? (
-                    <Text style={styles.visibilityText}>{calendarWeekVisibilityLabel}</Text>
-                  ) : null}
+            </>
+          ) : (
+            <>
+              <View style={styles.headerLeftGroup}>
+                <Pressable onPress={() => commitSwipe("prev")} style={styles.todayBtn}>
+                  <Text style={styles.todayBtnText}>Prev</Text>
+                </Pressable>
+              </View>
+              <View style={styles.headerCenter}>
+                <Text style={styles.monthLabel}>{monthLabel}</Text>
+                <Text style={styles.subLabel}>Tap a day to view all workouts</Text>
+              </View>
+              <View style={styles.headerRight}>
+                {canEditCalendarTraining ? (
                   <Pressable
-                    onPress={() => openTrainingVisibilityModal("both")}
-                    style={styles.visibilityBtn}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/(coach)/(tabs)/planner",
+                        params: { date: quickNewSessionDateISO, returnTo: "calendar" },
+                      })
+                    }
+                    style={styles.createSessionTopBtn}
                   >
-                    <Text style={styles.visibilityBtnText}>Visibility</Text>
+                    <Ionicons name="create-outline" size={12} color="#fff" />
+                    <Text style={styles.createSessionTopBtnText}>Create Session</Text>
                   </Pressable>
-                  <Pressable
-                    onPress={() => void setCalendarWeekVisibility(true)}
-                    disabled={weekVisibilityBusy || calendarBulkAthleteIds.length === 0}
-                    style={[styles.visibilityBtn, (weekVisibilityBusy || calendarBulkAthleteIds.length === 0) && styles.visibilityBtnDisabled]}
-                  >
-                    <Text style={styles.visibilityBtnText}>Publish Week</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => void setCalendarWeekVisibility(false)}
-                    disabled={weekVisibilityBusy || calendarBulkAthleteIds.length === 0}
-                    style={[styles.visibilityBtn, (weekVisibilityBusy || calendarBulkAthleteIds.length === 0) && styles.visibilityBtnDisabled]}
-                  >
-                    <Text style={styles.visibilityBtnText}>Hide Week</Text>
-                  </Pressable>
-                  </View>
                 ) : null}
                 <Pressable onPress={goToToday} style={styles.todayBtn}>
-                  <Text style={styles.todayBtnText}>Current Week</Text>
+                  <Text style={styles.todayBtnText}>Today</Text>
                 </Pressable>
-                <Pressable
-                  onPress={() => {
-                    setJumpDateInput(currentWeekStartISO);
-                    setJumpToWeekOpen((prev) => !prev);
-                  }}
-                  style={styles.todayBtn}
-                >
-                  <Text style={styles.todayBtnText}>{jumpToWeekOpen ? "Cancel Jump" : "Jump to Week"}</Text>
+                <Pressable onPress={() => commitSwipe("next")} style={styles.todayBtn}>
+                  <Text style={styles.todayBtnText}>Next</Text>
                 </Pressable>
-              </>
-            ) : (
-              <Pressable onPress={goToToday} style={styles.todayBtn}>
-                <Text style={styles.todayBtnText}>Today</Text>
-              </Pressable>
-            )}
-            <Pressable onPress={() => commitSwipe("next")} style={styles.todayBtn}>
-              <Text style={styles.todayBtnText}>Next</Text>
-            </Pressable>
-          </View>
+              </View>
+            </>
+          )}
         </View>
+
+        {calendarMode === "week" ? (
+          <View style={styles.weekSecondaryRow}>
+            {canPublishCalendarTraining ? (
+              <View style={styles.actionMenuWrap}>
+                <Pressable
+                  style={styles.actionMenuTrigger}
+                  onPress={() => {
+                    setVisibilityMenuOpen((prev) => !prev);
+                    setWeekActionsMenuOpen(false);
+                    setExportMenuOpen(false);
+                  }}
+                >
+                  <Text style={styles.actionMenuLabel}>Visibility</Text>
+                  <Text style={styles.actionMenuValue}>
+                    {calendarWeekVisibilityStatus === "published"
+                      ? "Published"
+                      : calendarWeekVisibilityStatus === "hidden"
+                        ? "Hidden"
+                        : calendarWeekVisibilityStatus === "mixed"
+                          ? "Mixed"
+                          : calendarWeekVisibilityLabel}
+                  </Text>
+                  <Text style={styles.actionMenuChevron}>{visibilityMenuOpen ? "▴" : "▾"}</Text>
+                </Pressable>
+                {visibilityMenuOpen ? (
+                  <View style={styles.actionMenuPanel}>
+                    <Pressable
+                      onPress={() => {
+                        setVisibilityMenuOpen(false);
+                        openTrainingVisibilityModal("both");
+                      }}
+                      style={styles.actionMenuItem}
+                    >
+                      <Text style={styles.actionMenuItemText}>Visibility settings</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => {
+                        setVisibilityMenuOpen(false);
+                        void setCalendarWeekVisibility(true);
+                      }}
+                      disabled={weekVisibilityBusy || calendarBulkAthleteIds.length === 0}
+                      style={[styles.actionMenuItem, (weekVisibilityBusy || calendarBulkAthleteIds.length === 0) && styles.actionMenuItemDisabled]}
+                    >
+                      <Text style={styles.actionMenuItemText}>Publish Week</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => {
+                        setVisibilityMenuOpen(false);
+                        void setCalendarWeekVisibility(false);
+                      }}
+                      disabled={weekVisibilityBusy || calendarBulkAthleteIds.length === 0}
+                      style={[styles.actionMenuItem, (weekVisibilityBusy || calendarBulkAthleteIds.length === 0) && styles.actionMenuItemDisabled]}
+                    >
+                      <Text style={styles.actionMenuItemText}>Hide Week</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+
+            <View style={styles.actionMenuWrap}>
+              <Pressable
+                style={styles.actionMenuTrigger}
+                onPress={() => {
+                  setWeekActionsMenuOpen((prev) => !prev);
+                  setVisibilityMenuOpen(false);
+                  setExportMenuOpen(false);
+                }}
+              >
+                <Text style={styles.actionMenuLabel}>Week actions</Text>
+                <Text style={styles.actionMenuValue}>{jumpToWeekOpen ? "Jump open" : "Manage"}</Text>
+                <Text style={styles.actionMenuChevron}>{weekActionsMenuOpen ? "▴" : "▾"}</Text>
+              </Pressable>
+              {weekActionsMenuOpen ? (
+                <View style={styles.actionMenuPanel}>
+                  <Pressable
+                    onPress={() => {
+                      setWeekActionsMenuOpen(false);
+                      goToToday();
+                    }}
+                    style={styles.actionMenuItem}
+                  >
+                    <Text style={styles.actionMenuItemText}>Current Week</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      setWeekActionsMenuOpen(false);
+                      setJumpDateInput(currentWeekStartISO);
+                      setJumpToWeekOpen((prev) => !prev);
+                    }}
+                    style={styles.actionMenuItem}
+                  >
+                    <Text style={styles.actionMenuItemText}>{jumpToWeekOpen ? "Cancel Jump" : "Jump to Week"}</Text>
+                  </Pressable>
+                  {canEditCalendarTraining ? (
+                    <>
+                      <Pressable
+                        onPress={() => {
+                          setWeekActionsMenuOpen(false);
+                          openCopyWeekModal();
+                        }}
+                        style={[styles.actionMenuItem, (copyingWeek || clearingWeek) && styles.actionMenuItemDisabled]}
+                        disabled={copyingWeek || clearingWeek}
+                      >
+                        <Text style={styles.actionMenuItemText}>{copyingWeek ? "Copying..." : "Copy Week..."}</Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => {
+                          setWeekActionsMenuOpen(false);
+                          handleClearThisWeek();
+                        }}
+                        style={[styles.actionMenuItem, (copyingWeek || clearingWeek) && styles.actionMenuItemDisabled]}
+                        disabled={copyingWeek || clearingWeek}
+                      >
+                        <Text style={styles.actionMenuItemText}>{clearingWeek ? "Clearing..." : "Clear This Week"}</Text>
+                      </Pressable>
+                    </>
+                  ) : null}
+                </View>
+              ) : null}
+            </View>
+
+            {canExportCalendar ? (
+              <View style={styles.actionMenuWrap}>
+                <Pressable
+                  style={styles.actionMenuTrigger}
+                  onPress={() => {
+                    setExportMenuOpen((prev) => !prev);
+                    setVisibilityMenuOpen(false);
+                    setWeekActionsMenuOpen(false);
+                  }}
+                >
+                  <Text style={styles.actionMenuLabel}>Export</Text>
+                  <Text style={styles.actionMenuValue}>PDFs</Text>
+                  <Text style={styles.actionMenuChevron}>{exportMenuOpen ? "▴" : "▾"}</Text>
+                </Pressable>
+                {exportMenuOpen ? (
+                  <View style={styles.actionMenuPanel}>
+                    <Pressable
+                      onPress={() => {
+                        setExportMenuOpen(false);
+                        void handleExportWeekPdf();
+                      }}
+                      style={[styles.actionMenuItem, (exportingPdf || copyingWeek || clearingWeek) && styles.actionMenuItemDisabled]}
+                      disabled={exportingPdf || copyingWeek || clearingWeek}
+                    >
+                      <Text style={styles.actionMenuItemText}>{exportingPdf ? "Exporting..." : "Export PDF"}</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => {
+                        setExportMenuOpen(false);
+                        openTrainingPlanExport();
+                      }}
+                      style={[styles.actionMenuItem, (exportingTrainingPlanPdf || copyingWeek || clearingWeek) && styles.actionMenuItemDisabled]}
+                      disabled={exportingTrainingPlanPdf || copyingWeek || clearingWeek}
+                    >
+                      <Text style={styles.actionMenuItemText}>{exportingTrainingPlanPdf ? "Exporting..." : "Export Training Plan"}</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+          </View>
+        ) : null}
 
         {calendarMode === "week" && weekLabelEditorOpen ? (
           <View style={styles.weekLabelEditorPanel}>
@@ -4033,30 +4159,6 @@ export default function CoachCalendarMonth() {
           </View>
         ) : null}
 
-        {calendarMode === "week" ? (
-          <View style={styles.weekActionsRow}>
-            {canEditCalendarTraining ? (
-              <>
-                <Pressable onPress={openCopyWeekModal} style={styles.todayBtn} disabled={copyingWeek || clearingWeek}>
-                  <Text style={styles.todayBtnText}>{copyingWeek ? "Copying..." : "Copy Week..."}</Text>
-                </Pressable>
-                <Pressable onPress={handleClearThisWeek} style={styles.todayBtn} disabled={copyingWeek || clearingWeek}>
-                  <Text style={styles.todayBtnText}>{clearingWeek ? "Clearing..." : "Clear This Week"}</Text>
-                </Pressable>
-              </>
-            ) : null}
-            {canExportCalendar ? (
-              <>
-                <Pressable onPress={() => void handleExportWeekPdf()} style={styles.todayBtn} disabled={exportingPdf || copyingWeek || clearingWeek}>
-                  <Text style={styles.todayBtnText}>{exportingPdf ? "Exporting..." : "Export PDF"}</Text>
-                </Pressable>
-                <Pressable onPress={openTrainingPlanExport} style={styles.todayBtn} disabled={exportingTrainingPlanPdf || copyingWeek || clearingWeek}>
-                  <Text style={styles.todayBtnText}>{exportingTrainingPlanPdf ? "Exporting..." : "Export Training Plan"}</Text>
-                </Pressable>
-              </>
-            ) : null}
-          </View>
-        ) : null}
       </View>
 
       <View style={[styles.modeRow, calendarMode === "month" && isWebDesktop && styles.monthDesktopInset]}>
@@ -4925,11 +5027,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 6,
     gap: 6,
+    position: "relative",
+    zIndex: 800,
   },
   headerTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" },
+  weekHeaderTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" },
   headerLeftGroup: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0 },
   headerCenter: { alignItems: "center", flex: 1, minWidth: 210, gap: 3 },
+  weekHeaderCenter: { minWidth: 150 },
   headerRight: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", flexShrink: 1, minWidth: 0 },
+  weekNavCluster: { flex: 1, minWidth: 280, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  headerPrimaryActions: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 6, flexWrap: "wrap" },
   todayBtn: {
     height: 32,
     paddingHorizontal: 10,
@@ -4943,6 +5051,14 @@ const styles = StyleSheet.create({
   todayBtnText: { fontSize: 12, fontWeight: "800", color: "#222" },
   monthLabel: { fontSize: 18, fontWeight: "800", color: "#111" },
   subLabel: { marginTop: 1, fontSize: 11, fontWeight: "600", color: "#6b6b6b" },
+  weekHeaderChipsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    flexWrap: "wrap",
+    maxWidth: "100%",
+  },
   weekLabelSummaryRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -4951,6 +5067,31 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     maxWidth: "100%",
   },
+  relativeWeekChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  relativeWeekChipCurrent: {
+    borderColor: "rgba(34,197,94,0.35)",
+    backgroundColor: "rgba(34,197,94,0.12)",
+  },
+  relativeWeekChipPast: {
+    borderColor: "rgba(100,116,139,0.35)",
+    backgroundColor: "rgba(100,116,139,0.1)",
+  },
+  relativeWeekChipFuture: {
+    borderColor: "rgba(245,158,11,0.4)",
+    backgroundColor: "rgba(245,158,11,0.12)",
+  },
+  relativeWeekChipText: {
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  relativeWeekChipTextCurrent: { color: "#166534" },
+  relativeWeekChipTextPast: { color: "#64748b" },
+  relativeWeekChipTextFuture: { color: "#b45309" },
   weekLabelSummaryChip: {
     maxWidth: 260,
     borderWidth: 1,
@@ -5018,6 +5159,63 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   weekLabelTypeChoiceText: { fontSize: 9, fontWeight: "900" },
+  weekSecondaryRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    flexWrap: "wrap",
+    position: "relative",
+    zIndex: 900,
+  },
+  actionMenuWrap: {
+    position: "relative",
+    minWidth: 150,
+    zIndex: 910,
+  },
+  actionMenuTrigger: {
+    minHeight: 34,
+    borderWidth: 1,
+    borderColor: "#d7d7d7",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  actionMenuLabel: { fontSize: 11, fontWeight: "900", color: "#0f172a" },
+  actionMenuValue: { flex: 1, fontSize: 10, fontWeight: "800", color: "#64748b", textAlign: "right" },
+  actionMenuChevron: { fontSize: 10, fontWeight: "900", color: "#64748b" },
+  actionMenuPanel: {
+    position: "absolute",
+    top: 38,
+    left: 0,
+    right: 0,
+    borderWidth: 1,
+    borderColor: "#dbe2ee",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    overflow: "hidden",
+    zIndex: 950,
+    ...(Platform.OS === "web"
+      ? ({
+          boxShadow: "0 12px 28px rgba(15, 23, 42, 0.16)",
+        } as any)
+      : null),
+    ...(Platform.OS === "android" ? { elevation: 8 } : null),
+  },
+  actionMenuItem: {
+    minHeight: 34,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#edf2f7",
+    justifyContent: "center",
+  },
+  actionMenuItemDisabled: { opacity: 0.48 },
+  actionMenuItemText: { fontSize: 12, fontWeight: "800", color: "#1f2937" },
   weekActionsRow: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" },
   jumpWeekPanel: {
     borderWidth: 1,
