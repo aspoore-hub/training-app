@@ -27,6 +27,7 @@ import { loadCoachWeekLabels, loadCoreCoachSettings, loadWeekStartSetting, saveC
 import { loadJSON, saveJSON } from "../../../lib/storage";
 import { getWeekLabelTone, getWeekLabelToneColors, getWeekLabelToneText, type WeekLabelType } from "../../../lib/weekLabelStyle";
 import {
+  doesAthleteOverlapDateRange,
   isAthleteEligibleDuringWeek,
   normalizeTeamRosterAthlete,
   resolveAthleteSeasonWindowWithTenure,
@@ -1483,6 +1484,7 @@ export default function CoachMileageTab() {
       .filter((athlete) => {
         const athleteId = String(athlete.id ?? "").trim();
         if (!athleteId) return false;
+        if (!doesAthleteOverlapDateRange(athlete, seasonMileageRange.startISO, seasonMileageRange.endISO)) return false;
         if (selectedTrainingGroupIds.length > 0 && !selectedTrainingGroupAthleteIds.has(athleteId)) return false;
         if (seasonId && isAthleteExcludedFromSeason(athleteId, seasonId, s.athleteSeasonOverrides ?? [])) return false;
         const resolvedWindow = resolveSeasonMileageWindowForAthlete(athleteId);

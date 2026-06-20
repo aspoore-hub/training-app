@@ -30,6 +30,7 @@ import {
 } from "../../lib/teamWorkoutBatchHeadersCloud";
 import {
   compareAthleteDisplayNamesByLastName,
+  isAthleteActiveOnDate,
   isAthleteEligibleForPlanningDate,
   loadTeamRoster,
   resolveAthleteDisplayName,
@@ -1830,7 +1831,20 @@ export default function CoachWorkoutsDay() {
       }
 
       const persistedForDay = persistedDraftCache[targetDateISO];
-      let nextRows = workoutRows;
+      const rosterById = new Map(
+        (Array.isArray(rosterRows) ? rosterRows : [])
+          .map((athlete) => [String(athlete.id ?? "").trim(), athlete] as const)
+          .filter(([athleteId]) => !!athleteId)
+      );
+      let nextRows =
+        rosterById.size > 0
+          ? workoutRows.filter((row) => {
+              const athleteId = String(row.athlete_profile_id ?? "").trim();
+              const dateISO = String(row.date_iso ?? targetDateISO).trim() || targetDateISO;
+              const athlete = athleteId ? rosterById.get(athleteId) : null;
+              return !!athlete && isAthleteActiveOnDate(athlete, dateISO);
+            })
+          : workoutRows;
       debugWorkouts("[workouts] loadDay:rows", { count: nextRows.length });
       const batchHeaderNotesByLookup = new Map<string, { notes: string; updatedAt: number }>();
       (Array.isArray(batchHeaderRows) ? batchHeaderRows : []).forEach((row) => {
@@ -1936,7 +1950,7 @@ export default function CoachWorkoutsDay() {
           };
         });
 
-        nextRows = workoutRows.map((row) => {
+        nextRows = nextRows.map((row) => {
           const workoutId = String(row.id);
           const batchKey = getBatchKey(row);
           const batchDraft = nextBatchDrafts[batchKey];
@@ -1985,7 +1999,7 @@ export default function CoachWorkoutsDay() {
         athleteDraftCount: Object.keys(nextAthleteDrafts).length,
       });
       const nextSavedAthleteDrafts: Record<string, AthleteDraft> = {};
-      workoutRows.forEach((w) => {
+      nextRows.forEach((w) => {
         nextSavedAthleteDrafts[String(w.id)] = toAthleteDraftFromRow(w);
       });
       savedAthleteDraftsRef.current = nextSavedAthleteDrafts;

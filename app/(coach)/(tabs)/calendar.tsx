@@ -42,6 +42,7 @@ import {
 import {
   compareAthleteDisplayNamesByLastName,
   getRosterMapById,
+  isAthleteActiveOnDate,
   loadTeamRoster,
   resolveAthleteSeasonWindowWithTenure,
   resolveAthleteDisplayName,
@@ -1621,14 +1622,28 @@ export default function CoachCalendarMonth() {
         end: fetchEndISO,
         count: workoutRows?.length ?? 0,
       });
-      const nextWorkouts = (workoutRows ?? []).map(toLegacyWorkout);
+      const [, rosterMapForOptions, rosterRowsForOptions] = await metadataPromise;
+      const rosterById = new Map(
+        (Array.isArray(rosterRowsForOptions) ? rosterRowsForOptions : [])
+          .map((athlete) => [String(athlete.id ?? "").trim(), athlete] as const)
+          .filter(([athleteId]) => !!athleteId)
+      );
+      const activeWorkoutRows =
+        rosterById.size > 0
+          ? (workoutRows ?? []).filter((row) => {
+              const athleteId = String(row.athlete_profile_id ?? "").trim();
+              const dateISO = String(row.date_iso ?? "").trim();
+              const athlete = athleteId ? rosterById.get(athleteId) : null;
+              return !!athlete && isAthleteActiveOnDate(athlete, dateISO);
+            })
+          : (workoutRows ?? []);
+      const nextWorkouts = activeWorkoutRows.map(toLegacyWorkout);
       setAllWorkouts(nextWorkouts);
       void AsyncStorage.setItem(
         COACH_CALENDAR_WORKOUTS_CACHE_KEY,
         JSON.stringify({ workouts: nextWorkouts, updatedAt: Date.now() })
       ).catch(() => {});
 
-      const [, rosterMapForOptions, rosterRowsForOptions] = await metadataPromise;
       const activeOptions = (Array.isArray(rosterRowsForOptions) ? rosterRowsForOptions : [])
         .filter((athlete) => athlete.isActive !== false)
         .map((athlete) => ({

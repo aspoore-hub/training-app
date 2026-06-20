@@ -16,6 +16,8 @@ export type TeamRosterAthlete = {
   claimedUserId: string | null;
   gradYear: number | null;
   isActive: boolean | null;
+  rosterStatus: string | null;
+  leftAt: string | null;
   teamStartDate: string | null;
   teamEndDate: string | null;
 };
@@ -96,6 +98,8 @@ export function normalizeTeamRosterAthlete(raw: Partial<TeamAthlete> & { active?
     claimedUserId: String(raw.claimed_user_id ?? "").trim() || null,
     gradYear: typeof raw.grad_year === "number" && Number.isFinite(raw.grad_year) ? raw.grad_year : null,
     isActive: typeof raw.active === "boolean" ? raw.active : isRosterStatusActive(raw.roster_status),
+    rosterStatus: String(raw.roster_status ?? "").trim() || null,
+    leftAt: String(raw.left_at ?? "").trim() || null,
     teamStartDate: String(raw.team_start_date ?? "").trim() || null,
     teamEndDate: String(raw.team_end_date ?? "").trim() || null,
   };
@@ -108,6 +112,123 @@ function isValidDateOnlyISO(value: unknown): value is string {
 function normalizeDateOnly(value: unknown): string | null {
   const text = String(value ?? "").trim();
   return isValidDateOnlyISO(text) ? text : null;
+}
+
+type AthleteEligibilityOptions = {
+  includeArchived?: boolean;
+  includeInactive?: boolean;
+};
+
+type AthleteEligibilityInput =
+  | {
+      isActive?: boolean | null;
+      rosterStatus?: string | null;
+      roster_status?: string | null;
+      teamStartDate?: string | null;
+      teamEndDate?: string | null;
+      team_start_date?: string | null;
+      team_end_date?: string | null;
+      leftAt?: string | null;
+      left_at?: string | null;
+    }
+  | null
+  | undefined;
+
+function getAthleteRosterStatus(athlete: AthleteEligibilityInput): string {
+  return String(
+    athlete && "rosterStatus" in athlete
+      ? athlete.rosterStatus
+      : athlete && "roster_status" in athlete
+        ? athlete.roster_status
+        : ""
+  ).trim().toLowerCase();
+}
+
+function getAthleteStartDate(athlete: AthleteEligibilityInput): string | null {
+  return normalizeDateOnly(
+    athlete && "teamStartDate" in athlete
+      ? athlete.teamStartDate
+      : athlete && "team_start_date" in athlete
+        ? athlete.team_start_date
+        : null
+  );
+}
+
+function getAthleteEndDate(athlete: AthleteEligibilityInput): string | null {
+  return normalizeDateOnly(
+    athlete && "teamEndDate" in athlete
+      ? athlete.teamEndDate
+      : athlete && "team_end_date" in athlete
+        ? athlete.team_end_date
+        : null
+  );
+}
+
+export function isAthleteArchived(athlete: AthleteEligibilityInput): boolean {
+  return getAthleteRosterStatus(athlete) === "archived";
+}
+
+export function isAthleteActiveByRosterStatus(
+  athlete: AthleteEligibilityInput,
+  options: AthleteEligibilityOptions = {}
+): boolean {
+  if (!athlete) return false;
+  if (!options.includeArchived && isAthleteArchived(athlete)) return false;
+  if (options.includeInactive) return true;
+  if (typeof athlete.isActive === "boolean") return athlete.isActive;
+  return isRosterStatusActive(getAthleteRosterStatus(athlete));
+}
+
+export function isAthleteActiveOnDate(
+  athlete: AthleteEligibilityInput,
+  dateISO: string,
+  options: AthleteEligibilityOptions = {}
+): boolean {
+  const date = normalizeDateOnly(dateISO);
+  if (!date || !isAthleteActiveByRosterStatus(athlete, options)) return false;
+  const start = getAthleteStartDate(athlete);
+  const end = getAthleteEndDate(athlete);
+  if (start && date < start) return false;
+  if (end && date > end) return false;
+  return true;
+}
+
+export function doesAthleteOverlapDateRange(
+  athlete: AthleteEligibilityInput,
+  startISO: string,
+  endISO: string,
+  options: AthleteEligibilityOptions = {}
+): boolean {
+  const start = normalizeDateOnly(startISO);
+  const end = normalizeDateOnly(endISO);
+  if (!start || !end || end < start) return false;
+  if (!isAthleteActiveByRosterStatus(athlete, options)) return false;
+  const athleteStart = getAthleteStartDate(athlete);
+  const athleteEnd = getAthleteEndDate(athlete);
+  if (athleteStart && athleteStart > end) return false;
+  if (athleteEnd && athleteEnd < start) return false;
+  return true;
+}
+
+export function filterActiveAthletesForDate<T extends AthleteEligibilityInput>(
+  athletes: T[],
+  dateISO: string,
+  options: AthleteEligibilityOptions = {}
+): T[] {
+  return (Array.isArray(athletes) ? athletes : []).filter((athlete) =>
+    isAthleteActiveOnDate(athlete, dateISO, options)
+  );
+}
+
+export function filterActiveAthletesForRange<T extends AthleteEligibilityInput>(
+  athletes: T[],
+  startISO: string,
+  endISO: string,
+  options: AthleteEligibilityOptions = {}
+): T[] {
+  return (Array.isArray(athletes) ? athletes : []).filter((athlete) =>
+    doesAthleteOverlapDateRange(athlete, startISO, endISO, options)
+  );
 }
 
 export function isAthleteWithinTeamTenureOnDate(
@@ -236,13 +357,7 @@ export function isAthleteEligibleOnDate(
     | undefined,
   dateISO: string
 ): boolean {
-  if (!athlete) return false;
-  const activeByStatus =
-    typeof athlete.isActive === "boolean"
-      ? athlete.isActive
-      : isRosterStatusActive(athlete.roster_status);
-  if (!activeByStatus) return false;
-  return isAthleteWithinTeamTenureOnDate(athlete, dateISO);
+  return isAthleteActiveOnDate(athlete, dateISO);
 }
 
 export function isAthleteEligibleDuringWeek(
@@ -260,35 +375,7 @@ export function isAthleteEligibleDuringWeek(
   weekStartISO: string,
   weekEndISO: string
 ): boolean {
-  if (!athlete) return false;
-  const weekStart = normalizeDateOnly(weekStartISO);
-  const weekEnd = normalizeDateOnly(weekEndISO);
-  if (!weekStart || !weekEnd) return false;
-
-  const activeByStatus =
-    typeof athlete.isActive === "boolean"
-      ? athlete.isActive
-      : isRosterStatusActive(athlete.roster_status);
-  if (!activeByStatus) return false;
-
-  const start = normalizeDateOnly(
-    athlete && "teamStartDate" in athlete
-      ? athlete.teamStartDate
-      : athlete && "team_start_date" in athlete
-        ? athlete.team_start_date
-        : null
-  );
-  const end = normalizeDateOnly(
-    athlete && "teamEndDate" in athlete
-      ? athlete.teamEndDate
-      : athlete && "team_end_date" in athlete
-        ? athlete.team_end_date
-        : null
-  );
-
-  if (start && start > weekEnd) return false;
-  if (end && end < weekStart) return false;
-  return true;
+  return doesAthleteOverlapDateRange(athlete, weekStartISO, weekEndISO);
 }
 
 export function isAthleteEligibleForPlanningDate(input: {
