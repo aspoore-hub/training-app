@@ -25,6 +25,7 @@ import type { WorkoutCategory } from "../../lib/types";
 
 type AutosaveStatus = "idle" | "dirty" | "saving" | "saved" | "error";
 type CategoryAssignmentTarget = "pre" | "post";
+type ManagerTab = "routines" | "drills";
 const ALL_FOLDERS_ID = "__all__";
 const UNCATEGORIZED_FOLDER_ID = "__uncategorized__";
 
@@ -92,6 +93,7 @@ export function AuxiliaryRoutinesManager() {
   const [auxiliaryAutosaveStatus, setAuxiliaryAutosaveStatus] = useState<AutosaveStatus>("idle");
   const [auxiliaryDeleteBusy, setAuxiliaryDeleteBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<ManagerTab>("routines");
   const [openCategorySelector, setOpenCategorySelector] = useState<CategoryAssignmentTarget | null>(null);
   const [drillFolders, setDrillFolders] = useState<DrillFolder[]>([]);
   const [drillLibraryItems, setDrillLibraryItems] = useState<DrillLibraryItem[]>([]);
@@ -99,6 +101,9 @@ export function AuxiliaryRoutinesManager() {
   const [newFolderName, setNewFolderName] = useState("");
   const [libraryQuery, setLibraryQuery] = useState("");
   const [libraryFolderFilterId, setLibraryFolderFilterId] = useState(ALL_FOLDERS_ID);
+  const [insertPickerOpen, setInsertPickerOpen] = useState(false);
+  const [insertQuery, setInsertQuery] = useState("");
+  const [insertFolderFilterId, setInsertFolderFilterId] = useState(ALL_FOLDERS_ID);
   const [selectedDrillId, setSelectedDrillId] = useState<string | null>(null);
   const [drillNameDraft, setDrillNameDraft] = useState("");
   const [drillFolderIdDraft, setDrillFolderIdDraft] = useState<string | null>(null);
@@ -151,19 +156,36 @@ export function AuxiliaryRoutinesManager() {
     });
   }, [drillLibraryItems, libraryFolderFilterId, libraryQuery]);
 
+  const insertableDrillLibraryItems = useMemo(() => {
+    const needle = insertQuery.trim().toLowerCase();
+    return drillLibraryItems.filter((item) => {
+      const folderMatches =
+        insertFolderFilterId === ALL_FOLDERS_ID ||
+        (insertFolderFilterId === UNCATEGORIZED_FOLDER_ID
+          ? !String(item.folderId ?? "").trim()
+          : String(item.folderId ?? "").trim() === insertFolderFilterId);
+      if (!folderMatches) return false;
+      if (!needle) return true;
+      return [item.name, item.defaultDetails, item.videoUrl, ...(item.categoryNames ?? [])]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle);
+    });
+  }, [drillLibraryItems, insertFolderFilterId, insertQuery]);
+
   const selectedAuxiliaryRoutine = useMemo(
     () => sortedAuxiliaryRoutines.find((routine) => routine.id === selectedAuxiliaryRoutineId) ?? null,
     [sortedAuxiliaryRoutines, selectedAuxiliaryRoutineId]
   );
 
-  const selectedDrill = useMemo(
-    () => drillLibraryItems.find((item) => item.id === selectedDrillId) ?? null,
-    [drillLibraryItems, selectedDrillId]
-  );
-
   const selectedFilterFolder = useMemo(
     () => drillFolders.find((folder) => folder.id === selectedFolderFilterId) ?? null,
     [drillFolders, selectedFolderFilterId]
+  );
+
+  const selectedLibraryFilterFolder = useMemo(
+    () => drillFolders.find((folder) => folder.id === libraryFolderFilterId) ?? null,
+    [drillFolders, libraryFolderFilterId]
   );
 
   function folderName(folderId?: string | null) {
@@ -631,8 +653,7 @@ export function AuxiliaryRoutinesManager() {
     }
   }, [drillLibraryItems, loadManagerData, selectDrillForEdit, selectedDrillId]);
 
-  const insertSelectedDrillIntoRoutine = useCallback(async () => {
-    const item = selectedDrill;
+  const insertDrillIntoRoutine = useCallback((item: DrillLibraryItem | null) => {
     if (!item) {
       Alert.alert("Select a drill", "Choose a drill from the library first.");
       return;
@@ -642,7 +663,8 @@ export function AuxiliaryRoutinesManager() {
     if (!line) return;
     setAuxiliaryDetailsDraft((current) => `${current.trimEnd()}${current.trim() ? "\n" : ""}${line}`);
     setAuxiliaryAutosaveStatus("dirty");
-  }, [selectedDrill]);
+    setInsertPickerOpen(false);
+  }, []);
 
   function formatCategorySummary(selectedNames: string[]) {
     if (selectedNames.length === 0) return "No categories selected";
@@ -749,16 +771,9 @@ export function AuxiliaryRoutinesManager() {
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text style={styles.cardTitle}>Drill Routines</Text>
           <Text style={styles.cardHint}>
-            Create and maintain warmups, cooldowns, drills, mobility, plyos, and strength routines coaches assign to workouts.
+            Manage assignable routines separately from reusable individual drills.
           </Text>
         </View>
-        <Pressable
-          onPress={createNewAuxiliaryRoutine}
-          disabled={readOnly}
-          style={[styles.actionBtn, readOnly && styles.disabledBtn]}
-        >
-          <Text style={styles.actionBtnText}>New Routine</Text>
-        </Pressable>
       </View>
 
       {readOnly ? (
@@ -766,119 +781,442 @@ export function AuxiliaryRoutinesManager() {
       ) : null}
       {loadError ? <Text style={styles.errorText}>{loadError}</Text> : null}
 
-      <View style={styles.folderPanel}>
-        <View style={styles.folderPanelHeader}>
-          <View style={{ flex: 1, minWidth: 0 }}>
-            <Text style={styles.sectionTitle}>Folders</Text>
-            <Text style={styles.cardHint}>Organize drill routines and reusable drills without changing workout assignments.</Text>
-          </View>
-          <View style={styles.newFolderRow}>
-            <TextInput
-              value={newFolderName}
-              onChangeText={setNewFolderName}
-              placeholder="New folder"
-              style={[styles.compactInput, readOnly && styles.inputDisabled]}
-              editable={!readOnly}
-            />
-            <Pressable onPress={() => void createFolder()} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
-              <Text style={styles.smallActionBtnText}>Add</Text>
+      <View style={styles.tabRow}>
+        {[
+          { id: "routines" as ManagerTab, label: "Routines" },
+          { id: "drills" as ManagerTab, label: "Drill Library" },
+        ].map((tab) => {
+          const active = activeTab === tab.id;
+          return (
+            <Pressable
+              key={tab.id}
+              onPress={() => setActiveTab(tab.id)}
+              style={[styles.tabButton, active && styles.tabButtonActive]}
+            >
+              <Text style={[styles.tabButtonText, active && styles.tabButtonTextActive]}>{tab.label}</Text>
             </Pressable>
-          </View>
-        </View>
-
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
-          {[
-            { id: ALL_FOLDERS_ID, name: "All" },
-            { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
-            ...drillFolders,
-          ].map((folder) => {
-            const active = selectedFolderFilterId === folder.id;
-            return (
-              <Pressable
-                key={folder.id}
-                onPress={() => {
-                  setSelectedFolderFilterId(folder.id);
-                  setLibraryFolderFilterId(folder.id);
-                }}
-                style={[styles.folderChip, active && styles.folderChipActive]}
-              >
-                <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-
-        {selectedFilterFolder && !readOnly ? (
-          <View style={styles.renameFolderRow}>
-            <Text style={styles.label}>Rename selected folder</Text>
-            <TextInput
-              defaultValue={selectedFilterFolder.name}
-              onSubmitEditing={(event) => void updateFolderName(selectedFilterFolder.id, event.nativeEvent.text)}
-              onEndEditing={(event) => void updateFolderName(selectedFilterFolder.id, event.nativeEvent.text)}
-              style={styles.compactInput}
-            />
-          </View>
-        ) : null}
+          );
+        })}
       </View>
 
-      <View style={[styles.workspace, isDesktopWeb && styles.workspaceDesktop]}>
-        <View style={[styles.listPane, isDesktopWeb && styles.listPaneDesktop]}>
-          <View style={styles.listHeader}>
-            <Text style={styles.listTitle}>Routine Library</Text>
-            <Text style={styles.listCount}>{visibleAuxiliaryRoutines.length}</Text>
+      {activeTab === "routines" ? (
+        <View style={[styles.workspace, isDesktopWeb && styles.workspaceDesktop]}>
+          <View style={[styles.listPane, isDesktopWeb && styles.listPaneDesktop]}>
+            <View style={styles.listHeader}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.listTitle}>Routines</Text>
+                <Text style={styles.listHeaderHint}>Full sets assigned to workouts</Text>
+              </View>
+              <Text style={styles.listCount}>{visibleAuxiliaryRoutines.length}</Text>
+            </View>
+
+            <View style={styles.folderPanelCompact}>
+              <View style={styles.folderPanelHeader}>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.sectionTitle}>Routine folders</Text>
+                  <Text style={styles.cardHint}>Filter full routines.</Text>
+                </View>
+                <Pressable
+                  onPress={createNewAuxiliaryRoutine}
+                  disabled={readOnly}
+                  style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}
+                >
+                  <Text style={styles.smallActionBtnText}>New Routine</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.newFolderRow}>
+                <TextInput
+                  value={newFolderName}
+                  onChangeText={setNewFolderName}
+                  placeholder="New folder"
+                  style={[styles.compactInput, readOnly && styles.inputDisabled]}
+                  editable={!readOnly}
+                />
+                <Pressable onPress={() => void createFolder()} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
+                  <Text style={styles.smallActionBtnText}>Add</Text>
+                </Pressable>
+              </View>
+
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
+                {[
+                  { id: ALL_FOLDERS_ID, name: "All" },
+                  { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
+                  ...drillFolders,
+                ].map((folder) => {
+                  const active = selectedFolderFilterId === folder.id;
+                  return (
+                    <Pressable
+                      key={`routine-filter-${folder.id}`}
+                      onPress={() => setSelectedFolderFilterId(folder.id)}
+                      style={[styles.folderChip, active && styles.folderChipActive]}
+                    >
+                      <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+
+              {selectedFilterFolder && !readOnly ? (
+                <View style={styles.renameFolderRow}>
+                  <Text style={styles.label}>Rename selected routine folder</Text>
+                  <TextInput
+                    defaultValue={selectedFilterFolder.name}
+                    onSubmitEditing={(event) => void updateFolderName(selectedFilterFolder.id, event.nativeEvent.text)}
+                    onEndEditing={(event) => void updateFolderName(selectedFilterFolder.id, event.nativeEvent.text)}
+                    style={styles.compactInput}
+                  />
+                </View>
+              ) : null}
+            </View>
+
+            <ScrollView style={styles.listBody} contentContainerStyle={{ gap: 8 }} keyboardShouldPersistTaps="handled">
+              {visibleAuxiliaryRoutines.length === 0 ? (
+                <Text style={styles.cardHint}>No routines found for this folder.</Text>
+              ) : (
+                visibleAuxiliaryRoutines.map((routine) => {
+                  const preCount = Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames.length : 0;
+                  const postCount = Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames.length : 0;
+                  const active = routine.id === selectedAuxiliaryRoutineId;
+                  return (
+                    <Pressable
+                      key={routine.id}
+                      onPress={() => void selectAuxiliaryRoutineById(routine.id)}
+                      style={[styles.listRow, active && styles.listRowActive]}
+                    >
+                      <Text style={[styles.listRowTitle, active && styles.listRowTitleActive]}>
+                        {routine.title || "Routine"}
+                      </Text>
+                      <Text style={styles.listRowMeta}>
+                        {folderName(routine.folderId)} • {preCount} pre • {postCount} post
+                      </Text>
+                    </Pressable>
+                  );
+                })
+              )}
+            </ScrollView>
           </View>
 
-          <ScrollView style={styles.listBody} contentContainerStyle={{ gap: 8 }} keyboardShouldPersistTaps="handled">
-            {visibleAuxiliaryRoutines.length === 0 ? (
-              <Text style={styles.cardHint}>No routines yet. Create one to get started.</Text>
-            ) : (
-              visibleAuxiliaryRoutines.map((routine) => {
-                const preCount = Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames.length : 0;
-                const postCount = Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames.length : 0;
-                const active = routine.id === selectedAuxiliaryRoutineId;
-                return (
-                  <Pressable
-                    key={routine.id}
-                    onPress={() => void selectAuxiliaryRoutineById(routine.id)}
-                    style={[styles.listRow, active && styles.listRowActive]}
-                  >
-                    <Text style={[styles.listRowTitle, active && styles.listRowTitleActive]}>
-                      {routine.title || "Routine"}
-                    </Text>
-                    <Text style={styles.listRowMeta}>
-                      {folderName(routine.folderId)} • {preCount} pre • {postCount} post
-                    </Text>
-                  </Pressable>
-                );
-              })
-            )}
-          </ScrollView>
-        </View>
+          <View style={[styles.editorPane, isDesktopWeb && styles.editorPaneDesktop]}>
+            {selectedAuxiliaryRoutine ? (
+              <>
+                <View style={styles.editorTitleRow}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.editorTitle}>Routine Editor</Text>
+                    <Text style={styles.cardHint}>Edit the full routine athletes and workout batches use.</Text>
+                  </View>
+                </View>
 
-        <View style={[styles.editorPane, isDesktopWeb && styles.editorPaneDesktop]}>
-          {selectedAuxiliaryRoutine ? (
-            <>
-              <Text style={styles.editorTitle}>Routine Editor</Text>
-              <Text style={styles.label}>Title</Text>
+                <Text style={styles.label}>Title</Text>
+                <TextInput
+                  value={auxiliaryTitleDraft}
+                  onChangeText={setAuxiliaryTitleDraft}
+                  onBlur={() => void commitDraft("title-blur")}
+                  placeholder="Routine name"
+                  style={[styles.input, readOnly && styles.inputDisabled]}
+                  editable={!readOnly}
+                />
+
+                <Text style={[styles.label, { marginTop: 10 }]}>Routine folder</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
+                  {[{ id: "", name: "Uncategorized" }, ...drillFolders].map((folder) => {
+                    const folderId = String(folder.id ?? "").trim() || null;
+                    const active = (auxiliaryFolderIdDraft ?? null) === folderId;
+                    return (
+                      <Pressable
+                        key={`routine-folder-${folder.id || "uncategorized"}`}
+                        disabled={readOnly}
+                        onPress={() => setAuxiliaryFolderIdDraft(folderId)}
+                        style={[styles.folderChip, active && styles.folderChipActive, readOnly && styles.disabledBtn]}
+                      >
+                        <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+
+                <Text style={[styles.label, { marginTop: 10 }]}>Details</Text>
+                <TextInput
+                  value={auxiliaryDetailsDraft}
+                  onChangeText={setAuxiliaryDetailsDraft}
+                  onBlur={() => void commitDraft("details-blur")}
+                  placeholder="Notes or instructions"
+                  style={[styles.input, styles.detailsInput, isDesktopWeb && styles.detailsInputDesktop, readOnly && styles.inputDisabled]}
+                  multiline
+                  editable={!readOnly}
+                />
+                {containsHttpUrl(auxiliaryDetailsDraft) ? (
+                  <View style={styles.linkPreviewBox}>
+                    <Text style={styles.linkPreviewLabel}>Clickable link preview</Text>
+                    <LinkifiedText text={auxiliaryDetailsDraft} style={styles.linkPreviewText} />
+                  </View>
+                ) : null}
+
+                <View style={styles.insertPanel}>
+                  <View style={styles.insertPanelHeader}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.sectionTitle}>Insert from Drill Library</Text>
+                      <Text style={styles.cardHint}>Append a reusable drill as editable routine text.</Text>
+                    </View>
+                    <Pressable onPress={() => setInsertPickerOpen((open) => !open)} style={styles.smallActionBtn}>
+                      <Text style={styles.smallActionBtnText}>{insertPickerOpen ? "Close" : "Open Picker"}</Text>
+                    </Pressable>
+                  </View>
+
+                  {insertPickerOpen ? (
+                    <View style={styles.insertPicker}>
+                      <TextInput
+                        value={insertQuery}
+                        onChangeText={setInsertQuery}
+                        placeholder="Search drills"
+                        style={styles.compactInput}
+                      />
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
+                        {[
+                          { id: ALL_FOLDERS_ID, name: "All" },
+                          { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
+                          ...drillFolders,
+                        ].map((folder) => {
+                          const active = insertFolderFilterId === folder.id;
+                          return (
+                            <Pressable
+                              key={`insert-folder-${folder.id}`}
+                              onPress={() => setInsertFolderFilterId(folder.id)}
+                              style={[styles.folderChip, active && styles.folderChipActive]}
+                            >
+                              <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
+                            </Pressable>
+                          );
+                        })}
+                      </ScrollView>
+                      <ScrollView style={styles.insertList} contentContainerStyle={{ gap: 8 }} keyboardShouldPersistTaps="handled">
+                        {insertableDrillLibraryItems.length === 0 ? (
+                          <Text style={styles.cardHint}>No library drills found.</Text>
+                        ) : (
+                          insertableDrillLibraryItems.map((item) => (
+                            <Pressable
+                              key={`insert-drill-${item.id}`}
+                              onPress={() => insertDrillIntoRoutine(item)}
+                              style={styles.insertRow}
+                            >
+                              <View style={{ flex: 1, minWidth: 0 }}>
+                                <Text style={styles.drillRowTitle}>{item.name}</Text>
+                                <Text style={styles.drillRowMeta}>{folderName(item.folderId)}</Text>
+                                {item.defaultDetails ? (
+                                  <Text numberOfLines={2} style={styles.drillRowDetails}>{item.defaultDetails}</Text>
+                                ) : null}
+                              </View>
+                              <Text style={styles.insertRowAction}>Insert</Text>
+                            </Pressable>
+                          ))
+                        )}
+                      </ScrollView>
+                    </View>
+                  ) : null}
+                </View>
+
+                <View style={styles.assignmentStack}>
+                  {renderCategorySelector({
+                    label: "Pre-run auto-assign",
+                    target: "pre",
+                    selectedNames: auxiliaryPreCategoryNamesDraft,
+                    setSelectedNames: setAuxiliaryPreCategoryNamesDraft,
+                  })}
+                  {renderCategorySelector({
+                    label: "Post-run auto-assign",
+                    target: "post",
+                    selectedNames: auxiliaryPostCategoryNamesDraft,
+                    setSelectedNames: setAuxiliaryPostCategoryNamesDraft,
+                  })}
+                </View>
+
+                <View style={styles.editorFooter}>
+                  <Text style={[styles.statusText, auxiliaryAutosaveStatus === "error" && styles.statusError]}>
+                    {auxiliaryAutosaveStatus === "saving"
+                      ? "Saving..."
+                      : auxiliaryAutosaveStatus === "dirty"
+                      ? "Unsaved changes"
+                      : auxiliaryAutosaveStatus === "saved"
+                      ? "Saved"
+                      : auxiliaryAutosaveStatus === "error"
+                      ? "Save failed"
+                      : "Ready"}
+                  </Text>
+
+                  <View style={styles.buttonRow}>
+                    <Pressable
+                      onPress={() => void saveSelectedAuxiliaryRoutine()}
+                      disabled={readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy}
+                      style={[
+                        styles.actionBtn,
+                        (readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy) && styles.disabledBtn,
+                      ]}
+                    >
+                      <Text style={styles.actionBtnText}>
+                        {auxiliaryAutosaveStatus === "saving" ? "Saving..." : "Save Routine"}
+                      </Text>
+                    </Pressable>
+
+                    <Pressable
+                      onPress={confirmDeleteSelectedAuxiliaryRoutine}
+                      disabled={readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy}
+                      style={[
+                        styles.deleteBtn,
+                        (readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy) && styles.disabledBtn,
+                      ]}
+                    >
+                      <Text style={styles.deleteBtnText}>{auxiliaryDeleteBusy ? "Deleting..." : "Delete"}</Text>
+                    </Pressable>
+                  </View>
+                </View>
+                {auxiliaryAutosaveStatus === "error" ? (
+                  <Text style={[styles.errorText, { marginTop: 8 }]}>
+                    Couldn't save routine. Your draft is still here.
+                  </Text>
+                ) : null}
+              </>
+            ) : (
+              <View style={styles.emptyEditor}>
+                <Text style={styles.cardTitle}>No routine selected</Text>
+                <Text style={styles.cardHint}>Select a routine on the left, or create a new routine to begin editing.</Text>
+                <Pressable
+                  onPress={createNewAuxiliaryRoutine}
+                  disabled={readOnly}
+                  style={[styles.actionBtn, { alignSelf: "flex-start" }, readOnly && styles.disabledBtn]}
+                >
+                  <Text style={styles.actionBtnText}>Create Routine</Text>
+                </Pressable>
+              </View>
+            )}
+          </View>
+        </View>
+      ) : (
+        <View style={[styles.workspace, isDesktopWeb && styles.workspaceDesktop]}>
+          <View style={[styles.listPane, isDesktopWeb && styles.listPaneDesktop]}>
+            <View style={styles.listHeader}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.listTitle}>Drill Library</Text>
+                <Text style={styles.listHeaderHint}>Reusable individual drills</Text>
+              </View>
+              <Text style={styles.listCount}>{filteredDrillLibraryItems.length}</Text>
+            </View>
+
+            <View style={styles.folderPanelCompact}>
+              <View style={styles.folderPanelHeader}>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.sectionTitle}>Drill folders</Text>
+                  <Text style={styles.cardHint}>Filter individual drills.</Text>
+                </View>
+                <Pressable onPress={createNewDrillDraft} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
+                  <Text style={styles.smallActionBtnText}>New Drill</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.newFolderRow}>
+                <TextInput
+                  value={newFolderName}
+                  onChangeText={setNewFolderName}
+                  placeholder="New folder"
+                  style={[styles.compactInput, readOnly && styles.inputDisabled]}
+                  editable={!readOnly}
+                />
+                <Pressable onPress={() => void createFolder()} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
+                  <Text style={styles.smallActionBtnText}>Add</Text>
+                </Pressable>
+              </View>
+
               <TextInput
-                value={auxiliaryTitleDraft}
-                onChangeText={setAuxiliaryTitleDraft}
-                onBlur={() => void commitDraft("title-blur")}
-                placeholder="Routine name"
-                style={[styles.input, readOnly && styles.inputDisabled]}
-                editable={!readOnly}
+                value={libraryQuery}
+                onChangeText={setLibraryQuery}
+                placeholder="Search drills"
+                style={styles.compactInput}
               />
 
-              <Text style={[styles.label, { marginTop: 10 }]}>Routine folder</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
+                {[
+                  { id: ALL_FOLDERS_ID, name: "All" },
+                  { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
+                  ...drillFolders,
+                ].map((folder) => {
+                  const active = libraryFolderFilterId === folder.id;
+                  return (
+                    <Pressable
+                      key={`library-filter-${folder.id}`}
+                      onPress={() => setLibraryFolderFilterId(folder.id)}
+                      style={[styles.folderChip, active && styles.folderChipActive]}
+                    >
+                      <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+
+              {selectedLibraryFilterFolder && !readOnly ? (
+                <View style={styles.renameFolderRow}>
+                  <Text style={styles.label}>Rename selected drill folder</Text>
+                  <TextInput
+                    defaultValue={selectedLibraryFilterFolder.name}
+                    onSubmitEditing={(event) => void updateFolderName(selectedLibraryFilterFolder.id, event.nativeEvent.text)}
+                    onEndEditing={(event) => void updateFolderName(selectedLibraryFilterFolder.id, event.nativeEvent.text)}
+                    style={styles.compactInput}
+                  />
+                </View>
+              ) : null}
+            </View>
+
+            <ScrollView style={styles.listBody} contentContainerStyle={{ gap: 8 }} keyboardShouldPersistTaps="handled">
+              {filteredDrillLibraryItems.length === 0 ? (
+                <Text style={styles.cardHint}>No library drills yet. Add drills here, then insert them into routines.</Text>
+              ) : (
+                filteredDrillLibraryItems.map((item) => {
+                  const active = item.id === selectedDrillId;
+                  return (
+                    <Pressable
+                      key={item.id}
+                      onPress={() => selectDrillForEdit(item)}
+                      style={[styles.drillRow, active && styles.drillRowActive]}
+                    >
+                      <Text style={styles.drillRowTitle}>{item.name}</Text>
+                      <Text style={styles.drillRowMeta}>{folderName(item.folderId)}</Text>
+                      {item.defaultDetails ? (
+                        <Text numberOfLines={2} style={styles.drillRowDetails}>{item.defaultDetails}</Text>
+                      ) : null}
+                      {item.videoUrl ? <Text style={styles.drillRowMeta}>Video link saved</Text> : null}
+                    </Pressable>
+                  );
+                })
+              )}
+            </ScrollView>
+          </View>
+
+          <View style={[styles.editorPane, isDesktopWeb && styles.editorPaneDesktop]}>
+            <View style={styles.drillEditorStandalone}>
+              <View style={styles.editorTitleRow}>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.editorTitle}>{selectedDrillId ? "Drill Editor" : "New Library Drill"}</Text>
+                  <Text style={styles.cardHint}>Save reusable drills with default cues and video links.</Text>
+                </View>
+              </View>
+
+              <Text style={styles.label}>Drill name</Text>
+              <TextInput
+                value={drillNameDraft}
+                onChangeText={setDrillNameDraft}
+                placeholder="Drill name"
+                editable={!readOnly}
+                style={[styles.input, readOnly && styles.inputDisabled]}
+              />
+
+              <Text style={[styles.label, { marginTop: 10 }]}>Drill folder</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
                 {[{ id: "", name: "Uncategorized" }, ...drillFolders].map((folder) => {
                   const folderId = String(folder.id ?? "").trim() || null;
-                  const active = (auxiliaryFolderIdDraft ?? null) === folderId;
+                  const active = (drillFolderIdDraft ?? null) === folderId;
                   return (
                     <Pressable
-                      key={`routine-folder-${folder.id || "uncategorized"}`}
+                      key={`drill-folder-${folder.id || "uncategorized"}`}
                       disabled={readOnly}
-                      onPress={() => setAuxiliaryFolderIdDraft(folderId)}
+                      onPress={() => setDrillFolderIdDraft(folderId)}
                       style={[styles.folderChip, active && styles.folderChipActive, readOnly && styles.disabledBtn]}
                     >
                       <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
@@ -887,231 +1225,57 @@ export function AuxiliaryRoutinesManager() {
                 })}
               </ScrollView>
 
-              <Text style={[styles.label, { marginTop: 10 }]}>Details</Text>
+              <Text style={[styles.label, { marginTop: 10 }]}>Default prescription / coaching cues</Text>
               <TextInput
-                value={auxiliaryDetailsDraft}
-                onChangeText={setAuxiliaryDetailsDraft}
-                onBlur={() => void commitDraft("details-blur")}
-                placeholder="Notes or instructions"
-                style={[styles.input, styles.detailsInput, isDesktopWeb && styles.detailsInputDesktop, readOnly && styles.inputDisabled]}
-                multiline
+                value={drillDetailsDraft}
+                onChangeText={setDrillDetailsDraft}
+                placeholder="Default prescription or coaching cues"
                 editable={!readOnly}
+                multiline
+                style={[styles.input, styles.drillDetailsInputLarge, readOnly && styles.inputDisabled]}
               />
-              {containsHttpUrl(auxiliaryDetailsDraft) ? (
+
+              <Text style={[styles.label, { marginTop: 10 }]}>Video URL</Text>
+              <TextInput
+                value={drillVideoUrlDraft}
+                onChangeText={setDrillVideoUrlDraft}
+                placeholder="https://..."
+                autoCapitalize="none"
+                editable={!readOnly}
+                style={[styles.input, readOnly && styles.inputDisabled]}
+              />
+              {containsHttpUrl(drillVideoUrlDraft) ? (
                 <View style={styles.linkPreviewBox}>
-                  <Text style={styles.linkPreviewLabel}>Clickable link preview</Text>
-                  <LinkifiedText text={auxiliaryDetailsDraft} style={styles.linkPreviewText} />
+                  <Text style={styles.linkPreviewLabel}>Link preview</Text>
+                  <LinkifiedText text={drillVideoUrlDraft} style={styles.linkPreviewText} />
                 </View>
               ) : null}
-
-              <View style={styles.assignmentStack}>
-                {renderCategorySelector({
-                  label: "Pre-run auto-assign",
-                  target: "pre",
-                  selectedNames: auxiliaryPreCategoryNamesDraft,
-                  setSelectedNames: setAuxiliaryPreCategoryNamesDraft,
-                })}
-                {renderCategorySelector({
-                  label: "Post-run auto-assign",
-                  target: "post",
-                  selectedNames: auxiliaryPostCategoryNamesDraft,
-                  setSelectedNames: setAuxiliaryPostCategoryNamesDraft,
-                })}
-              </View>
-
-              <View style={styles.libraryPanel}>
-                <View style={styles.libraryHeaderRow}>
-                  <View style={{ flex: 1, minWidth: 0 }}>
-                    <Text style={styles.sectionTitle}>Drill Library</Text>
-                    <Text style={styles.cardHint}>Save common drills once, then insert editable lines into this routine.</Text>
-                  </View>
-                  <Pressable onPress={createNewDrillDraft} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
-                    <Text style={styles.smallActionBtnText}>New Drill</Text>
-                  </Pressable>
-                </View>
-
-                <View style={styles.libraryControls}>
-                  <TextInput
-                    value={libraryQuery}
-                    onChangeText={setLibraryQuery}
-                    placeholder="Search drills"
-                    style={styles.compactInput}
-                  />
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
-                    {[
-                      { id: ALL_FOLDERS_ID, name: "All" },
-                      { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
-                      ...drillFolders,
-                    ].map((folder) => {
-                      const active = libraryFolderFilterId === folder.id;
-                      return (
-                        <Pressable
-                          key={`library-folder-${folder.id}`}
-                          onPress={() => setLibraryFolderFilterId(folder.id)}
-                          style={[styles.folderChip, active && styles.folderChipActive]}
-                        >
-                          <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
-                        </Pressable>
-                      );
-                    })}
-                  </ScrollView>
-                </View>
-
-                <View style={[styles.libraryWorkspace, isDesktopWeb && styles.libraryWorkspaceDesktop]}>
-                  <ScrollView style={styles.libraryList} contentContainerStyle={{ gap: 8 }} keyboardShouldPersistTaps="handled">
-                    {filteredDrillLibraryItems.length === 0 ? (
-                      <Text style={styles.cardHint}>No library drills found.</Text>
-                    ) : (
-                      filteredDrillLibraryItems.map((item) => {
-                        const active = item.id === selectedDrillId;
-                        return (
-                          <Pressable
-                            key={item.id}
-                            onPress={() => selectDrillForEdit(item)}
-                            style={[styles.drillRow, active && styles.drillRowActive]}
-                          >
-                            <Text style={styles.drillRowTitle}>{item.name}</Text>
-                            <Text style={styles.drillRowMeta}>{folderName(item.folderId)}</Text>
-                            {item.defaultDetails ? (
-                              <Text numberOfLines={2} style={styles.drillRowDetails}>{item.defaultDetails}</Text>
-                            ) : null}
-                            {item.videoUrl ? <Text style={styles.drillRowMeta}>Video link saved</Text> : null}
-                          </Pressable>
-                        );
-                      })
-                    )}
-                  </ScrollView>
-
-                  <View style={styles.drillEditor}>
-                    <Text style={styles.label}>{selectedDrillId ? "Edit library drill" : "Library drill"}</Text>
-                    <TextInput
-                      value={drillNameDraft}
-                      onChangeText={setDrillNameDraft}
-                      placeholder="Drill name"
-                      editable={!readOnly}
-                      style={[styles.compactInput, readOnly && styles.inputDisabled]}
-                    />
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
-                      {[{ id: "", name: "Uncategorized" }, ...drillFolders].map((folder) => {
-                        const folderId = String(folder.id ?? "").trim() || null;
-                        const active = (drillFolderIdDraft ?? null) === folderId;
-                        return (
-                          <Pressable
-                            key={`drill-folder-${folder.id || "uncategorized"}`}
-                            disabled={readOnly}
-                            onPress={() => setDrillFolderIdDraft(folderId)}
-                            style={[styles.folderChip, active && styles.folderChipActive, readOnly && styles.disabledBtn]}
-                          >
-                            <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
-                          </Pressable>
-                        );
-                      })}
-                    </ScrollView>
-                    <TextInput
-                      value={drillDetailsDraft}
-                      onChangeText={setDrillDetailsDraft}
-                      placeholder="Default prescription or coaching cues"
-                      editable={!readOnly}
-                      multiline
-                      style={[styles.input, styles.drillDetailsInput, readOnly && styles.inputDisabled]}
-                    />
-                    <TextInput
-                      value={drillVideoUrlDraft}
-                      onChangeText={setDrillVideoUrlDraft}
-                      placeholder="Video URL"
-                      autoCapitalize="none"
-                      editable={!readOnly}
-                      style={[styles.compactInput, readOnly && styles.inputDisabled]}
-                    />
-                    <View style={styles.buttonRow}>
-                      <Pressable
-                        onPress={() => void saveSelectedDrill()}
-                        disabled={readOnly || drillBusy}
-                        style={[styles.actionBtn, (readOnly || drillBusy) && styles.disabledBtn]}
-                      >
-                        <Text style={styles.actionBtnText}>{drillBusy ? "Saving..." : "Save Drill"}</Text>
-                      </Pressable>
-                      <Pressable
-                        onPress={() => void insertSelectedDrillIntoRoutine()}
-                        disabled={!selectedDrill}
-                        style={[styles.smallActionBtn, !selectedDrill && styles.disabledBtn]}
-                      >
-                        <Text style={styles.smallActionBtnText}>Insert into routine</Text>
-                      </Pressable>
-                      {selectedDrillId ? (
-                        <Pressable
-                          onPress={() => void deleteSelectedDrill()}
-                          disabled={readOnly || drillBusy}
-                          style={[styles.deleteBtn, (readOnly || drillBusy) && styles.disabledBtn]}
-                        >
-                          <Text style={styles.deleteBtnText}>Delete Drill</Text>
-                        </Pressable>
-                      ) : null}
-                    </View>
-                  </View>
-                </View>
-              </View>
 
               <View style={styles.editorFooter}>
-                <Text style={[styles.statusText, auxiliaryAutosaveStatus === "error" && styles.statusError]}>
-                  {auxiliaryAutosaveStatus === "saving"
-                    ? "Saving..."
-                    : auxiliaryAutosaveStatus === "dirty"
-                    ? "Unsaved changes"
-                    : auxiliaryAutosaveStatus === "saved"
-                    ? "Saved"
-                    : auxiliaryAutosaveStatus === "error"
-                    ? "Save failed"
-                    : "Ready"}
-                </Text>
-
+                <Text style={styles.statusText}>{drillBusy ? "Saving..." : "Ready"}</Text>
                 <View style={styles.buttonRow}>
                   <Pressable
-                    onPress={() => void saveSelectedAuxiliaryRoutine()}
-                    disabled={readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy}
-                    style={[
-                      styles.actionBtn,
-                      (readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy) && styles.disabledBtn,
-                    ]}
+                    onPress={() => void saveSelectedDrill()}
+                    disabled={readOnly || drillBusy}
+                    style={[styles.actionBtn, (readOnly || drillBusy) && styles.disabledBtn]}
                   >
-                    <Text style={styles.actionBtnText}>
-                      {auxiliaryAutosaveStatus === "saving" ? "Saving..." : "Save Routine"}
-                    </Text>
+                    <Text style={styles.actionBtnText}>{drillBusy ? "Saving..." : "Save Drill"}</Text>
                   </Pressable>
-
-                  <Pressable
-                    onPress={confirmDeleteSelectedAuxiliaryRoutine}
-                    disabled={readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy}
-                    style={[
-                      styles.deleteBtn,
-                      (readOnly || auxiliaryAutosaveStatus === "saving" || auxiliaryDeleteBusy) && styles.disabledBtn,
-                    ]}
-                  >
-                    <Text style={styles.deleteBtnText}>{auxiliaryDeleteBusy ? "Deleting..." : "Delete"}</Text>
-                  </Pressable>
+                  {selectedDrillId ? (
+                    <Pressable
+                      onPress={() => void deleteSelectedDrill()}
+                      disabled={readOnly || drillBusy}
+                      style={[styles.deleteBtn, (readOnly || drillBusy) && styles.disabledBtn]}
+                    >
+                      <Text style={styles.deleteBtnText}>Delete Drill</Text>
+                    </Pressable>
+                  ) : null}
                 </View>
               </View>
-              {auxiliaryAutosaveStatus === "error" ? (
-                <Text style={[styles.errorText, { marginTop: 8 }]}>
-                  Couldn't save routine. Your draft is still here.
-                </Text>
-              ) : null}
-            </>
-          ) : (
-            <View style={styles.emptyEditor}>
-              <Text style={styles.cardTitle}>No routine selected</Text>
-              <Text style={styles.cardHint}>Select a routine on the left, or create a new routine to begin editing.</Text>
-              <Pressable
-                onPress={createNewAuxiliaryRoutine}
-                disabled={readOnly}
-                style={[styles.actionBtn, { alignSelf: "flex-start" }, readOnly && styles.disabledBtn]}
-              >
-                <Text style={styles.actionBtnText}>Create Routine</Text>
-              </Pressable>
             </View>
-          )}
+          </View>
         </View>
-      </View>
+      )}
     </View>
   );
 }
@@ -1135,6 +1299,30 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 18, fontWeight: "900", color: "#172033" },
   cardHint: { color: "#68758d", lineHeight: 19, fontWeight: "700" },
   sectionTitle: { fontSize: 15, fontWeight: "900", color: "#172033" },
+  tabRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  tabButton: {
+    borderWidth: 1,
+    borderColor: "#d7deeb",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    backgroundColor: "#fff",
+  },
+  tabButtonActive: {
+    borderColor: "#1f2a44",
+    backgroundColor: "#1f2a44",
+  },
+  tabButtonText: {
+    color: "#334155",
+    fontWeight: "900",
+  },
+  tabButtonTextActive: {
+    color: "#fff",
+  },
   folderPanel: {
     borderWidth: 1,
     borderColor: "#e1e7f2",
@@ -1142,6 +1330,13 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     padding: 12,
     gap: 10,
+  },
+  folderPanelCompact: {
+    borderBottomWidth: 1,
+    borderBottomColor: "#e1e7f2",
+    padding: 12,
+    gap: 10,
+    backgroundColor: "#fbfdff",
   },
   folderPanelHeader: {
     flexDirection: "row",
@@ -1230,6 +1425,12 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   listTitle: { fontWeight: "900", color: "#172033" },
+  listHeaderHint: {
+    marginTop: 2,
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: "800",
+  },
   listCount: { fontWeight: "900", color: "#6b7280" },
   listBody: {
     maxHeight: 480,
@@ -1256,6 +1457,14 @@ const styles = StyleSheet.create({
   editorPaneDesktop: {
     flex: 1,
     minWidth: 0,
+  },
+  editorTitleRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 10,
+    flexWrap: "wrap",
+    marginBottom: 10,
   },
   editorTitle: { fontSize: 16, fontWeight: "900", color: "#172033", marginBottom: 10 },
   label: { fontSize: 12, fontWeight: "900", color: "#4f5f7a", marginBottom: 6 },
@@ -1303,35 +1512,44 @@ const styles = StyleSheet.create({
     gap: 10,
     marginTop: 12,
   },
-  libraryPanel: {
+  insertPanel: {
     borderWidth: 1,
     borderColor: "#e1e7f2",
-    borderRadius: 14,
+    borderRadius: 12,
     backgroundColor: "#f8faff",
-    padding: 12,
+    padding: 10,
     gap: 10,
     marginTop: 12,
   },
-  libraryHeaderRow: {
+  insertPanelHeader: {
     flexDirection: "row",
     alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 10,
     flexWrap: "wrap",
   },
-  libraryControls: {
+  insertPicker: {
+    borderTopWidth: 1,
+    borderTopColor: "#e1e7f2",
+    paddingTop: 10,
     gap: 8,
   },
-  libraryWorkspace: {
+  insertList: {
+    maxHeight: 260,
+  },
+  insertRow: {
+    borderWidth: 1,
+    borderColor: "#e1e7f2",
+    borderRadius: 12,
+    padding: 10,
+    backgroundColor: "#fff",
+    flexDirection: "row",
+    alignItems: "center",
     gap: 10,
   },
-  libraryWorkspaceDesktop: {
-    flexDirection: "row",
-    alignItems: "stretch",
-  },
-  libraryList: {
-    maxHeight: 360,
-    flex: 1,
+  insertRowAction: {
+    color: "#1f2a44",
+    fontWeight: "900",
   },
   drillRow: {
     borderWidth: 1,
@@ -1348,18 +1566,11 @@ const styles = StyleSheet.create({
   drillRowTitle: { fontWeight: "900", color: "#172033" },
   drillRowMeta: { color: "#64748b", fontSize: 12, fontWeight: "800" },
   drillRowDetails: { color: "#475569", lineHeight: 18, fontWeight: "700" },
-  drillEditor: {
-    borderWidth: 1,
-    borderColor: "#e1e7f2",
-    borderRadius: 12,
-    backgroundColor: "#fff",
-    padding: 10,
+  drillEditorStandalone: {
     gap: 8,
-    flex: 1,
-    minWidth: 240,
   },
-  drillDetailsInput: {
-    minHeight: 78,
+  drillDetailsInputLarge: {
+    minHeight: 180,
     textAlignVertical: "top",
   },
   assignmentBlock: {
