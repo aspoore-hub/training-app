@@ -3,52 +3,57 @@ import { Linking, Platform, Text, type StyleProp, type TextProps, type TextStyle
 const HTTP_URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
 const TRAILING_URL_PUNCTUATION_PATTERN = /[),.;!?]+$/;
 
-type LinkifiedPart =
-  | { kind: "text"; value: string }
-  | { kind: "link"; value: string };
+type ParsedLine = {
+  text: string;
+  urls: string[];
+};
 
 type LinkifiedTextProps = Omit<TextProps, "children"> & {
   text: string;
   linkStyle?: StyleProp<TextStyle>;
 };
 
+function splitUrl(rawMatch: string): string {
+  const trailingMatch = rawMatch.match(TRAILING_URL_PUNCTUATION_PATTERN);
+  const trailing = trailingMatch?.[0] ?? "";
+  return trailing ? rawMatch.slice(0, -trailing.length) : rawMatch;
+}
+
+function normalizeLineText(input: string): string {
+  return input.replace(/[ \t]{2,}/g, " ").trim();
+}
+
 export function containsHttpUrl(input: unknown): boolean {
   return /https?:\/\/[^\s<>"']+/i.test(String(input ?? ""));
 }
 
-function splitLinkifiedText(input: string): LinkifiedPart[] {
-  const parts: LinkifiedPart[] = [];
-  const text = String(input ?? "");
+function parseLine(input: string): ParsedLine {
   const pattern = new RegExp(HTTP_URL_PATTERN);
+  const urls: string[] = [];
+  const textPieces: string[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
-  while ((match = pattern.exec(text))) {
+  while ((match = pattern.exec(input))) {
     const rawMatch = match[0];
     const start = match.index;
     if (start > lastIndex) {
-      parts.push({ kind: "text", value: text.slice(lastIndex, start) });
+      textPieces.push(input.slice(lastIndex, start));
     }
 
-    const trailingMatch = rawMatch.match(TRAILING_URL_PUNCTUATION_PATTERN);
-    const trailing = trailingMatch?.[0] ?? "";
-    const url = trailing ? rawMatch.slice(0, -trailing.length) : rawMatch;
-
-    if (url) {
-      parts.push({ kind: "link", value: url });
-    }
-    if (trailing) {
-      parts.push({ kind: "text", value: trailing });
-    }
-
+    const url = splitUrl(rawMatch);
+    if (url) urls.push(url);
     lastIndex = start + rawMatch.length;
   }
 
-  if (lastIndex < text.length) {
-    parts.push({ kind: "text", value: text.slice(lastIndex) });
+  if (lastIndex < input.length) {
+    textPieces.push(input.slice(lastIndex));
   }
 
-  return parts.length > 0 ? parts : [{ kind: "text", value: text }];
+  return {
+    text: urls.length > 0 ? normalizeLineText(textPieces.join("")) : input,
+    urls,
+  };
 }
 
 function openHttpUrl(url: string, event?: any) {
@@ -66,19 +71,44 @@ function openHttpUrl(url: string, event?: any) {
 }
 
 export function LinkifiedText({ text, style, linkStyle, ...textProps }: LinkifiedTextProps) {
-  const parts = splitLinkifiedText(String(text ?? ""));
+  const lines = String(text ?? "").split("\n");
 
   return (
     <Text {...textProps} style={style}>
-      {parts.map((part, index) => {
-        if (part.kind === "text") return part.value;
+      {lines.map((line, lineIndex) => {
+        const parsed = parseLine(line);
+        const hasText = parsed.text.trim().length > 0;
+        const multipleUrls = parsed.urls.length > 1;
         return (
-          <Text
-            key={`${part.value}-${index}`}
-            onPress={(event) => openHttpUrl(part.value, event)}
-            style={[{ color: "#2563eb", textDecorationLine: "underline", fontWeight: "800" }, linkStyle]}
-          >
-            {part.value}
+          <Text key={`line-${lineIndex}`}>
+            {hasText ? parsed.text : null}
+            {!hasText && parsed.urls.length === 0 ? line : null}
+            {parsed.urls.map((url, urlIndex) => {
+              const label = hasText
+                ? "↗"
+                : multipleUrls
+                ? `Open link ${urlIndex + 1} ↗`
+                : "Open link ↗";
+              return (
+                <Text
+                  key={`${url}-${urlIndex}`}
+                  accessibilityRole="link"
+                  onPress={(event) => openHttpUrl(url, event)}
+                  style={[
+                    {
+                      color: "#2563eb",
+                      textDecorationLine: "underline",
+                      fontWeight: "900",
+                    },
+                    linkStyle,
+                  ]}
+                >
+                  {hasText || urlIndex > 0 ? "  " : ""}
+                  {label}
+                </Text>
+              );
+            })}
+            {lineIndex < lines.length - 1 ? "\n" : null}
           </Text>
         );
       })}
