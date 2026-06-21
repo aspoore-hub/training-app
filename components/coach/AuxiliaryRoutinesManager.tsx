@@ -8,7 +8,7 @@ import {
   updateAuxiliaryRoutine,
   type AuxiliaryRoutine,
 } from "../../lib/auxiliaryRoutines";
-import { LinkifiedText } from "../ui/LinkifiedText";
+import { containsHttpUrl, LinkifiedText } from "../ui/LinkifiedText";
 import { loadCoreCoachSettings } from "../../lib/settings";
 import { getCurrentTeamRole, normalizeTeamRole, type TeamRole } from "../../lib/teamPermissions";
 import type { WorkoutCategory } from "../../lib/types";
@@ -78,7 +78,6 @@ export function AuxiliaryRoutinesManager() {
   const [auxiliaryDeleteBusy, setAuxiliaryDeleteBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [openCategorySelector, setOpenCategorySelector] = useState<CategoryAssignmentTarget | null>(null);
-  const [rawDetailsEditorOpen, setRawDetailsEditorOpen] = useState(false);
   const lastSavedSnapshotRef = React.useRef("");
   const saveSeqRef = React.useRef(0);
   const commitInFlightRef = React.useRef<Promise<boolean> | null>(null);
@@ -128,7 +127,6 @@ export function AuxiliaryRoutinesManager() {
       setAuxiliaryDetailsDraft("");
       setAuxiliaryPreCategoryNamesDraft([]);
       setAuxiliaryPostCategoryNamesDraft([]);
-      setRawDetailsEditorOpen(false);
       lastSavedSnapshotRef.current = "";
       setAuxiliaryAutosaveStatus("idle");
       return;
@@ -138,7 +136,6 @@ export function AuxiliaryRoutinesManager() {
     setAuxiliaryDetailsDraft(String(routine.details ?? ""));
     setAuxiliaryPreCategoryNamesDraft(Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : []);
     setAuxiliaryPostCategoryNamesDraft(Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : []);
-    setRawDetailsEditorOpen(false);
     lastSavedSnapshotRef.current = buildDraftSnapshotFrom(
       routine.id,
       String(routine.title ?? ""),
@@ -597,45 +594,20 @@ export function AuxiliaryRoutinesManager() {
                 editable={!readOnly}
               />
 
-              <View style={styles.detailsHeaderRow}>
-                <View style={{ flex: 1, minWidth: 0 }}>
-                  <Text style={styles.label}>Details</Text>
-                  <Text style={styles.detailsHint}>Clean view hides long URLs behind compact link arrows.</Text>
-                </View>
-                <Pressable
-                  onPress={() => setRawDetailsEditorOpen((current) => !current)}
-                  style={styles.smallActionBtn}
-                >
-                  <Text style={styles.smallActionBtnText}>
-                    {rawDetailsEditorOpen ? "Hide raw details" : auxiliaryDetailsDraft.trim() ? "Edit raw details" : "Add details"}
-                  </Text>
-                </Pressable>
-              </View>
-
-              <View style={styles.cleanDetailsBox}>
-                <Text style={styles.cleanDetailsLabel}>Clean view</Text>
-                {auxiliaryDetailsDraft.trim() ? (
-                  <LinkifiedText text={auxiliaryDetailsDraft} style={styles.cleanDetailsText} />
-                ) : (
-                  <Text style={styles.emptyDetailsText}>No details added.</Text>
-                )}
-              </View>
-
-              {rawDetailsEditorOpen ? (
-                <View style={styles.rawDetailsPanel}>
-                  <Text style={styles.rawDetailsLabel}>Raw details</Text>
-                  <Text style={styles.rawDetailsHint}>
-                    Paste or edit full links here. Saved details stay in this raw free-text format.
-                  </Text>
-                  <TextInput
-                    value={auxiliaryDetailsDraft}
-                    onChangeText={setAuxiliaryDetailsDraft}
-                    onBlur={() => void commitDraft("details-blur")}
-                    placeholder="Notes or instructions. Paste full links here."
-                    style={[styles.input, styles.detailsInput, isDesktopWeb && styles.detailsInputDesktop, readOnly && styles.inputDisabled]}
-                    multiline
-                    editable={!readOnly}
-                  />
+              <Text style={[styles.label, { marginTop: 10 }]}>Details</Text>
+              <TextInput
+                value={auxiliaryDetailsDraft}
+                onChangeText={setAuxiliaryDetailsDraft}
+                onBlur={() => void commitDraft("details-blur")}
+                placeholder="Notes or instructions"
+                style={[styles.input, styles.detailsInput, isDesktopWeb && styles.detailsInputDesktop, readOnly && styles.inputDisabled]}
+                multiline
+                editable={!readOnly}
+              />
+              {containsHttpUrl(auxiliaryDetailsDraft) ? (
+                <View style={styles.linkPreviewBox}>
+                  <Text style={styles.linkPreviewLabel}>Clickable link preview</Text>
+                  <LinkifiedText text={auxiliaryDetailsDraft} style={styles.linkPreviewText} />
                 </View>
               ) : null}
 
@@ -811,70 +783,31 @@ const styles = StyleSheet.create({
     backgroundColor: "#f3f4f6",
     color: "#6b7280",
   },
-  detailsHeaderRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: 10,
-    marginTop: 10,
-    flexWrap: "wrap",
-  },
-  detailsHint: {
-    color: "#64748b",
-    fontSize: 12,
-    fontWeight: "700",
-    lineHeight: 17,
-  },
-  cleanDetailsBox: {
-    borderWidth: 1,
-    borderColor: "#bfdbfe",
-    borderRadius: 12,
-    backgroundColor: "#eff6ff",
-    padding: 12,
-    gap: 8,
-    marginTop: 8,
-    minHeight: 150,
-  },
-  cleanDetailsLabel: {
-    color: "#1e40af",
-    fontSize: 12,
-    fontWeight: "900",
-  },
-  cleanDetailsText: {
-    color: "#334155",
-    lineHeight: 21,
-    fontWeight: "700",
-  },
-  emptyDetailsText: {
-    color: "#94a3b8",
-    fontWeight: "800",
-  },
-  rawDetailsPanel: {
-    borderWidth: 1,
-    borderColor: "#e1e7f2",
-    borderRadius: 12,
-    backgroundColor: "#f8faff",
-    padding: 10,
-    gap: 6,
-    marginTop: 10,
-  },
-  rawDetailsLabel: {
-    color: "#172033",
-    fontSize: 12,
-    fontWeight: "900",
-  },
-  rawDetailsHint: {
-    color: "#64748b",
-    fontSize: 12,
-    fontWeight: "700",
-    lineHeight: 17,
-  },
   detailsInput: {
     minHeight: 220,
     textAlignVertical: "top",
   },
   detailsInputDesktop: {
     minHeight: 280,
+  },
+  linkPreviewBox: {
+    borderWidth: 1,
+    borderColor: "#bfdbfe",
+    borderRadius: 12,
+    backgroundColor: "#eff6ff",
+    padding: 10,
+    gap: 6,
+    marginTop: 10,
+  },
+  linkPreviewLabel: {
+    color: "#1e40af",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  linkPreviewText: {
+    color: "#334155",
+    lineHeight: 20,
+    fontWeight: "700",
   },
   assignmentStack: {
     gap: 10,
