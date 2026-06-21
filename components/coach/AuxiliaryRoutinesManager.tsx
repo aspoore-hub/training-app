@@ -9,12 +9,24 @@ import {
   type AuxiliaryRoutine,
 } from "../../lib/auxiliaryRoutines";
 import { containsHttpUrl, LinkifiedText } from "../ui/LinkifiedText";
+import {
+  createDrillFolderDraft,
+  createDrillLibraryItemDraft,
+  loadDrillFolders,
+  loadDrillLibraryItems,
+  saveDrillFolders,
+  saveDrillLibraryItems,
+  type DrillFolder,
+  type DrillLibraryItem,
+} from "../../lib/drillLibrary";
 import { loadCoreCoachSettings } from "../../lib/settings";
 import { getCurrentTeamRole, normalizeTeamRole, type TeamRole } from "../../lib/teamPermissions";
 import type { WorkoutCategory } from "../../lib/types";
 
 type AutosaveStatus = "idle" | "dirty" | "saving" | "saved" | "error";
 type CategoryAssignmentTarget = "pre" | "post";
+const ALL_FOLDERS_ID = "__all__";
+const UNCATEGORIZED_FOLDER_ID = "__uncategorized__";
 
 function getErrorMessage(error: unknown): string {
   if (!error) return "Unknown error";
@@ -39,10 +51,12 @@ function buildDraftSnapshotFrom(
   title: string,
   details: string,
   preCategoryNames: string[],
-  postCategoryNames: string[]
+  postCategoryNames: string[],
+  folderId: string | null
 ) {
   return JSON.stringify({
     id,
+    folderId,
     title: String(title ?? "").trim(),
     details: String(details ?? "").trim(),
     pre: [...preCategoryNames].sort(),
@@ -72,18 +86,32 @@ export function AuxiliaryRoutinesManager() {
   const [selectedAuxiliaryRoutineId, setSelectedAuxiliaryRoutineId] = useState<string | null>(null);
   const [auxiliaryTitleDraft, setAuxiliaryTitleDraft] = useState("");
   const [auxiliaryDetailsDraft, setAuxiliaryDetailsDraft] = useState("");
+  const [auxiliaryFolderIdDraft, setAuxiliaryFolderIdDraft] = useState<string | null>(null);
   const [auxiliaryPreCategoryNamesDraft, setAuxiliaryPreCategoryNamesDraft] = useState<string[]>([]);
   const [auxiliaryPostCategoryNamesDraft, setAuxiliaryPostCategoryNamesDraft] = useState<string[]>([]);
   const [auxiliaryAutosaveStatus, setAuxiliaryAutosaveStatus] = useState<AutosaveStatus>("idle");
   const [auxiliaryDeleteBusy, setAuxiliaryDeleteBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [openCategorySelector, setOpenCategorySelector] = useState<CategoryAssignmentTarget | null>(null);
+  const [drillFolders, setDrillFolders] = useState<DrillFolder[]>([]);
+  const [drillLibraryItems, setDrillLibraryItems] = useState<DrillLibraryItem[]>([]);
+  const [selectedFolderFilterId, setSelectedFolderFilterId] = useState(ALL_FOLDERS_ID);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const [libraryFolderFilterId, setLibraryFolderFilterId] = useState(ALL_FOLDERS_ID);
+  const [selectedDrillId, setSelectedDrillId] = useState<string | null>(null);
+  const [drillNameDraft, setDrillNameDraft] = useState("");
+  const [drillFolderIdDraft, setDrillFolderIdDraft] = useState<string | null>(null);
+  const [drillVideoUrlDraft, setDrillVideoUrlDraft] = useState("");
+  const [drillDetailsDraft, setDrillDetailsDraft] = useState("");
+  const [drillBusy, setDrillBusy] = useState(false);
   const lastSavedSnapshotRef = React.useRef("");
   const saveSeqRef = React.useRef(0);
   const commitInFlightRef = React.useRef<Promise<boolean> | null>(null);
   const selectedRoutineIdRef = React.useRef<string | null>(null);
   const titleDraftRef = React.useRef("");
   const detailsDraftRef = React.useRef("");
+  const folderIdDraftRef = React.useRef<string | null>(null);
   const preCategoryNamesDraftRef = React.useRef<string[]>([]);
   const postCategoryNamesDraftRef = React.useRef<string[]>([]);
   const currentTeamRoleRef = React.useRef<TeamRole | null>(null);
@@ -98,10 +126,51 @@ export function AuxiliaryRoutinesManager() {
     [auxiliaryRoutines]
   );
 
+  const visibleAuxiliaryRoutines = useMemo(() => {
+    if (selectedFolderFilterId === ALL_FOLDERS_ID) return sortedAuxiliaryRoutines;
+    if (selectedFolderFilterId === UNCATEGORIZED_FOLDER_ID) {
+      return sortedAuxiliaryRoutines.filter((routine) => !String(routine.folderId ?? "").trim());
+    }
+    return sortedAuxiliaryRoutines.filter((routine) => String(routine.folderId ?? "").trim() === selectedFolderFilterId);
+  }, [selectedFolderFilterId, sortedAuxiliaryRoutines]);
+
+  const filteredDrillLibraryItems = useMemo(() => {
+    const needle = libraryQuery.trim().toLowerCase();
+    return drillLibraryItems.filter((item) => {
+      const folderMatches =
+        libraryFolderFilterId === ALL_FOLDERS_ID ||
+        (libraryFolderFilterId === UNCATEGORIZED_FOLDER_ID
+          ? !String(item.folderId ?? "").trim()
+          : String(item.folderId ?? "").trim() === libraryFolderFilterId);
+      if (!folderMatches) return false;
+      if (!needle) return true;
+      return [item.name, item.defaultDetails, item.videoUrl, ...(item.categoryNames ?? [])]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle);
+    });
+  }, [drillLibraryItems, libraryFolderFilterId, libraryQuery]);
+
   const selectedAuxiliaryRoutine = useMemo(
     () => sortedAuxiliaryRoutines.find((routine) => routine.id === selectedAuxiliaryRoutineId) ?? null,
     [sortedAuxiliaryRoutines, selectedAuxiliaryRoutineId]
   );
+
+  const selectedDrill = useMemo(
+    () => drillLibraryItems.find((item) => item.id === selectedDrillId) ?? null,
+    [drillLibraryItems, selectedDrillId]
+  );
+
+  const selectedFilterFolder = useMemo(
+    () => drillFolders.find((folder) => folder.id === selectedFolderFilterId) ?? null,
+    [drillFolders, selectedFolderFilterId]
+  );
+
+  function folderName(folderId?: string | null) {
+    const id = String(folderId ?? "").trim();
+    if (!id) return "Uncategorized";
+    return drillFolders.find((folder) => folder.id === id)?.name ?? "Uncategorized";
+  }
 
   useEffect(() => {
     currentTeamRoleRef.current = currentTeamRole;
@@ -111,12 +180,14 @@ export function AuxiliaryRoutinesManager() {
     selectedRoutineIdRef.current = selectedAuxiliaryRoutineId;
     titleDraftRef.current = auxiliaryTitleDraft;
     detailsDraftRef.current = auxiliaryDetailsDraft;
+    folderIdDraftRef.current = auxiliaryFolderIdDraft;
     preCategoryNamesDraftRef.current = auxiliaryPreCategoryNamesDraft;
     postCategoryNamesDraftRef.current = auxiliaryPostCategoryNamesDraft;
   }, [
     selectedAuxiliaryRoutineId,
     auxiliaryTitleDraft,
     auxiliaryDetailsDraft,
+    auxiliaryFolderIdDraft,
     auxiliaryPreCategoryNamesDraft,
     auxiliaryPostCategoryNamesDraft,
   ]);
@@ -125,6 +196,7 @@ export function AuxiliaryRoutinesManager() {
     if (!routine) {
       setAuxiliaryTitleDraft("");
       setAuxiliaryDetailsDraft("");
+      setAuxiliaryFolderIdDraft(null);
       setAuxiliaryPreCategoryNamesDraft([]);
       setAuxiliaryPostCategoryNamesDraft([]);
       lastSavedSnapshotRef.current = "";
@@ -134,6 +206,7 @@ export function AuxiliaryRoutinesManager() {
 
     setAuxiliaryTitleDraft(String(routine.title ?? ""));
     setAuxiliaryDetailsDraft(String(routine.details ?? ""));
+    setAuxiliaryFolderIdDraft(String(routine.folderId ?? "").trim() || null);
     setAuxiliaryPreCategoryNamesDraft(Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : []);
     setAuxiliaryPostCategoryNamesDraft(Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : []);
     lastSavedSnapshotRef.current = buildDraftSnapshotFrom(
@@ -141,7 +214,8 @@ export function AuxiliaryRoutinesManager() {
       String(routine.title ?? ""),
       String(routine.details ?? ""),
       Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : [],
-      Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : []
+      Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : [],
+      String(routine.folderId ?? "").trim() || null
     );
     setAuxiliaryAutosaveStatus("idle");
   }, []);
@@ -178,15 +252,19 @@ export function AuxiliaryRoutinesManager() {
     async (isActive?: () => boolean) => {
       try {
         setLoadError(null);
-        const [role, coreSettings, routines] = await Promise.all([
+        const [role, coreSettings, routines, folders, libraryItems] = await Promise.all([
           getCurrentTeamRole(),
           loadCoreCoachSettings(),
           loadAuxiliaryRoutines(),
+          loadDrillFolders(),
+          loadDrillLibraryItems(),
         ]);
         if (isActive && !isActive()) return;
         setCurrentTeamRole(role);
         setCategories(coreSettings.categories ?? []);
         setAuxiliaryRoutines(routines);
+        setDrillFolders(folders);
+        setDrillLibraryItems(libraryItems);
         const selected = routines.find((routine) => routine.id === selectedRoutineIdRef.current) ?? routines[0] ?? null;
         setSelectedRoutine(selected);
       } catch (error) {
@@ -221,9 +299,10 @@ export function AuxiliaryRoutinesManager() {
 
       const titleDraft = titleDraftRef.current;
       const detailsDraft = detailsDraftRef.current;
+      const folderIdDraft = folderIdDraftRef.current;
       const preDraft = preCategoryNamesDraftRef.current;
       const postDraft = postCategoryNamesDraftRef.current;
-      const savedSnapshot = buildDraftSnapshotFrom(routineId, titleDraft, detailsDraft, preDraft, postDraft);
+      const savedSnapshot = buildDraftSnapshotFrom(routineId, titleDraft, detailsDraft, preDraft, postDraft, folderIdDraft);
       if (savedSnapshot === lastSavedSnapshotRef.current) return true;
 
       const title = String(titleDraft ?? "").trim();
@@ -245,6 +324,7 @@ export function AuxiliaryRoutinesManager() {
         await updateAuxiliaryRoutine(routineId, {
           title,
           details,
+          folderId: folderIdDraft,
           preCategoryNames: pre,
           postCategoryNames: post,
           categoryNames: Array.from(new Set([...pre, ...post])),
@@ -259,7 +339,8 @@ export function AuxiliaryRoutinesManager() {
           titleDraftRef.current,
           detailsDraftRef.current,
           preCategoryNamesDraftRef.current,
-          postCategoryNamesDraftRef.current
+          postCategoryNamesDraftRef.current,
+          folderIdDraftRef.current
         );
         const stillEditingSameRoutine = selectedRoutineIdRef.current === routineId;
         const localDraftUnchangedSinceSave = latestDraftSnapshot === savedSnapshot;
@@ -302,12 +383,13 @@ export function AuxiliaryRoutinesManager() {
 
   useEffect(() => {
     if (!selectedAuxiliaryRoutineId) return;
-    const snapshot = buildDraftSnapshotFrom(
+      const snapshot = buildDraftSnapshotFrom(
       selectedAuxiliaryRoutineId,
       auxiliaryTitleDraft,
       auxiliaryDetailsDraft,
       auxiliaryPreCategoryNamesDraft,
-      auxiliaryPostCategoryNamesDraft
+      auxiliaryPostCategoryNamesDraft,
+      auxiliaryFolderIdDraft
     );
     if (snapshot !== lastSavedSnapshotRef.current && auxiliaryAutosaveStatus !== "saving") {
       setAuxiliaryAutosaveStatus("dirty");
@@ -316,6 +398,7 @@ export function AuxiliaryRoutinesManager() {
     selectedAuxiliaryRoutineId,
     auxiliaryTitleDraft,
     auxiliaryDetailsDraft,
+    auxiliaryFolderIdDraft,
     auxiliaryPreCategoryNamesDraft,
     auxiliaryPostCategoryNamesDraft,
     auxiliaryAutosaveStatus,
@@ -343,12 +426,16 @@ export function AuxiliaryRoutinesManager() {
     const created = await createAuxiliaryRoutine({
       title: "New Routine",
       details: "",
+      folderId:
+        selectedFolderFilterId !== ALL_FOLDERS_ID && selectedFolderFilterId !== UNCATEGORIZED_FOLDER_ID
+          ? selectedFolderFilterId
+          : null,
       preCategoryNames: [],
       postCategoryNames: [],
     });
     await reloadAuxiliaryRoutines(created.id);
     setAuxiliaryAutosaveStatus("idle");
-  }, [commitDraft, readOnly, reloadAuxiliaryRoutines]);
+  }, [commitDraft, readOnly, reloadAuxiliaryRoutines, selectedFolderFilterId]);
 
   const saveSelectedAuxiliaryRoutine = useCallback(async () => {
     if (!selectedRoutineIdRef.current) {
@@ -423,6 +510,139 @@ export function AuxiliaryRoutinesManager() {
     setSelectedRoutine,
     sortedAuxiliaryRoutines,
   ]);
+
+  const createFolder = useCallback(async () => {
+    if (readOnly) {
+      Alert.alert("Viewer access", "Only Owners and Editors can manage drill folders.");
+      return;
+    }
+    const name = newFolderName.trim();
+    if (!name) {
+      Alert.alert("Folder name required", "Enter a folder name.");
+      return;
+    }
+    const next = createDrillFolderDraft(name, drillFolders.length + 1);
+    const updated = [...drillFolders, next].sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    setDrillFolders(updated);
+    setNewFolderName("");
+    setSelectedFolderFilterId(next.id);
+    setLibraryFolderFilterId(next.id);
+    try {
+      await saveDrillFolders(updated);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      Alert.alert("Folder save failed", message);
+      void loadManagerData();
+    }
+  }, [drillFolders, loadManagerData, newFolderName, readOnly]);
+
+  const updateFolderName = useCallback(
+    async (folderId: string, name: string) => {
+      const cleaned = name.trim();
+      if (!cleaned) return;
+      const updated = drillFolders.map((folder) =>
+        folder.id === folderId ? { ...folder, name: cleaned, updatedAt: Date.now() } : folder
+      );
+      setDrillFolders(updated);
+      await saveDrillFolders(updated);
+    },
+    [drillFolders]
+  );
+
+  const selectDrillForEdit = useCallback((item: DrillLibraryItem | null) => {
+    setSelectedDrillId(item?.id ?? null);
+    setDrillNameDraft(item?.name ?? "");
+    setDrillFolderIdDraft(String(item?.folderId ?? "").trim() || null);
+    setDrillVideoUrlDraft(item?.videoUrl ?? "");
+    setDrillDetailsDraft(item?.defaultDetails ?? "");
+  }, []);
+
+  const createNewDrillDraft = useCallback(() => {
+    const draft = createDrillLibraryItemDraft(drillLibraryItems.length + 1);
+    draft.folderId =
+      libraryFolderFilterId !== ALL_FOLDERS_ID && libraryFolderFilterId !== UNCATEGORIZED_FOLDER_ID
+        ? libraryFolderFilterId
+        : null;
+    selectDrillForEdit(draft);
+  }, [drillLibraryItems.length, libraryFolderFilterId, selectDrillForEdit]);
+
+  const saveSelectedDrill = useCallback(async () => {
+    if (readOnly) {
+      Alert.alert("Viewer access", "Only Owners and Editors can manage drill library items.");
+      return;
+    }
+    const name = drillNameDraft.trim();
+    if (!name) {
+      Alert.alert("Drill name required", "Enter a drill name.");
+      return;
+    }
+    const now = Date.now();
+    const existing = selectedDrillId ? drillLibraryItems.find((item) => item.id === selectedDrillId) : null;
+    const nextItem: DrillLibraryItem = {
+      ...(existing ?? createDrillLibraryItemDraft(drillLibraryItems.length + 1)),
+      id: existing?.id ?? selectedDrillId ?? createDrillLibraryItemDraft().id,
+      name,
+      folderId: String(drillFolderIdDraft ?? "").trim() || null,
+      videoUrl: drillVideoUrlDraft.trim(),
+      defaultDetails: drillDetailsDraft.trim(),
+      categoryNames: [],
+      updatedAt: now,
+      createdAt: existing?.createdAt ?? now,
+    };
+    const updated = existing
+      ? drillLibraryItems.map((item) => (item.id === existing.id ? nextItem : item))
+      : [...drillLibraryItems, nextItem];
+    const sorted = updated.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    setDrillBusy(true);
+    setDrillLibraryItems(sorted);
+    selectDrillForEdit(nextItem);
+    try {
+      await saveDrillLibraryItems(sorted);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      Alert.alert("Drill save failed", message);
+      void loadManagerData();
+    } finally {
+      setDrillBusy(false);
+    }
+  }, [
+    drillDetailsDraft,
+    drillFolderIdDraft,
+    drillLibraryItems,
+    drillNameDraft,
+    drillVideoUrlDraft,
+    loadManagerData,
+    readOnly,
+    selectDrillForEdit,
+    selectedDrillId,
+  ]);
+
+  const deleteSelectedDrill = useCallback(async () => {
+    if (!selectedDrillId) return;
+    const updated = drillLibraryItems.filter((item) => item.id !== selectedDrillId);
+    setDrillLibraryItems(updated);
+    selectDrillForEdit(null);
+    try {
+      await saveDrillLibraryItems(updated);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      Alert.alert("Drill delete failed", message);
+      void loadManagerData();
+    }
+  }, [drillLibraryItems, loadManagerData, selectDrillForEdit, selectedDrillId]);
+
+  const insertSelectedDrillIntoRoutine = useCallback(async () => {
+    const item = selectedDrill;
+    if (!item) {
+      Alert.alert("Select a drill", "Choose a drill from the library first.");
+      return;
+    }
+    const parts = [item.name.trim(), item.defaultDetails.trim(), item.videoUrl.trim()].filter(Boolean);
+    const line = parts.join(" - ");
+    if (!line) return;
+    setAuxiliaryDetailsDraft((current) => `${current.trimEnd()}${current.trim() ? "\n" : ""}${line}`);
+    setAuxiliaryAutosaveStatus("dirty");
+  }, [selectedDrill]);
 
   function formatCategorySummary(selectedNames: string[]) {
     if (selectedNames.length === 0) return "No categories selected";
@@ -546,18 +766,73 @@ export function AuxiliaryRoutinesManager() {
       ) : null}
       {loadError ? <Text style={styles.errorText}>{loadError}</Text> : null}
 
+      <View style={styles.folderPanel}>
+        <View style={styles.folderPanelHeader}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.sectionTitle}>Folders</Text>
+            <Text style={styles.cardHint}>Organize drill routines and reusable drills without changing workout assignments.</Text>
+          </View>
+          <View style={styles.newFolderRow}>
+            <TextInput
+              value={newFolderName}
+              onChangeText={setNewFolderName}
+              placeholder="New folder"
+              style={[styles.compactInput, readOnly && styles.inputDisabled]}
+              editable={!readOnly}
+            />
+            <Pressable onPress={() => void createFolder()} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
+              <Text style={styles.smallActionBtnText}>Add</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
+          {[
+            { id: ALL_FOLDERS_ID, name: "All" },
+            { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
+            ...drillFolders,
+          ].map((folder) => {
+            const active = selectedFolderFilterId === folder.id;
+            return (
+              <Pressable
+                key={folder.id}
+                onPress={() => {
+                  setSelectedFolderFilterId(folder.id);
+                  setLibraryFolderFilterId(folder.id);
+                }}
+                style={[styles.folderChip, active && styles.folderChipActive]}
+              >
+                <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+
+        {selectedFilterFolder && !readOnly ? (
+          <View style={styles.renameFolderRow}>
+            <Text style={styles.label}>Rename selected folder</Text>
+            <TextInput
+              defaultValue={selectedFilterFolder.name}
+              onSubmitEditing={(event) => void updateFolderName(selectedFilterFolder.id, event.nativeEvent.text)}
+              onEndEditing={(event) => void updateFolderName(selectedFilterFolder.id, event.nativeEvent.text)}
+              style={styles.compactInput}
+            />
+          </View>
+        ) : null}
+      </View>
+
       <View style={[styles.workspace, isDesktopWeb && styles.workspaceDesktop]}>
         <View style={[styles.listPane, isDesktopWeb && styles.listPaneDesktop]}>
           <View style={styles.listHeader}>
-            <Text style={styles.listTitle}>Drill Library</Text>
-            <Text style={styles.listCount}>{sortedAuxiliaryRoutines.length}</Text>
+            <Text style={styles.listTitle}>Routine Library</Text>
+            <Text style={styles.listCount}>{visibleAuxiliaryRoutines.length}</Text>
           </View>
 
           <ScrollView style={styles.listBody} contentContainerStyle={{ gap: 8 }} keyboardShouldPersistTaps="handled">
-            {sortedAuxiliaryRoutines.length === 0 ? (
+            {visibleAuxiliaryRoutines.length === 0 ? (
               <Text style={styles.cardHint}>No routines yet. Create one to get started.</Text>
             ) : (
-              sortedAuxiliaryRoutines.map((routine) => {
+              visibleAuxiliaryRoutines.map((routine) => {
                 const preCount = Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames.length : 0;
                 const postCount = Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames.length : 0;
                 const active = routine.id === selectedAuxiliaryRoutineId;
@@ -571,7 +846,7 @@ export function AuxiliaryRoutinesManager() {
                       {routine.title || "Routine"}
                     </Text>
                     <Text style={styles.listRowMeta}>
-                      {preCount} pre • {postCount} post
+                      {folderName(routine.folderId)} • {preCount} pre • {postCount} post
                     </Text>
                   </Pressable>
                 );
@@ -593,6 +868,24 @@ export function AuxiliaryRoutinesManager() {
                 style={[styles.input, readOnly && styles.inputDisabled]}
                 editable={!readOnly}
               />
+
+              <Text style={[styles.label, { marginTop: 10 }]}>Routine folder</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
+                {[{ id: "", name: "Uncategorized" }, ...drillFolders].map((folder) => {
+                  const folderId = String(folder.id ?? "").trim() || null;
+                  const active = (auxiliaryFolderIdDraft ?? null) === folderId;
+                  return (
+                    <Pressable
+                      key={`routine-folder-${folder.id || "uncategorized"}`}
+                      disabled={readOnly}
+                      onPress={() => setAuxiliaryFolderIdDraft(folderId)}
+                      style={[styles.folderChip, active && styles.folderChipActive, readOnly && styles.disabledBtn]}
+                    >
+                      <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
 
               <Text style={[styles.label, { marginTop: 10 }]}>Details</Text>
               <TextInput
@@ -624,6 +917,139 @@ export function AuxiliaryRoutinesManager() {
                   selectedNames: auxiliaryPostCategoryNamesDraft,
                   setSelectedNames: setAuxiliaryPostCategoryNamesDraft,
                 })}
+              </View>
+
+              <View style={styles.libraryPanel}>
+                <View style={styles.libraryHeaderRow}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.sectionTitle}>Drill Library</Text>
+                    <Text style={styles.cardHint}>Save common drills once, then insert editable lines into this routine.</Text>
+                  </View>
+                  <Pressable onPress={createNewDrillDraft} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
+                    <Text style={styles.smallActionBtnText}>New Drill</Text>
+                  </Pressable>
+                </View>
+
+                <View style={styles.libraryControls}>
+                  <TextInput
+                    value={libraryQuery}
+                    onChangeText={setLibraryQuery}
+                    placeholder="Search drills"
+                    style={styles.compactInput}
+                  />
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
+                    {[
+                      { id: ALL_FOLDERS_ID, name: "All" },
+                      { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
+                      ...drillFolders,
+                    ].map((folder) => {
+                      const active = libraryFolderFilterId === folder.id;
+                      return (
+                        <Pressable
+                          key={`library-folder-${folder.id}`}
+                          onPress={() => setLibraryFolderFilterId(folder.id)}
+                          style={[styles.folderChip, active && styles.folderChipActive]}
+                        >
+                          <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+
+                <View style={[styles.libraryWorkspace, isDesktopWeb && styles.libraryWorkspaceDesktop]}>
+                  <ScrollView style={styles.libraryList} contentContainerStyle={{ gap: 8 }} keyboardShouldPersistTaps="handled">
+                    {filteredDrillLibraryItems.length === 0 ? (
+                      <Text style={styles.cardHint}>No library drills found.</Text>
+                    ) : (
+                      filteredDrillLibraryItems.map((item) => {
+                        const active = item.id === selectedDrillId;
+                        return (
+                          <Pressable
+                            key={item.id}
+                            onPress={() => selectDrillForEdit(item)}
+                            style={[styles.drillRow, active && styles.drillRowActive]}
+                          >
+                            <Text style={styles.drillRowTitle}>{item.name}</Text>
+                            <Text style={styles.drillRowMeta}>{folderName(item.folderId)}</Text>
+                            {item.defaultDetails ? (
+                              <Text numberOfLines={2} style={styles.drillRowDetails}>{item.defaultDetails}</Text>
+                            ) : null}
+                            {item.videoUrl ? <Text style={styles.drillRowMeta}>Video link saved</Text> : null}
+                          </Pressable>
+                        );
+                      })
+                    )}
+                  </ScrollView>
+
+                  <View style={styles.drillEditor}>
+                    <Text style={styles.label}>{selectedDrillId ? "Edit library drill" : "Library drill"}</Text>
+                    <TextInput
+                      value={drillNameDraft}
+                      onChangeText={setDrillNameDraft}
+                      placeholder="Drill name"
+                      editable={!readOnly}
+                      style={[styles.compactInput, readOnly && styles.inputDisabled]}
+                    />
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
+                      {[{ id: "", name: "Uncategorized" }, ...drillFolders].map((folder) => {
+                        const folderId = String(folder.id ?? "").trim() || null;
+                        const active = (drillFolderIdDraft ?? null) === folderId;
+                        return (
+                          <Pressable
+                            key={`drill-folder-${folder.id || "uncategorized"}`}
+                            disabled={readOnly}
+                            onPress={() => setDrillFolderIdDraft(folderId)}
+                            style={[styles.folderChip, active && styles.folderChipActive, readOnly && styles.disabledBtn]}
+                          >
+                            <Text style={[styles.folderChipText, active && styles.folderChipTextActive]}>{folder.name}</Text>
+                          </Pressable>
+                        );
+                      })}
+                    </ScrollView>
+                    <TextInput
+                      value={drillDetailsDraft}
+                      onChangeText={setDrillDetailsDraft}
+                      placeholder="Default prescription or coaching cues"
+                      editable={!readOnly}
+                      multiline
+                      style={[styles.input, styles.drillDetailsInput, readOnly && styles.inputDisabled]}
+                    />
+                    <TextInput
+                      value={drillVideoUrlDraft}
+                      onChangeText={setDrillVideoUrlDraft}
+                      placeholder="Video URL"
+                      autoCapitalize="none"
+                      editable={!readOnly}
+                      style={[styles.compactInput, readOnly && styles.inputDisabled]}
+                    />
+                    <View style={styles.buttonRow}>
+                      <Pressable
+                        onPress={() => void saveSelectedDrill()}
+                        disabled={readOnly || drillBusy}
+                        style={[styles.actionBtn, (readOnly || drillBusy) && styles.disabledBtn]}
+                      >
+                        <Text style={styles.actionBtnText}>{drillBusy ? "Saving..." : "Save Drill"}</Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => void insertSelectedDrillIntoRoutine()}
+                        disabled={!selectedDrill}
+                        style={[styles.smallActionBtn, !selectedDrill && styles.disabledBtn]}
+                      >
+                        <Text style={styles.smallActionBtnText}>Insert into routine</Text>
+                      </Pressable>
+                      {selectedDrillId ? (
+                        <Pressable
+                          onPress={() => void deleteSelectedDrill()}
+                          disabled={readOnly || drillBusy}
+                          style={[styles.deleteBtn, (readOnly || drillBusy) && styles.disabledBtn]}
+                        >
+                          <Text style={styles.deleteBtnText}>Delete Drill</Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  </View>
+                </View>
               </View>
 
               <View style={styles.editorFooter}>
@@ -708,6 +1134,70 @@ const styles = StyleSheet.create({
   },
   cardTitle: { fontSize: 18, fontWeight: "900", color: "#172033" },
   cardHint: { color: "#68758d", lineHeight: 19, fontWeight: "700" },
+  sectionTitle: { fontSize: 15, fontWeight: "900", color: "#172033" },
+  folderPanel: {
+    borderWidth: 1,
+    borderColor: "#e1e7f2",
+    borderRadius: 14,
+    backgroundColor: "#fff",
+    padding: 12,
+    gap: 10,
+  },
+  folderPanelHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    flexWrap: "wrap",
+  },
+  newFolderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  compactInput: {
+    borderWidth: 1,
+    borderColor: "#d7deeb",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: "#fff",
+    color: "#111827",
+    fontWeight: "700",
+    minWidth: 150,
+  },
+  folderChipRow: {
+    gap: 8,
+    alignItems: "center",
+    paddingVertical: 2,
+  },
+  folderChip: {
+    borderWidth: 1,
+    borderColor: "#d7deeb",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: "#fff",
+  },
+  folderChipActive: {
+    borderColor: "#1f2a44",
+    backgroundColor: "#1f2a44",
+  },
+  folderChipText: {
+    color: "#334155",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  folderChipTextActive: {
+    color: "#fff",
+  },
+  renameFolderRow: {
+    borderTopWidth: 1,
+    borderTopColor: "#e1e7f2",
+    paddingTop: 10,
+    gap: 6,
+  },
   workspace: {
     borderWidth: 1,
     borderColor: "#e1e7f2",
@@ -812,6 +1302,65 @@ const styles = StyleSheet.create({
   assignmentStack: {
     gap: 10,
     marginTop: 12,
+  },
+  libraryPanel: {
+    borderWidth: 1,
+    borderColor: "#e1e7f2",
+    borderRadius: 14,
+    backgroundColor: "#f8faff",
+    padding: 12,
+    gap: 10,
+    marginTop: 12,
+  },
+  libraryHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  libraryControls: {
+    gap: 8,
+  },
+  libraryWorkspace: {
+    gap: 10,
+  },
+  libraryWorkspaceDesktop: {
+    flexDirection: "row",
+    alignItems: "stretch",
+  },
+  libraryList: {
+    maxHeight: 360,
+    flex: 1,
+  },
+  drillRow: {
+    borderWidth: 1,
+    borderColor: "#e1e7f2",
+    borderRadius: 12,
+    padding: 10,
+    backgroundColor: "#fff",
+    gap: 4,
+  },
+  drillRowActive: {
+    borderColor: "#1f2a44",
+    backgroundColor: "#eef3ff",
+  },
+  drillRowTitle: { fontWeight: "900", color: "#172033" },
+  drillRowMeta: { color: "#64748b", fontSize: 12, fontWeight: "800" },
+  drillRowDetails: { color: "#475569", lineHeight: 18, fontWeight: "700" },
+  drillEditor: {
+    borderWidth: 1,
+    borderColor: "#e1e7f2",
+    borderRadius: 12,
+    backgroundColor: "#fff",
+    padding: 10,
+    gap: 8,
+    flex: 1,
+    minWidth: 240,
+  },
+  drillDetailsInput: {
+    minHeight: 78,
+    textAlignVertical: "top",
   },
   assignmentBlock: {
     borderWidth: 1,

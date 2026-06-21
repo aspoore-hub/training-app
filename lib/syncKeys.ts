@@ -13,6 +13,8 @@ export const TEAM_KEYS = [
   "training_app_custom_groups_v1",
   "training_app_category_routine_defaults_v1",
   "training_app_auxiliary_routines_v1",
+  "training_app_drill_folders_v1",
+  "training_app_drill_library_v1",
   "training_app_pace_seconds_per_mile_v1",
   "training_app_distance_unit_v1",
 ] as const;

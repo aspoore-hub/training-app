@@ -7,6 +7,7 @@ export const AUXILIARY_ROUTINES_KEY = "training_app_auxiliary_routines_v1";
 
 export type AuxiliaryRoutine = {
   id: string;
+  folderId?: string | null;
   title: string;
   details: string;
   categoryNames?: string[];
@@ -39,6 +40,7 @@ function normalizeRoutine(raw: any): AuxiliaryRoutine | null {
   const updatedAt = Number(raw.updatedAt);
   return {
     id: String(raw.id ?? "").trim() || createRoutineId(),
+    folderId: String(raw.folderId ?? "").trim() || null,
     title,
     details,
     categoryNames: normalizeCategoryNames(raw.categoryNames),
@@ -98,6 +100,7 @@ export async function createAuxiliaryRoutine(input: {
   categoryNames?: string[];
   preCategoryNames?: string[];
   postCategoryNames?: string[];
+  folderId?: string | null;
 }) {
   const now = Date.now();
   const preCategoryNames = normalizeCategoryNames(input.preCategoryNames);
@@ -109,6 +112,7 @@ export async function createAuxiliaryRoutine(input: {
   ]);
   const next: AuxiliaryRoutine = {
     id: createRoutineId(),
+    folderId: String(input.folderId ?? "").trim() || null,
     title: String(input.title ?? "").trim() || "Routine",
     details: String(input.details ?? "").trim(),
     categoryNames,
@@ -130,6 +134,7 @@ export async function updateAuxiliaryRoutine(
     categoryNames?: string[];
     preCategoryNames?: string[];
     postCategoryNames?: string[];
+    folderId?: string | null;
   }
 ) {
   const existing = await loadAuxiliaryRoutines();
@@ -154,6 +159,7 @@ export async function updateAuxiliaryRoutine(
         ]);
     return {
       ...item,
+      folderId: patch.folderId !== undefined ? String(patch.folderId ?? "").trim() || null : item.folderId ?? null,
       title: patch.title != null ? String(patch.title).trim() || "Routine" : item.title,
       details: patch.details != null ? String(patch.details).trim() : item.details,
       categoryNames,
