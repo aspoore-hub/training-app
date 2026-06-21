@@ -3,6 +3,7 @@ import { ActivityIndicator, Alert, Pressable, ScrollView, Text, TextInput, View 
 import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { AccountContextSelector } from "../../components/account/AccountContextSelector";
+import { LinkifiedText } from "../../components/ui/LinkifiedText";
 import { getActiveAccountContext } from "../../lib/accountContexts";
 import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
@@ -249,9 +250,11 @@ export default function AthleteWarmupsScreen() {
                     <View style={{ flex: 1, gap: 5 }}>
                       <Text style={{ fontSize: 17, fontWeight: "900", color: "#0f172a" }}>{routine.title}</Text>
                       {details ? (
-                        <Text numberOfLines={expanded ? undefined : 2} style={{ color: "#475569", lineHeight: 20 }}>
-                          {details}
-                        </Text>
+                        <LinkifiedText
+                          text={details}
+                          numberOfLines={expanded ? undefined : 2}
+                          style={{ color: "#475569", lineHeight: 20 }}
+                        />
                       ) : (
                         <Text style={{ color: "#94a3b8", fontWeight: "700" }}>No details added.</Text>
                       )}

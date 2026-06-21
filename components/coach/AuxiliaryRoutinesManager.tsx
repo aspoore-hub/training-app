@@ -8,6 +8,7 @@ import {
   updateAuxiliaryRoutine,
   type AuxiliaryRoutine,
 } from "../../lib/auxiliaryRoutines";
+import { containsHttpUrl, LinkifiedText } from "../ui/LinkifiedText";
 import { loadCoreCoachSettings } from "../../lib/settings";
 import { getCurrentTeamRole, normalizeTeamRole, type TeamRole } from "../../lib/teamPermissions";
 import type { WorkoutCategory } from "../../lib/types";
@@ -603,6 +604,12 @@ export function AuxiliaryRoutinesManager() {
                 multiline
                 editable={!readOnly}
               />
+              {containsHttpUrl(auxiliaryDetailsDraft) ? (
+                <View style={styles.linkPreviewBox}>
+                  <Text style={styles.linkPreviewLabel}>Clickable link preview</Text>
+                  <LinkifiedText text={auxiliaryDetailsDraft} style={styles.linkPreviewText} />
+                </View>
+              ) : null}
 
               <View style={styles.assignmentStack}>
                 {renderCategorySelector({
@@ -782,6 +789,25 @@ const styles = StyleSheet.create({
   },
   detailsInputDesktop: {
     minHeight: 280,
+  },
+  linkPreviewBox: {
+    borderWidth: 1,
+    borderColor: "#bfdbfe",
+    borderRadius: 12,
+    backgroundColor: "#eff6ff",
+    padding: 10,
+    gap: 6,
+    marginTop: 10,
+  },
+  linkPreviewLabel: {
+    color: "#1e40af",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  linkPreviewText: {
+    color: "#334155",
+    lineHeight: 20,
+    fontWeight: "700",
   },
   assignmentStack: {
     gap: 10,

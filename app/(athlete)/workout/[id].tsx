@@ -9,6 +9,7 @@ import {
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { InlineSaveStatus } from "../../../components/shared/InlineSaveStatus";
 import { AthleteQuickFeedbackSheet } from "../../../components/athlete/AthleteQuickFeedbackSheet";
+import { LinkifiedText } from "../../../components/ui/LinkifiedText";
 import type { AthleteWorkout, WeekStartDay } from "../../../lib/types";
 import {
   buildMileageFeedbackId,
@@ -552,7 +553,7 @@ export default function AthleteWorkoutDetail() {
                   </Text>
                 </Pressable>
                 {routine.details && expandedRoutineIds.has(routine.id) ? (
-                  <Text style={{ marginTop: 4, color: "#475569", lineHeight: 19 }}>{routine.details}</Text>
+                  <LinkifiedText text={routine.details} style={{ marginTop: 4, color: "#475569", lineHeight: 19 }} />
                 ) : null}
               </View>
             ))}
@@ -574,7 +575,7 @@ export default function AthleteWorkoutDetail() {
                   </Text>
                 </Pressable>
                 {routine.details && expandedRoutineIds.has(routine.id) ? (
-                  <Text style={{ marginTop: 4, color: "#475569", lineHeight: 19 }}>{routine.details}</Text>
+                  <LinkifiedText text={routine.details} style={{ marginTop: 4, color: "#475569", lineHeight: 19 }} />
                 ) : null}
               </View>
             ))}
