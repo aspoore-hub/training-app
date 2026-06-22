@@ -54,6 +54,7 @@ export type TeamMileageCellRow = {
   day_idx: number;
   session: "AM" | "PM";
   value: any;
+  updated_at?: string | null;
 };
 
 export type MileageDayFlagRow = {
@@ -61,6 +62,7 @@ export type MileageDayFlagRow = {
   week_start_iso: string;
   day_idx: number;
   ncaa_off: boolean;
+  updated_at?: string | null;
 };
 
 export type TeamWorkoutRow = TeamWorkoutRowBase;
@@ -286,6 +288,28 @@ function mergeRowsByIdentity<T>(
   const byId = new Map<string, T>();
   for (const row of baseRows) byId.set(identity(row), row);
   for (const row of overrideRows) byId.set(identity(row), row);
+  return Array.from(byId.values());
+}
+
+function rowUpdatedAtMs(row: { updated_at?: string | null } | null | undefined): number {
+  const parsed = Date.parse(String(row?.updated_at ?? ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mergeRowsByIdentityPreferLatest<T extends { updated_at?: string | null }>(
+  rowsA: T[],
+  rowsB: T[],
+  identity: (value: T) => string
+): T[] {
+  const byId = new Map<string, T>();
+  for (const row of rowsA) byId.set(identity(row), row);
+  for (const row of rowsB) {
+    const key = identity(row);
+    const existing = byId.get(key);
+    if (!existing || rowUpdatedAtMs(row) >= rowUpdatedAtMs(existing)) {
+      byId.set(key, row);
+    }
+  }
   return Array.from(byId.values());
 }
 
@@ -936,6 +960,41 @@ function clearMileageFlagPending(weekStartISO: string, row: MileageDayFlagRow) {
   }
 }
 
+function clearStaleMileagePendingAgainstCloud(
+  weekStartISO: string,
+  cloudCells: TeamMileageCellRow[],
+  cloudFlags: MileageDayFlagRow[]
+) {
+  const cloudCellById = new Map(cloudCells.map((row) => [mileageCellIdentity(row), row] as const));
+  const cloudFlagById = new Map(cloudFlags.map((row) => [mileageFlagIdentity(row), row] as const));
+  const pendingCells = getPendingCellsForWeek(weekStartISO);
+  const pendingFlags = getPendingFlagsForWeek(weekStartISO);
+  const nextPendingCells = pendingCells.filter((row) => {
+    const cloudRow = cloudCellById.get(mileageCellIdentity(row));
+    return !cloudRow || rowUpdatedAtMs(row) >= rowUpdatedAtMs(cloudRow);
+  });
+  const nextPendingFlags = pendingFlags.filter((row) => {
+    const cloudRow = cloudFlagById.get(mileageFlagIdentity(row));
+    return !cloudRow || rowUpdatedAtMs(row) >= rowUpdatedAtMs(cloudRow);
+  });
+  if (nextPendingCells.length === pendingCells.length && nextPendingFlags.length === pendingFlags.length) return;
+
+  const nextPendingCellsByWeek: MileageCellPendingByWeek = { ...state.mileagePendingCellsByWeek };
+  const nextPendingFlagsByWeek: MileageFlagPendingByWeek = { ...state.mileagePendingFlagsByWeek };
+  if (nextPendingCells.length > 0) nextPendingCellsByWeek[weekStartISO] = nextPendingCells;
+  else delete nextPendingCellsByWeek[weekStartISO];
+  if (nextPendingFlags.length > 0) nextPendingFlagsByWeek[weekStartISO] = nextPendingFlags;
+  else delete nextPendingFlagsByWeek[weekStartISO];
+
+  setState({
+    mileagePendingCellsByWeek: nextPendingCellsByWeek,
+    mileagePendingFlagsByWeek: nextPendingFlagsByWeek,
+  });
+  if (state.teamId) {
+    schedulePersistMileagePendingForTeam(state.teamId, nextPendingCellsByWeek, nextPendingFlagsByWeek);
+  }
+}
+
 async function resetForContextSwitch(nextTeamId: string | null) {
   const { data } = await supabase.auth.getSession();
   const userId = data.session?.user?.id ?? state.userId ?? null;
@@ -1067,12 +1126,12 @@ async function flushPendingMileageWeek(weekStartISO: string): Promise<void> {
 function buildMileageWeekStateResult(weekStartISO: string): MileageWeekLoadResult {
   return {
     weekStartISO,
-    cells: mergeRowsByIdentity(
+    cells: mergeRowsByIdentityPreferLatest(
       state.mileageCellsByWeek[weekStartISO] ?? [],
       getPendingCellsForWeek(weekStartISO),
       mileageCellIdentity
     ) as TeamMileageCellRow[],
-    flags: mergeRowsByIdentity(
+    flags: mergeRowsByIdentityPreferLatest(
       state.mileageFlagsByWeek[weekStartISO] ?? [],
       getPendingFlagsForWeek(weekStartISO),
       mileageFlagIdentity
@@ -1092,8 +1151,6 @@ async function loadMileageWeekSnapshot(weekStartISO: string, force = false): Pro
       return { weekStartISO: cleanWeekStartISO, cells: [], flags: [] };
     }
 
-    void flushPendingMileageWeek(cleanWeekStartISO);
-
     if (!force && state.mileageLoadedWeeks[cleanWeekStartISO]) {
       return buildMileageWeekStateResult(cleanWeekStartISO);
     }
@@ -1103,12 +1160,19 @@ async function loadMileageWeekSnapshot(weekStartISO: string, force = false): Pro
       fetchMileageDayFlagsForWeek(cleanWeekStartISO),
     ]);
 
-    const mergedCells = mergeRowsByIdentity(
+    clearStaleMileagePendingAgainstCloud(
+      cleanWeekStartISO,
+      (cells ?? []) as TeamMileageCellRow[],
+      (flags ?? []) as MileageDayFlagRow[]
+    );
+    void flushPendingMileageWeek(cleanWeekStartISO);
+
+    const mergedCells = mergeRowsByIdentityPreferLatest(
       (cells ?? []) as TeamMileageCellRow[],
       getPendingCellsForWeek(cleanWeekStartISO),
       mileageCellIdentity
     );
-    const mergedFlags = mergeRowsByIdentity(
+    const mergedFlags = mergeRowsByIdentityPreferLatest(
       (flags ?? []) as MileageDayFlagRow[],
       getPendingFlagsForWeek(cleanWeekStartISO),
       mileageFlagIdentity
@@ -1130,7 +1194,7 @@ async function loadMileageWeekSnapshot(weekStartISO: string, force = false): Pro
   }
 }
 
-async function loadMileageWeek(weekStartISO: string, force = false) {
+async function loadMileageWeek(weekStartISO: string, force = false, opts?: { throwOnError?: boolean }) {
   const cleanWeekStartISO = String(weekStartISO ?? "").trim();
   if (!cleanWeekStartISO) return;
   incLoading();
@@ -1154,6 +1218,7 @@ async function loadMileageWeek(weekStartISO: string, force = false) {
         mileageLoadedWeeks: { ...state.mileageLoadedWeeks, [cleanWeekStartISO]: true },
       });
     }
+    if (opts?.throwOnError) throw e;
   } finally {
     decLoading();
   }
@@ -1220,7 +1285,7 @@ async function loadVisibleMileageWeekForAthlete(athleteProfileId: string, weekSt
   }
 }
 
-async function loadMileageWeeks(weekStartISOs: string[], force = false) {
+async function loadMileageWeeks(weekStartISOs: string[], force = false, opts?: { throwOnError?: boolean }) {
   const cleanWeekStartISOs = Array.from(
     new Set((Array.isArray(weekStartISOs) ? weekStartISOs : []).map((week) => String(week ?? "").trim()).filter(Boolean))
   );
@@ -1272,6 +1337,7 @@ async function loadMileageWeeks(weekStartISOs: string[], force = false) {
       mileageLoadedWeeks: nextLoadedWeeks,
       lastError,
     });
+    if (firstError && opts?.throwOnError) throw firstError;
   } finally {
     decLoading();
   }
@@ -1313,12 +1379,14 @@ async function setMileageCell(
   session: "AM" | "PM",
   value: any
 ) {
+  const updatedAt = new Date().toISOString();
   const row: TeamMileageCellRow = {
     athlete_profile_id: athleteProfileId,
     week_start_iso: weekStartISO,
     day_idx: dayIdx,
     session,
     value,
+    updated_at: updatedAt,
   };
   // optimistic local write first
   upsertCellLocal(weekStartISO, row);
@@ -1340,11 +1408,13 @@ async function setMileageOffFlag(
   dayIdx: number,
   ncaaOff: boolean
 ) {
+  const updatedAt = new Date().toISOString();
   const row: MileageDayFlagRow = {
     athlete_profile_id: athleteProfileId,
     week_start_iso: weekStartISO,
     day_idx: dayIdx,
     ncaa_off: ncaaOff,
+    updated_at: updatedAt,
   };
   // optimistic local write first
   upsertFlagLocal(weekStartISO, row);

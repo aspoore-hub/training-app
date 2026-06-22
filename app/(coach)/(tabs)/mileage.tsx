@@ -710,6 +710,8 @@ export default function CoachMileageTab() {
   const [weekLabelDraft, setWeekLabelDraft] = useState("");
   const [isWeekLabelEditing, setIsWeekLabelEditing] = useState(false);
   const [weekLabelSaveState, setWeekLabelSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [mileageRefreshBusy, setMileageRefreshBusy] = useState(false);
+  const [mileageLoadError, setMileageLoadError] = useState<string | null>(null);
   // Standalone export state only; live mileage sheet rendering and grid behavior are untouched.
   const [exportingPdf, setExportingPdf] = useState(false);
   const [mileagePlanExportOpen, setMileagePlanExportOpen] = useState(false);
@@ -1062,16 +1064,17 @@ export default function CoachMileageTab() {
     void AsyncStorage.setItem(`${MILEAGE_WEEK_CACHE_PREFIX}:${weekStartISO}`, payload).catch(() => {});
   }, [weekCellsFromStore, weekFlagsFromStore, weekStartISO]);
 
+  const canUseCachedWeekSnapshot = !s.mileageLoadedWeeks[weekStartISO] && !mileageLoadError;
   const weekCells =
     weekCellsFromStore.length > 0
       ? weekCellsFromStore
-      : cachedWeekSnapshot?.weekStartISO === weekStartISO
+      : canUseCachedWeekSnapshot && cachedWeekSnapshot?.weekStartISO === weekStartISO
         ? cachedWeekSnapshot.cells
         : [];
   const weekFlags =
     weekFlagsFromStore.length > 0
       ? weekFlagsFromStore
-      : cachedWeekSnapshot?.weekStartISO === weekStartISO
+      : canUseCachedWeekSnapshot && cachedWeekSnapshot?.weekStartISO === weekStartISO
         ? cachedWeekSnapshot.flags
         : [];
 
@@ -1531,6 +1534,26 @@ export default function CoachMileageTab() {
       setWeekVisibilityRows([]);
     }
   }, [weekStartISO]);
+
+  const refreshDisplayedMileageWeek = useCallback(async (options?: { quiet?: boolean }) => {
+    const quiet = !!options?.quiet;
+    if (!quiet) setMileageRefreshBusy(true);
+    setMileageLoadError(null);
+    try {
+      await Promise.all([
+        teamDataStore.actions.loadMileageWeek(weekStartISO, true, { throwOnError: true }),
+        refreshMileageWeekVisibility(),
+      ]);
+      setMileageLoadError(null);
+      if (!quiet) showActionBanner("Mileage refreshed from cloud");
+    } catch (error: any) {
+      const message = String(error?.message ?? error ?? "Could not load latest mileage from cloud.");
+      setMileageLoadError(message);
+      if (!quiet) Alert.alert("Mileage refresh failed", message);
+    } finally {
+      if (!quiet) setMileageRefreshBusy(false);
+    }
+  }, [refreshMileageWeekVisibility, showActionBanner, weekStartISO]);
 
   useEffect(() => {
     void refreshMileageWeekVisibility();
@@ -2096,8 +2119,11 @@ export default function CoachMileageTab() {
           teamDataStore.actions.refreshRoster().catch((error) => {
             console.warn("[coach-mileage] refreshRoster on focus failed", error);
           }),
-          teamDataStore.actions.loadMileageWeek(focusedWeekStartISO).catch((error) => {
+          teamDataStore.actions.loadMileageWeek(focusedWeekStartISO, true, { throwOnError: true }).then(() => {
+            setMileageLoadError(null);
+          }).catch((error) => {
             console.warn("[coach-mileage] loadMileageWeek on focus failed", error);
+            setMileageLoadError(String(error?.message ?? error ?? "Could not load latest mileage from cloud."));
           }),
         ]);
         if (nextCoachSettings?.distanceUnit) {
@@ -2131,6 +2157,16 @@ export default function CoachMileageTab() {
       })();
     }, [loadMileageWeekStartSetting, weekAnchorISO])
   );
+
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof document === "undefined") return;
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      void refreshDisplayedMileageWeek({ quiet: true });
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [refreshDisplayedMileageWeek]);
 
   const loadSeasonMileageData = useCallback(async () => {
     if (!seasonMileageTableRange.startISO || !seasonMileageTableRange.endISO) {
@@ -5145,6 +5181,25 @@ export default function CoachMileageTab() {
             </View>
           ) : null}
 
+          {mileageLoadError ? (
+            <View style={{ borderWidth: 1, borderColor: "#fecaca", borderRadius: 10, backgroundColor: "#fff1f2", paddingHorizontal: 10, paddingVertical: 8, gap: 6 }}>
+              <Text style={{ fontSize: 12, fontWeight: "900", color: "#991b1b" }}>
+                Could not load latest mileage from cloud.
+              </Text>
+              <Text selectable style={{ fontSize: 12, fontWeight: "700", color: "#be123c" }}>
+                {mileageLoadError}
+              </Text>
+              <View style={{ alignItems: "flex-start" }}>
+                <Button
+                  title={mileageRefreshBusy ? "Refreshing..." : "Retry"}
+                  variant="secondary"
+                  onPress={() => void refreshDisplayedMileageWeek()}
+                  disabled={mileageRefreshBusy}
+                />
+              </View>
+            </View>
+          ) : null}
+
           <View
             style={{
               borderWidth: 1,
@@ -5165,6 +5220,12 @@ export default function CoachMileageTab() {
                 <AppText variant="caption" color="mutedText" style={{ fontWeight: "800", marginRight: 2 }}>
                   WEEK ACTIONS
                 </AppText>
+                <Button
+                  title={mileageRefreshBusy ? "Refreshing..." : "Refresh"}
+                  variant="secondary"
+                  onPress={() => void refreshDisplayedMileageWeek()}
+                  disabled={mileageRefreshBusy}
+                />
                 {!readOnlyMileage ? (
                   <>
                     <Button title="Copy Week" variant="secondary" onPress={copyEntireVisibleWeek} />

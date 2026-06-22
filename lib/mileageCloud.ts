@@ -18,6 +18,7 @@ export type TeamMileageCellRow = {
   day_idx: number;
   session: "AM" | "PM";
   value: any;
+  updated_at?: string | null;
 };
 
 export type MileageDayFlagRow = {
@@ -25,6 +26,7 @@ export type MileageDayFlagRow = {
   week_start_iso: string; // YYYY-MM-DD
   day_idx: number;
   ncaa_off: boolean;
+  updated_at?: string | null;
 };
 
 export type MileageWeekVisibilityRow = {
@@ -105,7 +107,7 @@ export async function fetchMileageCellsForWeek(
 
   const { data, error } = await supabase
     .from("team_mileage_cells")
-    .select("athlete_profile_id,day_idx,session,value")
+    .select("athlete_profile_id,week_start_iso,day_idx,session,value,updated_at")
     .eq("team_id", teamId)
     .eq("week_start_iso", weekStartISO);
 
@@ -135,7 +137,7 @@ export async function fetchVisibleMileageCellsForAthleteWeek(
 
   const { data, error } = await supabase
     .from("team_mileage_cells")
-    .select("athlete_profile_id,week_start_iso,day_idx,session,value")
+    .select("athlete_profile_id,week_start_iso,day_idx,session,value,updated_at")
     .eq("team_id", teamId)
     .eq("athlete_profile_id", athleteProfileId)
     .eq("week_start_iso", cleanWeekStartISO);
@@ -151,7 +153,7 @@ export async function fetchMileageDayFlagsForWeek(
 
   const { data, error } = await supabase
     .from("team_mileage_day_flags")
-    .select("athlete_profile_id,week_start_iso,day_idx,ncaa_off")
+    .select("athlete_profile_id,week_start_iso,day_idx,ncaa_off,updated_at")
     .eq("team_id", teamId)
     .eq("week_start_iso", weekStartISO);
 
@@ -181,7 +183,7 @@ export async function fetchVisibleMileageDayFlagsForAthleteWeek(
 
   const { data, error } = await supabase
     .from("team_mileage_day_flags")
-    .select("athlete_profile_id,week_start_iso,day_idx,ncaa_off")
+    .select("athlete_profile_id,week_start_iso,day_idx,ncaa_off,updated_at")
     .eq("team_id", teamId)
     .eq("athlete_profile_id", athleteProfileId)
     .eq("week_start_iso", cleanWeekStartISO);

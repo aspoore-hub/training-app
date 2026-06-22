@@ -2894,6 +2894,22 @@ export default function CoachCalendarMonth() {
     return startISO;
   }, [anchorMonth, calendarMode, todayISO, weekDates]);
 
+  const openCreateSession = useCallback(() => {
+    const targetDateISO = String(quickNewSessionDateISO ?? "").trim();
+    if (!isValidISODate(targetDateISO)) {
+      Alert.alert("Choose a date", "Could not determine which date to create a session for.");
+      return;
+    }
+    try {
+      router.push({
+        pathname: "/(coach)/(tabs)/planner",
+        params: { date: targetDateISO },
+      });
+    } catch (error: any) {
+      Alert.alert("Could not open Create Session", String(error?.message ?? error ?? "Please try again."));
+    }
+  }, [quickNewSessionDateISO, router]);
+
   const handleExportWeekPdf = useCallback(async () => {
     if (calendarMode !== "week" || exportingPdf) return;
     debugCalendar("[weekly-pdf] export start", {
@@ -3793,12 +3809,7 @@ export default function CoachCalendarMonth() {
               <View style={styles.headerPrimaryActions}>
                 {canEditCalendarTraining ? (
                   <Pressable
-                    onPress={() =>
-                      router.push({
-                        pathname: "/(coach)/(tabs)/planner",
-                        params: { date: quickNewSessionDateISO, returnTo: "calendar" },
-                      })
-                    }
+                    onPress={openCreateSession}
                     style={styles.createSessionTopBtn}
                   >
                     <Ionicons name="create-outline" size={12} color="#fff" />
@@ -3821,12 +3832,7 @@ export default function CoachCalendarMonth() {
               <View style={styles.headerRight}>
                 {canEditCalendarTraining ? (
                   <Pressable
-                    onPress={() =>
-                      router.push({
-                        pathname: "/(coach)/(tabs)/planner",
-                        params: { date: quickNewSessionDateISO, returnTo: "calendar" },
-                      })
-                    }
+                    onPress={openCreateSession}
                     style={styles.createSessionTopBtn}
                   >
                     <Ionicons name="create-outline" size={12} color="#fff" />
