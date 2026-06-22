@@ -723,7 +723,6 @@ export function AuxiliaryRoutinesManager() {
       },
     ]);
     setAuxiliaryAutosaveStatus("dirty");
-    setInsertPickerOpen(false);
   }, []);
 
   const insertDrillAsTextIntoRoutine = useCallback((item: DrillLibraryItem | null) => {
@@ -736,7 +735,6 @@ export function AuxiliaryRoutinesManager() {
     if (!line) return;
     setAuxiliaryDetailsDraft((current) => `${current.trimEnd()}${current.trim() ? "\n" : ""}${line}`);
     setAuxiliaryAutosaveStatus("dirty");
-    setInsertPickerOpen(false);
   }, []);
 
   const addCustomRoutineTextItem = useCallback(() => {
