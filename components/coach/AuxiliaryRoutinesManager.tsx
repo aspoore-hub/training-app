@@ -25,6 +25,7 @@ import {
   type DrillLibraryItem,
   type RoutineFolder,
 } from "../../lib/drillLibrary";
+import { hydrateRoutineLibraryDrillItem } from "../../lib/routineDrillHydration";
 import { loadCoreCoachSettings } from "../../lib/settings";
 import { getCurrentTeamRole, normalizeTeamRole, type TeamRole } from "../../lib/teamPermissions";
 import type { WorkoutCategory } from "../../lib/types";
@@ -189,6 +190,11 @@ export function AuxiliaryRoutinesManager() {
         .includes(needle);
     });
   }, [drillLibraryItems, insertFolderFilterId, insertQuery]);
+
+  const drillById = useMemo(
+    () => new Map(drillLibraryItems.map((drill) => [drill.id, drill] as const)),
+    [drillLibraryItems]
+  );
 
   const selectedAuxiliaryRoutine = useMemo(
     () => sortedAuxiliaryRoutines.find((routine) => routine.id === selectedAuxiliaryRoutineId) ?? null,
@@ -734,30 +740,19 @@ export function AuxiliaryRoutinesManager() {
     }
   }, [drillLibraryItems, loadManagerData, selectDrillForEdit, selectedDrillId]);
 
-  function resolveLibraryDrill(item: DrillRoutineItem) {
-    if (item.kind !== "libraryDrill") return null;
-    return drillLibraryItems.find((drill) => drill.id === item.drillId) ?? null;
-  }
-
   function getLibraryDrillTitle(item: DrillRoutineItem) {
     if (item.kind !== "libraryDrill") return "";
-    const drill = resolveLibraryDrill(item);
-    if (drill) return drill.name || "Library drill";
-    return item.drillTitle || "Missing drill";
+    return hydrateRoutineLibraryDrillItem(item, drillById)?.title ?? "Missing drill";
   }
 
   function getLibraryDrillDetails(item: DrillRoutineItem) {
     if (item.kind !== "libraryDrill") return "";
-    const drill = resolveLibraryDrill(item);
-    if (drill) return drill.defaultDetails;
-    return item.drillDefaultDetails || "";
+    return hydrateRoutineLibraryDrillItem(item, drillById)?.cues ?? "";
   }
 
   function getLibraryDrillVideoUrl(item: DrillRoutineItem) {
     if (item.kind !== "libraryDrill") return "";
-    const drill = resolveLibraryDrill(item);
-    if (drill) return drill.videoUrl;
-    return item.drillVideoUrl || "";
+    return hydrateRoutineLibraryDrillItem(item, drillById)?.videoUrl ?? "";
   }
 
   const insertDrillIntoRoutine = useCallback((item: DrillLibraryItem | null) => {
@@ -773,9 +768,6 @@ export function AuxiliaryRoutinesManager() {
         drillId: item.id,
         prescription: "",
         customNotes: "",
-        drillTitle: item.name,
-        drillVideoUrl: item.videoUrl,
-        drillDefaultDetails: item.defaultDetails,
       },
     ]);
     setAuxiliaryAutosaveStatus("dirty");
@@ -1197,7 +1189,7 @@ export function AuxiliaryRoutinesManager() {
                                     <Text style={styles.smallGhostBtnText}>As text</Text>
                                   </Pressable>
                                   <Text style={[styles.cardHint, { fontSize: 11, textAlign: "right" }]}>
-                                    Copies text; future library edits won't update it.
+                                    Copies this drill into text; future library edits will not update it.
                                   </Text>
                                 </View>
                               </View>

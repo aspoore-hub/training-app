@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Linking, Platform, Pressable, Text, View } from "react-native";
 import type { AuxiliaryRoutine, DrillRoutineItem } from "../../lib/auxiliaryRoutines";
 import type { DrillLibraryItem } from "../../lib/drillLibrary";
+import { hydrateRoutineLibraryDrillItem } from "../../lib/routineDrillHydration";
 import { LinkifiedText } from "../ui/LinkifiedText";
 
 export function hasStructuredRoutineItems(routine: AuxiliaryRoutine | null | undefined) {
@@ -16,30 +17,19 @@ export function routineHasDisplayDetails(routine: AuxiliaryRoutine | null | unde
   );
 }
 
-function resolveDrill(item: DrillRoutineItem, drillById?: Map<string, DrillLibraryItem>) {
-  if (item.kind !== "libraryDrill") return null;
-  return drillById?.get(item.drillId) ?? null;
-}
-
 function itemTitle(item: DrillRoutineItem, drillById?: Map<string, DrillLibraryItem>) {
   if (item.kind === "text") return item.text;
-  const drill = resolveDrill(item, drillById);
-  if (drill) return drill.name || "Library drill";
-  return item.drillTitle || "Missing drill";
+  return hydrateRoutineLibraryDrillItem(item, drillById)?.title ?? "Missing drill";
 }
 
 function itemDetails(item: DrillRoutineItem, drillById?: Map<string, DrillLibraryItem>) {
   if (item.kind === "text") return item.text;
-  const drill = resolveDrill(item, drillById);
-  if (drill) return drill.defaultDetails;
-  return item.drillDefaultDetails || "";
+  return hydrateRoutineLibraryDrillItem(item, drillById)?.cues ?? "";
 }
 
 function itemVideoUrl(item: DrillRoutineItem, drillById?: Map<string, DrillLibraryItem>) {
   if (item.kind !== "libraryDrill") return "";
-  const drill = resolveDrill(item, drillById);
-  if (drill) return drill.videoUrl;
-  return item.drillVideoUrl || "";
+  return hydrateRoutineLibraryDrillItem(item, drillById)?.videoUrl ?? "";
 }
 
 function openVideoUrl(url: string, event?: any) {
@@ -171,10 +161,11 @@ export function AthleteRoutineDetails({
         const title = itemTitle(item, drillById);
         const details = itemDetails(item, drillById);
         const videoUrl = itemVideoUrl(item, drillById);
-        const customNotes = String(item.customNotes ?? "").trim();
+        const hydrated = hydrateRoutineLibraryDrillItem(item, drillById);
+        const customNotes = hydrated?.customNotes ?? "";
         const prescription = String(item.prescription ?? "").trim();
         const expanded = expandedItemIds.has(item.id);
-        const canExpand = Boolean(details || customNotes);
+        const canExpand = Boolean(details);
 
         return (
           <View key={item.id} style={{ borderTopWidth: index === 0 ? 0 : 1, borderTopColor: "#f1f5f9" }}>
@@ -208,14 +199,10 @@ export function AthleteRoutineDetails({
               <View style={{ marginLeft: 30, borderTopWidth: 1, borderTopColor: "#f1f5f9", paddingTop: 8, gap: 8 }}>
                 {details ? (
                   <View style={{ gap: 3 }}>
-                    <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900" }}>Library cues</Text>
+                    <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900" }}>
+                      {customNotes ? "Coach notes" : "Library cues"}
+                    </Text>
                     <LinkifiedText text={details} style={{ color: "#475569", lineHeight: 19 }} />
-                  </View>
-                ) : null}
-                {customNotes ? (
-                  <View style={{ gap: 3 }}>
-                    <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900" }}>Coach notes</Text>
-                    <LinkifiedText text={customNotes} style={{ color: "#475569", lineHeight: 19 }} />
                   </View>
                 ) : null}
               </View>
