@@ -3973,7 +3973,10 @@ export default function CoachWorkoutsDay() {
         sourceMainNotes: sourceBatchHeaderNotes ?? "(fallback: row details)",
         rowCount: payload.length,
       });
-      await createTeamWorkoutBatch(payload);
+      const insertedRows = await createTeamWorkoutBatch(payload);
+      if (insertedRows.length > 0) {
+        setRowsRaw((prev) => [...prev, ...insertedRows]);
+      }
 
       if (row.batchId && newBatchId && sourceBatchHeaderNotes) {
         await Promise.all([
@@ -3992,9 +3995,14 @@ export default function CoachWorkoutsDay() {
         ]);
       }
 
-      await refreshDayGuarded(dayISO);
+      await refreshDayGuarded(dayISO).catch((refreshError) => {
+        console.warn("[workouts] duplicate refresh failed after insert", refreshError);
+        patchAppRuntime({ lastSaveError: String((refreshError as any)?.message ?? refreshError ?? "Duplicated, but refresh failed.") });
+      });
     } catch (e: any) {
-      Alert.alert("Duplicate failed", e?.message ?? "Could not duplicate row.");
+      const message = String(e?.message ?? e ?? "Could not duplicate row.");
+      patchAppRuntime({ lastSaveError: message });
+      Alert.alert("Duplicate failed", message);
     } finally {
       setDuplicatingKey((prev) => (prev === row.key ? null : prev));
     }
@@ -4220,7 +4228,7 @@ export default function CoachWorkoutsDay() {
           session: defaultsForDay.session,
           location: null,
           time_text: defaultsForDay.timeText,
-          title: "",
+          title: "Workout",
           details: null,
           primary_category: null,
           categories: [] as string[],
@@ -4237,8 +4245,14 @@ export default function CoachWorkoutsDay() {
         return;
       }
 
-      await createTeamWorkoutBatch(payload);
-      await refreshDayGuarded(dayISO);
+      const insertedRows = await createTeamWorkoutBatch(payload);
+      if (insertedRows.length > 0) {
+        setRowsRaw((prev) => [...prev, ...insertedRows]);
+      }
+      await refreshDayGuarded(dayISO).catch((refreshError) => {
+        console.warn("[workouts] create refresh failed after insert", refreshError);
+        patchAppRuntime({ lastSaveError: String((refreshError as any)?.message ?? refreshError ?? "Created, but refresh failed.") });
+      });
 
       const key = `batch:${newBatchId}`;
       setExpandedByBatchKey((prev) => ({ ...prev, [key]: true }));
@@ -4247,11 +4261,13 @@ export default function CoachWorkoutsDay() {
         setHighlightBatchKey((prev) => (prev === key ? null : prev));
       }, 2200);
     } catch (e: any) {
-      Alert.alert("Create failed", e?.message ?? "Could not create workout batch.");
+      const message = String(e?.message ?? e ?? "Could not create workout batch.");
+      patchAppRuntime({ lastSaveError: message });
+      Alert.alert("Create failed", message);
     } finally {
       setCreatingBatch(false);
     }
-  }, [creatingBatch, dayISO, ensureTeamId, getEligibleRosterOptionsForDate, practiceDefaults, refreshDayGuarded]);
+  }, [creatingBatch, dayISO, ensureTeamId, getEligibleRosterOptionsForDate, patchAppRuntime, practiceDefaults, refreshDayGuarded]);
 
   const handleRemoveAthleteFromBatch = useCallback(
     async (batchRow: WorksheetBatchRow, athleteId: string) => {
