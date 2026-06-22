@@ -5,11 +5,29 @@ import { saveJSONWithTeamCloudSyncStrict } from "./teamCloudSync";
 
 export const AUXILIARY_ROUTINES_KEY = "training_app_auxiliary_routines_v1";
 
+export type DrillRoutineItem =
+  | {
+      id: string;
+      kind: "libraryDrill";
+      drillId: string;
+      prescription: string;
+      customNotes?: string;
+      drillTitle?: string;
+      drillVideoUrl?: string;
+      drillDefaultDetails?: string;
+    }
+  | {
+      id: string;
+      kind: "text";
+      text: string;
+    };
+
 export type AuxiliaryRoutine = {
   id: string;
   folderId?: string | null;
   title: string;
   details: string;
+  items?: DrillRoutineItem[];
   categoryNames?: string[];
   preCategoryNames?: string[];
   postCategoryNames?: string[];
@@ -32,6 +50,43 @@ function createRoutineId() {
   return `aux_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
+export function createRoutineItemId() {
+  return `routine_item_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function normalizeRoutineItem(raw: any): DrillRoutineItem | null {
+  if (!raw || typeof raw !== "object") return null;
+  const id = String(raw.id ?? "").trim() || createRoutineItemId();
+  const kind = String(raw.kind ?? "").trim();
+  if (kind === "libraryDrill") {
+    const drillId = String(raw.drillId ?? "").trim();
+    if (!drillId) return null;
+    return {
+      id,
+      kind: "libraryDrill",
+      drillId,
+      prescription: String(raw.prescription ?? "").trim(),
+      customNotes: String(raw.customNotes ?? "").trim() || undefined,
+      drillTitle: String(raw.drillTitle ?? "").trim() || undefined,
+      drillVideoUrl: String(raw.drillVideoUrl ?? "").trim() || undefined,
+      drillDefaultDetails: String(raw.drillDefaultDetails ?? "").trim() || undefined,
+    };
+  }
+  if (kind === "text") {
+    const text = String(raw.text ?? "").trim();
+    if (!text) return null;
+    return { id, kind: "text", text };
+  }
+  return null;
+}
+
+function normalizeRoutineItems(raw: any): DrillRoutineItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => normalizeRoutineItem(item))
+    .filter((item): item is DrillRoutineItem => Boolean(item));
+}
+
 function normalizeRoutine(raw: any): AuxiliaryRoutine | null {
   if (!raw || typeof raw !== "object") return null;
   const title = String(raw.title ?? "").trim() || "Routine";
@@ -43,6 +98,7 @@ function normalizeRoutine(raw: any): AuxiliaryRoutine | null {
     folderId: String(raw.folderId ?? "").trim() || null,
     title,
     details,
+    items: normalizeRoutineItems(raw.items),
     categoryNames: normalizeCategoryNames(raw.categoryNames),
     preCategoryNames: normalizeCategoryNames(raw.preCategoryNames),
     postCategoryNames: normalizeCategoryNames(raw.postCategoryNames),
@@ -101,6 +157,7 @@ export async function createAuxiliaryRoutine(input: {
   preCategoryNames?: string[];
   postCategoryNames?: string[];
   folderId?: string | null;
+  items?: DrillRoutineItem[];
 }) {
   const now = Date.now();
   const preCategoryNames = normalizeCategoryNames(input.preCategoryNames);
@@ -115,6 +172,7 @@ export async function createAuxiliaryRoutine(input: {
     folderId: String(input.folderId ?? "").trim() || null,
     title: String(input.title ?? "").trim() || "Routine",
     details: String(input.details ?? "").trim(),
+    items: normalizeRoutineItems(input.items),
     categoryNames,
     preCategoryNames,
     postCategoryNames,
@@ -135,6 +193,7 @@ export async function updateAuxiliaryRoutine(
     preCategoryNames?: string[];
     postCategoryNames?: string[];
     folderId?: string | null;
+    items?: DrillRoutineItem[];
   }
 ) {
   const existing = await loadAuxiliaryRoutines();
@@ -162,6 +221,7 @@ export async function updateAuxiliaryRoutine(
       folderId: patch.folderId !== undefined ? String(patch.folderId ?? "").trim() || null : item.folderId ?? null,
       title: patch.title != null ? String(patch.title).trim() || "Routine" : item.title,
       details: patch.details != null ? String(patch.details).trim() : item.details,
+      items: patch.items != null ? normalizeRoutineItems(patch.items) : normalizeRoutineItems(item.items),
       categoryNames,
       preCategoryNames,
       postCategoryNames,

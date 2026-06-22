@@ -9,7 +9,7 @@ import {
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { InlineSaveStatus } from "../../../components/shared/InlineSaveStatus";
 import { AthleteQuickFeedbackSheet } from "../../../components/athlete/AthleteQuickFeedbackSheet";
-import { LinkifiedText } from "../../../components/ui/LinkifiedText";
+import { AthleteRoutineDetails, routineHasDisplayDetails } from "../../../components/athlete/AthleteRoutineDetails";
 import type { AthleteWorkout, WeekStartDay } from "../../../lib/types";
 import {
   buildMileageFeedbackId,
@@ -19,6 +19,7 @@ import {
   upsertMileageFeedback,
 } from "../../../lib/mileageFeedback";
 import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
+import { loadDrillLibraryItems, type DrillLibraryItem } from "../../../lib/drillLibrary";
 import { parseNumericLike } from "../../../lib/feedbackParsing";
 import { getCurrentTeamId } from "../../../lib/team";
 import { resolveAthleteSessionContext } from "../../../lib/athleteSession";
@@ -177,6 +178,7 @@ export default function AthleteWorkoutDetail() {
   const [groupMateNames, setGroupMateNames] = useState<string[]>([]);
   const [batchHeaderNotes, setBatchHeaderNotes] = useState("");
   const [routineById, setRoutineById] = useState<Map<string, AuxiliaryRoutine>>(new Map());
+  const [drillById, setDrillById] = useState<Map<string, DrillLibraryItem>>(new Map());
   const [expandedRoutineIds, setExpandedRoutineIds] = useState<Set<string>>(new Set());
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [completedMilesText, setCompletedMilesText] = useState("");
@@ -217,16 +219,19 @@ export default function AthleteWorkoutDetail() {
     (async () => {
       const athleteSession = await resolveAthleteSessionContext();
       const visibleAthleteId = String(athleteSession.athleteId ?? athleteId ?? "").trim();
-      const [rosterMap, routines, weekStartResult, storedCategories] = await Promise.all([
+      const [rosterMap, routines, drillItems, weekStartResult, storedCategories] = await Promise.all([
         loadRosterAny(),
         loadAuxiliaryRoutineDefinitions(),
+        loadDrillLibraryItems(),
         loadWeekStartSetting(),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       ]);
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
       const loadedRoutineById = new Map(routines.map((routine) => [routine.id, routine] as const));
+      const loadedDrillById = new Map(drillItems.map((drill) => [drill.id, drill] as const));
       setRosterMap(rosterMap);
       setRoutineById(loadedRoutineById);
+      setDrillById(loadedDrillById);
       setCategories(normalizeCategories(storedCategories));
       setWeekStartsOn(resolvedWeekStart);
 
@@ -246,7 +251,7 @@ export default function AthleteWorkoutDetail() {
           new Set(
             [...(Array.isArray(found.preRoutineIds) ? found.preRoutineIds : []), ...(Array.isArray(found.postRoutineIds) ? found.postRoutineIds : [])]
               .map((routineId) => cleanDisplayText(routineId))
-              .filter((routineId) => Boolean(cleanDisplayText(loadedRoutineById.get(routineId)?.details)))
+              .filter((routineId) => routineHasDisplayDetails(loadedRoutineById.get(routineId)))
           )
         );
 
@@ -539,7 +544,7 @@ export default function AthleteWorkoutDetail() {
               <View key={`pre-${routine.id}`} style={{ borderTopWidth: 1, borderTopColor: "#f1f5f9", paddingTop: 8 }}>
                 <Pressable
                   onPress={() => {
-                    if (!routine.details) return;
+                    if (!routineHasDisplayDetails(routine)) return;
                     setExpandedRoutineIds((prev) => {
                       const next = new Set(prev);
                       if (next.has(routine.id)) next.delete(routine.id);
@@ -549,11 +554,13 @@ export default function AthleteWorkoutDetail() {
                   }}
                 >
                   <Text style={{ fontWeight: "900", color: "#0f172a" }}>
-                    Pre-run: {routine.title}{routine.details ? expandedRoutineIds.has(routine.id) ? " • Hide details" : " • Show details" : ""}
+                    Pre-run: {routine.title}{routineHasDisplayDetails(routine) ? expandedRoutineIds.has(routine.id) ? " • Hide details" : " • Show details" : ""}
                   </Text>
                 </Pressable>
-                {routine.details && expandedRoutineIds.has(routine.id) ? (
-                  <LinkifiedText text={routine.details} style={{ marginTop: 4, color: "#475569", lineHeight: 19 }} />
+                {expandedRoutineIds.has(routine.id) ? (
+                  <View style={{ marginTop: 6 }}>
+                    <AthleteRoutineDetails routine={routine} drillById={drillById} />
+                  </View>
                 ) : null}
               </View>
             ))}
@@ -561,7 +568,7 @@ export default function AthleteWorkoutDetail() {
               <View key={`post-${routine.id}`} style={{ borderTopWidth: 1, borderTopColor: "#f1f5f9", paddingTop: 8 }}>
                 <Pressable
                   onPress={() => {
-                    if (!routine.details) return;
+                    if (!routineHasDisplayDetails(routine)) return;
                     setExpandedRoutineIds((prev) => {
                       const next = new Set(prev);
                       if (next.has(routine.id)) next.delete(routine.id);
@@ -571,11 +578,13 @@ export default function AthleteWorkoutDetail() {
                   }}
                 >
                   <Text style={{ fontWeight: "900", color: "#0f172a" }}>
-                    Post-run: {routine.title}{routine.details ? expandedRoutineIds.has(routine.id) ? " • Hide details" : " • Show details" : ""}
+                    Post-run: {routine.title}{routineHasDisplayDetails(routine) ? expandedRoutineIds.has(routine.id) ? " • Hide details" : " • Show details" : ""}
                   </Text>
                 </Pressable>
-                {routine.details && expandedRoutineIds.has(routine.id) ? (
-                  <LinkifiedText text={routine.details} style={{ marginTop: 4, color: "#475569", lineHeight: 19 }} />
+                {expandedRoutineIds.has(routine.id) ? (
+                  <View style={{ marginTop: 6 }}>
+                    <AthleteRoutineDetails routine={routine} drillById={drillById} />
+                  </View>
                 ) : null}
               </View>
             ))}

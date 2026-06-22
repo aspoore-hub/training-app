@@ -3,10 +3,11 @@ import { ActivityIndicator, Alert, Pressable, ScrollView, Text, TextInput, View 
 import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { AccountContextSelector } from "../../components/account/AccountContextSelector";
-import { LinkifiedText } from "../../components/ui/LinkifiedText";
+import { AthleteRoutineDetails, getRoutinePreviewText } from "../../components/athlete/AthleteRoutineDetails";
 import { getActiveAccountContext } from "../../lib/accountContexts";
 import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
+import { loadDrillLibraryItems, type DrillLibraryItem } from "../../lib/drillLibrary";
 import { supabase } from "../../lib/supabase";
 
 function uniqueRoutineTags(routine: AuxiliaryRoutine): string[] {
@@ -30,6 +31,7 @@ export default function AthleteWarmupsScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [routines, setRoutines] = useState<AuxiliaryRoutine[]>([]);
+  const [drillById, setDrillById] = useState<Map<string, DrillLibraryItem>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
@@ -41,16 +43,18 @@ export default function AthleteWarmupsScreen() {
     setLoading(true);
     setError(null);
     try {
-      const [session, userResult, routineList] = await Promise.all([
+      const [session, userResult, routineList, drillItems] = await Promise.all([
         resolveAthleteSessionContext(true),
         supabase.auth.getUser(),
         loadAuxiliaryRoutineDefinitions(),
+        loadDrillLibraryItems(),
       ]);
       const accountContext = await getActiveAccountContext();
       setAthleteName(session.athleteName);
       setAccountEmail(userResult.data.user?.email ?? null);
       setTeamName(String(accountContext?.teamName ?? "").trim() || null);
       setRoutines(routineList);
+      setDrillById(new Map(drillItems.map((drill) => [drill.id, drill] as const)));
     } catch (err: any) {
       setError(String(err?.message ?? err ?? "Could not load warmups and drills."));
       setRoutines([]);
@@ -72,11 +76,12 @@ export default function AthleteWarmupsScreen() {
       const haystack = [
         routine.title,
         routine.details,
+        getRoutinePreviewText(routine, drillById),
         ...uniqueRoutineTags(routine),
       ].join(" ").toLowerCase();
       return haystack.includes(needle);
     });
-  }, [query, routines]);
+  }, [drillById, query, routines]);
 
   const allTags = useMemo(() => {
     return Array.from(new Set(routines.flatMap((routine) => uniqueRoutineTags(routine)))).sort((a, b) => a.localeCompare(b));
@@ -230,7 +235,7 @@ export default function AthleteWarmupsScreen() {
             const expanded = expandedIds.has(routine.id);
             const tags = uniqueRoutineTags(routine);
             const updatedLabel = formatUpdatedAt(routine.updatedAt);
-            const details = String(routine.details ?? "").trim();
+            const details = getRoutinePreviewText(routine, drillById);
             return (
               <View
                 key={routine.id}
@@ -250,11 +255,11 @@ export default function AthleteWarmupsScreen() {
                     <View style={{ flex: 1, gap: 5 }}>
                       <Text style={{ fontSize: 17, fontWeight: "900", color: "#0f172a" }}>{routine.title}</Text>
                       {details ? (
-                        <LinkifiedText
-                          text={details}
-                          numberOfLines={expanded ? undefined : 2}
-                          style={{ color: "#475569", lineHeight: 20 }}
-                        />
+                        expanded ? (
+                          <AthleteRoutineDetails routine={routine} drillById={drillById} />
+                        ) : (
+                          <Text numberOfLines={2} style={{ color: "#475569", lineHeight: 20 }}>{details}</Text>
+                        )
                       ) : (
                         <Text style={{ color: "#94a3b8", fontWeight: "700" }}>No details added.</Text>
                       )}

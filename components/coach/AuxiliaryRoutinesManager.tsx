@@ -3,10 +3,12 @@ import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vi
 import { useFocusEffect } from "expo-router";
 import {
   createAuxiliaryRoutine,
+  createRoutineItemId,
   deleteAuxiliaryRoutine,
   loadAuxiliaryRoutines,
   updateAuxiliaryRoutine,
   type AuxiliaryRoutine,
+  type DrillRoutineItem,
 } from "../../lib/auxiliaryRoutines";
 import { containsHttpUrl, LinkifiedText } from "../ui/LinkifiedText";
 import {
@@ -53,13 +55,15 @@ function buildDraftSnapshotFrom(
   details: string,
   preCategoryNames: string[],
   postCategoryNames: string[],
-  folderId: string | null
+  folderId: string | null,
+  items: DrillRoutineItem[]
 ) {
   return JSON.stringify({
     id,
     folderId,
     title: String(title ?? "").trim(),
     details: String(details ?? "").trim(),
+    items,
     pre: [...preCategoryNames].sort(),
     post: [...postCategoryNames].sort(),
   });
@@ -87,6 +91,7 @@ export function AuxiliaryRoutinesManager() {
   const [selectedAuxiliaryRoutineId, setSelectedAuxiliaryRoutineId] = useState<string | null>(null);
   const [auxiliaryTitleDraft, setAuxiliaryTitleDraft] = useState("");
   const [auxiliaryDetailsDraft, setAuxiliaryDetailsDraft] = useState("");
+  const [auxiliaryItemsDraft, setAuxiliaryItemsDraft] = useState<DrillRoutineItem[]>([]);
   const [auxiliaryFolderIdDraft, setAuxiliaryFolderIdDraft] = useState<string | null>(null);
   const [auxiliaryPreCategoryNamesDraft, setAuxiliaryPreCategoryNamesDraft] = useState<string[]>([]);
   const [auxiliaryPostCategoryNamesDraft, setAuxiliaryPostCategoryNamesDraft] = useState<string[]>([]);
@@ -104,6 +109,7 @@ export function AuxiliaryRoutinesManager() {
   const [insertPickerOpen, setInsertPickerOpen] = useState(false);
   const [insertQuery, setInsertQuery] = useState("");
   const [insertFolderFilterId, setInsertFolderFilterId] = useState(ALL_FOLDERS_ID);
+  const [expandedRoutineItemIds, setExpandedRoutineItemIds] = useState<Set<string>>(new Set());
   const [selectedDrillId, setSelectedDrillId] = useState<string | null>(null);
   const [drillNameDraft, setDrillNameDraft] = useState("");
   const [drillFolderIdDraft, setDrillFolderIdDraft] = useState<string | null>(null);
@@ -116,6 +122,7 @@ export function AuxiliaryRoutinesManager() {
   const selectedRoutineIdRef = React.useRef<string | null>(null);
   const titleDraftRef = React.useRef("");
   const detailsDraftRef = React.useRef("");
+  const itemsDraftRef = React.useRef<DrillRoutineItem[]>([]);
   const folderIdDraftRef = React.useRef<string | null>(null);
   const preCategoryNamesDraftRef = React.useRef<string[]>([]);
   const postCategoryNamesDraftRef = React.useRef<string[]>([]);
@@ -202,6 +209,7 @@ export function AuxiliaryRoutinesManager() {
     selectedRoutineIdRef.current = selectedAuxiliaryRoutineId;
     titleDraftRef.current = auxiliaryTitleDraft;
     detailsDraftRef.current = auxiliaryDetailsDraft;
+    itemsDraftRef.current = auxiliaryItemsDraft;
     folderIdDraftRef.current = auxiliaryFolderIdDraft;
     preCategoryNamesDraftRef.current = auxiliaryPreCategoryNamesDraft;
     postCategoryNamesDraftRef.current = auxiliaryPostCategoryNamesDraft;
@@ -209,6 +217,7 @@ export function AuxiliaryRoutinesManager() {
     selectedAuxiliaryRoutineId,
     auxiliaryTitleDraft,
     auxiliaryDetailsDraft,
+    auxiliaryItemsDraft,
     auxiliaryFolderIdDraft,
     auxiliaryPreCategoryNamesDraft,
     auxiliaryPostCategoryNamesDraft,
@@ -218,6 +227,7 @@ export function AuxiliaryRoutinesManager() {
     if (!routine) {
       setAuxiliaryTitleDraft("");
       setAuxiliaryDetailsDraft("");
+      setAuxiliaryItemsDraft([]);
       setAuxiliaryFolderIdDraft(null);
       setAuxiliaryPreCategoryNamesDraft([]);
       setAuxiliaryPostCategoryNamesDraft([]);
@@ -228,6 +238,7 @@ export function AuxiliaryRoutinesManager() {
 
     setAuxiliaryTitleDraft(String(routine.title ?? ""));
     setAuxiliaryDetailsDraft(String(routine.details ?? ""));
+    setAuxiliaryItemsDraft(Array.isArray(routine.items) ? routine.items : []);
     setAuxiliaryFolderIdDraft(String(routine.folderId ?? "").trim() || null);
     setAuxiliaryPreCategoryNamesDraft(Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : []);
     setAuxiliaryPostCategoryNamesDraft(Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : []);
@@ -237,7 +248,8 @@ export function AuxiliaryRoutinesManager() {
       String(routine.details ?? ""),
       Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : [],
       Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : [],
-      String(routine.folderId ?? "").trim() || null
+      String(routine.folderId ?? "").trim() || null,
+      Array.isArray(routine.items) ? routine.items : []
     );
     setAuxiliaryAutosaveStatus("idle");
   }, []);
@@ -321,10 +333,11 @@ export function AuxiliaryRoutinesManager() {
 
       const titleDraft = titleDraftRef.current;
       const detailsDraft = detailsDraftRef.current;
+      const itemsDraft = itemsDraftRef.current;
       const folderIdDraft = folderIdDraftRef.current;
       const preDraft = preCategoryNamesDraftRef.current;
       const postDraft = postCategoryNamesDraftRef.current;
-      const savedSnapshot = buildDraftSnapshotFrom(routineId, titleDraft, detailsDraft, preDraft, postDraft, folderIdDraft);
+      const savedSnapshot = buildDraftSnapshotFrom(routineId, titleDraft, detailsDraft, preDraft, postDraft, folderIdDraft, itemsDraft);
       if (savedSnapshot === lastSavedSnapshotRef.current) return true;
 
       const title = String(titleDraft ?? "").trim();
@@ -346,6 +359,7 @@ export function AuxiliaryRoutinesManager() {
         await updateAuxiliaryRoutine(routineId, {
           title,
           details,
+          items: itemsDraft,
           folderId: folderIdDraft,
           preCategoryNames: pre,
           postCategoryNames: post,
@@ -362,7 +376,8 @@ export function AuxiliaryRoutinesManager() {
           detailsDraftRef.current,
           preCategoryNamesDraftRef.current,
           postCategoryNamesDraftRef.current,
-          folderIdDraftRef.current
+          folderIdDraftRef.current,
+          itemsDraftRef.current
         );
         const stillEditingSameRoutine = selectedRoutineIdRef.current === routineId;
         const localDraftUnchangedSinceSave = latestDraftSnapshot === savedSnapshot;
@@ -411,7 +426,8 @@ export function AuxiliaryRoutinesManager() {
       auxiliaryDetailsDraft,
       auxiliaryPreCategoryNamesDraft,
       auxiliaryPostCategoryNamesDraft,
-      auxiliaryFolderIdDraft
+      auxiliaryFolderIdDraft,
+      auxiliaryItemsDraft
     );
     if (snapshot !== lastSavedSnapshotRef.current && auxiliaryAutosaveStatus !== "saving") {
       setAuxiliaryAutosaveStatus("dirty");
@@ -420,6 +436,7 @@ export function AuxiliaryRoutinesManager() {
     selectedAuxiliaryRoutineId,
     auxiliaryTitleDraft,
     auxiliaryDetailsDraft,
+    auxiliaryItemsDraft,
     auxiliaryFolderIdDraft,
     auxiliaryPreCategoryNamesDraft,
     auxiliaryPostCategoryNamesDraft,
@@ -653,7 +670,49 @@ export function AuxiliaryRoutinesManager() {
     }
   }, [drillLibraryItems, loadManagerData, selectDrillForEdit, selectedDrillId]);
 
+  function resolveLibraryDrill(item: DrillRoutineItem) {
+    if (item.kind !== "libraryDrill") return null;
+    return drillLibraryItems.find((drill) => drill.id === item.drillId) ?? null;
+  }
+
+  function getLibraryDrillTitle(item: DrillRoutineItem) {
+    if (item.kind !== "libraryDrill") return "";
+    return resolveLibraryDrill(item)?.name || item.drillTitle || "Library drill";
+  }
+
+  function getLibraryDrillDetails(item: DrillRoutineItem) {
+    if (item.kind !== "libraryDrill") return "";
+    return resolveLibraryDrill(item)?.defaultDetails || item.drillDefaultDetails || "";
+  }
+
+  function getLibraryDrillVideoUrl(item: DrillRoutineItem) {
+    if (item.kind !== "libraryDrill") return "";
+    return resolveLibraryDrill(item)?.videoUrl || item.drillVideoUrl || "";
+  }
+
   const insertDrillIntoRoutine = useCallback((item: DrillLibraryItem | null) => {
+    if (!item) {
+      Alert.alert("Select a drill", "Choose a drill from the library first.");
+      return;
+    }
+    setAuxiliaryItemsDraft((current) => [
+      ...current,
+      {
+        id: createRoutineItemId(),
+        kind: "libraryDrill",
+        drillId: item.id,
+        prescription: "",
+        customNotes: "",
+        drillTitle: item.name,
+        drillVideoUrl: item.videoUrl,
+        drillDefaultDetails: item.defaultDetails,
+      },
+    ]);
+    setAuxiliaryAutosaveStatus("dirty");
+    setInsertPickerOpen(false);
+  }, []);
+
+  const insertDrillAsTextIntoRoutine = useCallback((item: DrillLibraryItem | null) => {
     if (!item) {
       Alert.alert("Select a drill", "Choose a drill from the library first.");
       return;
@@ -665,6 +724,59 @@ export function AuxiliaryRoutinesManager() {
     setAuxiliaryAutosaveStatus("dirty");
     setInsertPickerOpen(false);
   }, []);
+
+  const addCustomRoutineTextItem = useCallback(() => {
+    setAuxiliaryItemsDraft((current) => [
+      ...current,
+      { id: createRoutineItemId(), kind: "text", text: "" },
+    ]);
+    setAuxiliaryAutosaveStatus("dirty");
+  }, []);
+
+  const updateRoutineItem = useCallback((itemId: string, patch: Partial<DrillRoutineItem>) => {
+    setAuxiliaryItemsDraft((current) =>
+      current.map((item) => {
+        if (item.id !== itemId) return item;
+        if (item.kind === "libraryDrill") {
+          return { ...item, ...patch, kind: "libraryDrill" } as DrillRoutineItem;
+        }
+        return { ...item, ...patch, kind: "text" } as DrillRoutineItem;
+      })
+    );
+    setAuxiliaryAutosaveStatus("dirty");
+  }, []);
+
+  const moveRoutineItem = useCallback((itemId: string, direction: -1 | 1) => {
+    setAuxiliaryItemsDraft((current) => {
+      const index = current.findIndex((item) => item.id === itemId);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= current.length) return current;
+      const next = [...current];
+      const [item] = next.splice(index, 1);
+      next.splice(nextIndex, 0, item);
+      return next;
+    });
+    setAuxiliaryAutosaveStatus("dirty");
+  }, []);
+
+  const removeRoutineItem = useCallback((itemId: string) => {
+    setAuxiliaryItemsDraft((current) => current.filter((item) => item.id !== itemId));
+    setExpandedRoutineItemIds((current) => {
+      const next = new Set(current);
+      next.delete(itemId);
+      return next;
+    });
+    setAuxiliaryAutosaveStatus("dirty");
+  }, []);
+
+  function toggleRoutineItemExpanded(itemId: string) {
+    setExpandedRoutineItemIds((current) => {
+      const next = new Set(current);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+  }
 
   function formatCategorySummary(selectedNames: string[]) {
     if (selectedNames.length === 0) return "No categories selected";
@@ -935,32 +1047,20 @@ export function AuxiliaryRoutinesManager() {
                   })}
                 </ScrollView>
 
-                <Text style={[styles.label, { marginTop: 10 }]}>Details</Text>
-                <TextInput
-                  value={auxiliaryDetailsDraft}
-                  onChangeText={setAuxiliaryDetailsDraft}
-                  onBlur={() => void commitDraft("details-blur")}
-                  placeholder="Notes or instructions"
-                  style={[styles.input, styles.detailsInput, isDesktopWeb && styles.detailsInputDesktop, readOnly && styles.inputDisabled]}
-                  multiline
-                  editable={!readOnly}
-                />
-                {containsHttpUrl(auxiliaryDetailsDraft) ? (
-                  <View style={styles.linkPreviewBox}>
-                    <Text style={styles.linkPreviewLabel}>Clickable link preview</Text>
-                    <LinkifiedText text={auxiliaryDetailsDraft} style={styles.linkPreviewText} />
-                  </View>
-                ) : null}
-
-                <View style={styles.insertPanel}>
+                <View style={styles.routineItemsPanel}>
                   <View style={styles.insertPanelHeader}>
                     <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text style={styles.sectionTitle}>Insert from Drill Library</Text>
-                      <Text style={styles.cardHint}>Append a reusable drill as editable routine text.</Text>
+                      <Text style={styles.sectionTitle}>Routine items</Text>
+                      <Text style={styles.cardHint}>Build a structured routine from library drills and custom text.</Text>
                     </View>
-                    <Pressable onPress={() => setInsertPickerOpen((open) => !open)} style={styles.smallActionBtn}>
-                      <Text style={styles.smallActionBtnText}>{insertPickerOpen ? "Close" : "Open Picker"}</Text>
-                    </Pressable>
+                    <View style={styles.buttonRow}>
+                      <Pressable onPress={() => setInsertPickerOpen((open) => !open)} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
+                        <Text style={styles.smallActionBtnText}>{insertPickerOpen ? "Close" : "Add from Drill Library"}</Text>
+                      </Pressable>
+                      <Pressable onPress={addCustomRoutineTextItem} disabled={readOnly} style={[styles.smallGhostBtn, readOnly && styles.disabledBtn]}>
+                        <Text style={styles.smallGhostBtnText}>Add custom text</Text>
+                      </Pressable>
+                    </View>
                   </View>
 
                   {insertPickerOpen ? (
@@ -994,11 +1094,7 @@ export function AuxiliaryRoutinesManager() {
                           <Text style={styles.cardHint}>No library drills found.</Text>
                         ) : (
                           insertableDrillLibraryItems.map((item) => (
-                            <Pressable
-                              key={`insert-drill-${item.id}`}
-                              onPress={() => insertDrillIntoRoutine(item)}
-                              style={styles.insertRow}
-                            >
+                            <View key={`insert-drill-${item.id}`} style={styles.insertRow}>
                               <View style={{ flex: 1, minWidth: 0 }}>
                                 <Text style={styles.drillRowTitle}>{item.name}</Text>
                                 <Text style={styles.drillRowMeta}>{folderName(item.folderId)}</Text>
@@ -1006,14 +1102,143 @@ export function AuxiliaryRoutinesManager() {
                                   <Text numberOfLines={2} style={styles.drillRowDetails}>{item.defaultDetails}</Text>
                                 ) : null}
                               </View>
-                              <Text style={styles.insertRowAction}>Insert</Text>
-                            </Pressable>
+                              <View style={styles.insertRowActions}>
+                                <Pressable onPress={() => insertDrillIntoRoutine(item)} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
+                                  <Text style={styles.smallActionBtnText}>Add item</Text>
+                                </Pressable>
+                                <Pressable onPress={() => insertDrillAsTextIntoRoutine(item)} disabled={readOnly} style={[styles.smallGhostBtn, readOnly && styles.disabledBtn]}>
+                                  <Text style={styles.smallGhostBtnText}>As text</Text>
+                                </Pressable>
+                              </View>
+                            </View>
                           ))
                         )}
                       </ScrollView>
                     </View>
                   ) : null}
+
+                  {auxiliaryItemsDraft.length === 0 ? (
+                    <Text style={styles.cardHint}>No structured items yet. Add a drill or custom text block, or keep using additional notes below.</Text>
+                  ) : (
+                    <View style={styles.routineItemStack}>
+                      {auxiliaryItemsDraft.map((item, itemIndex) => {
+                        const expanded = expandedRoutineItemIds.has(item.id);
+                        const isFirst = itemIndex === 0;
+                        const isLast = itemIndex === auxiliaryItemsDraft.length - 1;
+                        if (item.kind === "text") {
+                          return (
+                            <View key={item.id} style={styles.routineItemCard}>
+                              <View style={styles.routineItemHeader}>
+                                <Text style={styles.routineItemKicker}>Custom text</Text>
+                                <View style={styles.itemActionRow}>
+                                  <Pressable disabled={readOnly || isFirst} onPress={() => moveRoutineItem(item.id, -1)} style={[styles.miniBtn, (readOnly || isFirst) && styles.disabledBtn]}>
+                                    <Text style={styles.miniBtnText}>Up</Text>
+                                  </Pressable>
+                                  <Pressable disabled={readOnly || isLast} onPress={() => moveRoutineItem(item.id, 1)} style={[styles.miniBtn, (readOnly || isLast) && styles.disabledBtn]}>
+                                    <Text style={styles.miniBtnText}>Down</Text>
+                                  </Pressable>
+                                  <Pressable disabled={readOnly} onPress={() => removeRoutineItem(item.id)} style={[styles.miniDeleteBtn, readOnly && styles.disabledBtn]}>
+                                    <Text style={styles.miniDeleteBtnText}>Remove</Text>
+                                  </Pressable>
+                                </View>
+                              </View>
+                              <TextInput
+                                value={item.text}
+                                onChangeText={(text) => updateRoutineItem(item.id, { text } as Partial<DrillRoutineItem>)}
+                                onBlur={() => void commitDraft("routine-item-text-blur")}
+                                placeholder="Custom instruction"
+                                multiline
+                                editable={!readOnly}
+                                style={[styles.input, styles.routineItemTextInput, readOnly && styles.inputDisabled]}
+                              />
+                            </View>
+                          );
+                        }
+
+                        const drillTitle = getLibraryDrillTitle(item);
+                        const drillDetails = getLibraryDrillDetails(item);
+                        const drillVideoUrl = getLibraryDrillVideoUrl(item);
+                        return (
+                          <View key={item.id} style={styles.routineItemCard}>
+                            <View style={styles.routineItemHeader}>
+                              <View style={{ flex: 1, minWidth: 0 }}>
+                                <Text style={styles.routineItemKicker}>Library drill</Text>
+                                <View style={styles.drillTitleRow}>
+                                  <Text style={styles.routineItemTitle}>{drillTitle}</Text>
+                                  {drillVideoUrl ? (
+                                    <LinkifiedText text={drillVideoUrl} style={styles.routineItemLink} />
+                                  ) : null}
+                                </View>
+                              </View>
+                              <View style={styles.itemActionRow}>
+                                <Pressable disabled={readOnly || isFirst} onPress={() => moveRoutineItem(item.id, -1)} style={[styles.miniBtn, (readOnly || isFirst) && styles.disabledBtn]}>
+                                  <Text style={styles.miniBtnText}>Up</Text>
+                                </Pressable>
+                                <Pressable disabled={readOnly || isLast} onPress={() => moveRoutineItem(item.id, 1)} style={[styles.miniBtn, (readOnly || isLast) && styles.disabledBtn]}>
+                                  <Text style={styles.miniBtnText}>Down</Text>
+                                </Pressable>
+                                <Pressable disabled={readOnly} onPress={() => removeRoutineItem(item.id)} style={[styles.miniDeleteBtn, readOnly && styles.disabledBtn]}>
+                                  <Text style={styles.miniDeleteBtnText}>Remove</Text>
+                                </Pressable>
+                              </View>
+                            </View>
+                            <Text style={styles.label}>Prescription</Text>
+                            <TextInput
+                              value={item.prescription}
+                              onChangeText={(prescription) => updateRoutineItem(item.id, { prescription } as Partial<DrillRoutineItem>)}
+                              onBlur={() => void commitDraft("routine-item-prescription-blur")}
+                              placeholder="2 x 10, 3 x 30m, 60 sec..."
+                              editable={!readOnly}
+                              style={[styles.input, readOnly && styles.inputDisabled]}
+                            />
+                            <Pressable onPress={() => toggleRoutineItemExpanded(item.id)} style={styles.cuesToggle}>
+                              <Text style={styles.cuesToggleText}>{expanded ? "Hide cues" : "Show cues / notes"}</Text>
+                            </Pressable>
+                            {expanded ? (
+                              <View style={styles.cuesPanel}>
+                                {drillDetails ? (
+                                  <>
+                                    <Text style={styles.label}>Library cues</Text>
+                                    <LinkifiedText text={drillDetails} style={styles.linkPreviewText} />
+                                  </>
+                                ) : (
+                                  <Text style={styles.cardHint}>No library cues saved.</Text>
+                                )}
+                                <Text style={[styles.label, { marginTop: 8 }]}>Custom notes for this routine</Text>
+                                <TextInput
+                                  value={item.customNotes ?? ""}
+                                  onChangeText={(customNotes) => updateRoutineItem(item.id, { customNotes } as Partial<DrillRoutineItem>)}
+                                  onBlur={() => void commitDraft("routine-item-notes-blur")}
+                                  placeholder="Optional notes"
+                                  multiline
+                                  editable={!readOnly}
+                                  style={[styles.input, styles.routineItemTextInput, readOnly && styles.inputDisabled]}
+                                />
+                              </View>
+                            ) : null}
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
                 </View>
+
+                <Text style={[styles.label, { marginTop: 10 }]}>Additional notes / legacy details</Text>
+                <TextInput
+                  value={auxiliaryDetailsDraft}
+                  onChangeText={setAuxiliaryDetailsDraft}
+                  onBlur={() => void commitDraft("details-blur")}
+                  placeholder="Optional routine notes"
+                  style={[styles.input, styles.detailsInput, isDesktopWeb && styles.detailsInputDesktop, readOnly && styles.inputDisabled]}
+                  multiline
+                  editable={!readOnly}
+                />
+                {containsHttpUrl(auxiliaryDetailsDraft) ? (
+                  <View style={styles.linkPreviewBox}>
+                    <Text style={styles.linkPreviewLabel}>Clickable link preview</Text>
+                    <LinkifiedText text={auxiliaryDetailsDraft} style={styles.linkPreviewText} />
+                  </View>
+                ) : null}
 
                 <View style={styles.assignmentStack}>
                   {renderCategorySelector({
@@ -1521,6 +1746,15 @@ const styles = StyleSheet.create({
     gap: 10,
     marginTop: 12,
   },
+  routineItemsPanel: {
+    borderWidth: 1,
+    borderColor: "#e1e7f2",
+    borderRadius: 12,
+    backgroundColor: "#f8faff",
+    padding: 10,
+    gap: 10,
+    marginTop: 12,
+  },
   insertPanelHeader: {
     flexDirection: "row",
     alignItems: "flex-start",
@@ -1547,9 +1781,110 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
   },
+  insertRowActions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    gap: 8,
+  },
   insertRowAction: {
     color: "#1f2a44",
     fontWeight: "900",
+  },
+  routineItemStack: {
+    gap: 10,
+  },
+  routineItemCard: {
+    borderWidth: 1,
+    borderColor: "#dbe3ef",
+    borderRadius: 12,
+    backgroundColor: "#fff",
+    padding: 10,
+    gap: 8,
+  },
+  routineItemHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  routineItemKicker: {
+    color: "#64748b",
+    fontSize: 11,
+    fontWeight: "900",
+    textTransform: "uppercase",
+  },
+  routineItemTitle: {
+    color: "#172033",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+  drillTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  routineItemLink: {
+    color: "#2563eb",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  itemActionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "wrap",
+  },
+  miniBtn: {
+    borderWidth: 1,
+    borderColor: "#d7deeb",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    backgroundColor: "#fff",
+  },
+  miniBtnText: {
+    color: "#334155",
+    fontSize: 11,
+    fontWeight: "900",
+  },
+  miniDeleteBtn: {
+    borderWidth: 1,
+    borderColor: "#fecaca",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    backgroundColor: "#fff",
+  },
+  miniDeleteBtnText: {
+    color: "#b00020",
+    fontSize: 11,
+    fontWeight: "900",
+  },
+  routineItemTextInput: {
+    minHeight: 72,
+    textAlignVertical: "top",
+  },
+  cuesToggle: {
+    alignSelf: "flex-start",
+    borderWidth: 1,
+    borderColor: "#bfdbfe",
+    borderRadius: 9,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: "#eff6ff",
+  },
+  cuesToggleText: {
+    color: "#1d4ed8",
+    fontWeight: "900",
+  },
+  cuesPanel: {
+    borderTopWidth: 1,
+    borderTopColor: "#e1e7f2",
+    paddingTop: 8,
+    gap: 6,
   },
   drillRow: {
     borderWidth: 1,
