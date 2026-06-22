@@ -1,6 +1,7 @@
 import { loadJSON, saveJSON } from "./storage";
 import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
+import { saveJSONWithTeamCloudSyncStrict } from "./teamCloudSync";
 
 export const DRILL_FOLDERS_KEY = "training_app_drill_folders_v1";
 export const DRILL_LIBRARY_KEY = "training_app_drill_library_v1";
@@ -26,6 +27,12 @@ export type DrillLibraryItem = {
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
+};
+
+export type DrillLibraryDefinitionsLoadResult = {
+  items: DrillLibraryItem[];
+  loadedFromCloud: boolean;
+  cloudError?: string;
 };
 
 function createId(prefix: string) {
@@ -116,6 +123,12 @@ export async function loadDrillLibraryItems(): Promise<DrillLibraryItem[]> {
 }
 
 export async function loadDrillLibraryDefinitions(): Promise<DrillLibraryItem[]> {
+  const result = await loadDrillLibraryDefinitionsWithStatus();
+  return result.items;
+}
+
+export async function loadDrillLibraryDefinitionsWithStatus(): Promise<DrillLibraryDefinitionsLoadResult> {
+  let cloudError = "";
   try {
     const teamId = await getCurrentTeamId();
     const { data, error } = await supabase
@@ -126,20 +139,30 @@ export async function loadDrillLibraryDefinitions(): Promise<DrillLibraryItem[]>
       .maybeSingle();
 
     if (!error && Array.isArray(data?.data)) {
-      return data.data
-        .map((item) => normalizeDrill(item))
-        .filter((item): item is DrillLibraryItem => !!item)
-        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+      return {
+        items: data.data
+          .map((item) => normalizeDrill(item))
+          .filter((item): item is DrillLibraryItem => !!item)
+          .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
+        loadedFromCloud: true,
+      };
     }
-  } catch {
+    if (error) cloudError = String(error.message ?? error);
+    else cloudError = "Drill library cloud row missing or invalid.";
+  } catch (error: any) {
+    cloudError = String(error?.message ?? error ?? "Drill library cloud read failed.");
     // Fall back to the synced storage path below.
   }
 
-  return loadDrillLibraryItems();
+  return {
+    items: await loadDrillLibraryItems(),
+    loadedFromCloud: false,
+    cloudError,
+  };
 }
 
 export async function saveDrillLibraryItems(list: DrillLibraryItem[]) {
-  await saveJSON(DRILL_LIBRARY_KEY, list);
+  await saveJSONWithTeamCloudSyncStrict(DRILL_LIBRARY_KEY, list);
 }
 
 export function createDrillFolderDraft(name = "New Folder", sortOrder = Date.now()): DrillFolder {

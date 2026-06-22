@@ -19,7 +19,12 @@ import {
   upsertMileageFeedback,
 } from "../../../lib/mileageFeedback";
 import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
-import { loadDrillLibraryDefinitions, type DrillLibraryItem } from "../../../lib/drillLibrary";
+import {
+  loadDrillLibraryDefinitionsWithStatus,
+  type DrillLibraryDefinitionsLoadResult,
+  type DrillLibraryItem,
+} from "../../../lib/drillLibrary";
+import { hydrateRoutineLibraryDrillItem } from "../../../lib/routineDrillHydration";
 import { parseNumericLike } from "../../../lib/feedbackParsing";
 import { getCurrentTeamId } from "../../../lib/team";
 import { resolveAthleteSessionContext } from "../../../lib/athleteSession";
@@ -59,6 +64,10 @@ function normalizeSession(value: string | undefined): "AM" | "PM" {
 
 function firstParam(value: string | string[] | undefined): string {
   return String(Array.isArray(value) ? value[0] ?? "" : value ?? "").trim();
+}
+
+function containsHttpUrl(input: unknown): boolean {
+  return /https?:\/\/[^\s<>"']+/i.test(String(input ?? ""));
 }
 
 function formatDisplayDate(iso: string) {
@@ -159,6 +168,7 @@ export default function AthleteWorkoutDetail() {
     prescribed,
     athleteId,
     returnTo,
+    debugRoutineLinks,
   } = useLocalSearchParams<{
     id: string;
     name?: string;
@@ -168,11 +178,13 @@ export default function AthleteWorkoutDetail() {
     prescribed?: string;
     athleteId?: string;
     returnTo?: string | string[];
+    debugRoutineLinks?: string | string[];
   }>();
   const router = useRouter();
 
   const isSynthetic = String(synthetic ?? "") === "1";
   const returnTarget = firstParam(returnTo);
+  const showRoutineLinkDebug = firstParam(debugRoutineLinks) === "1";
 
   const [workout, setWorkout] = useState<AthleteWorkout | null>(null);
   const [groupMateNames, setGroupMateNames] = useState<string[]>([]);
@@ -191,6 +203,7 @@ export default function AthleteWorkoutDetail() {
   const [submitStatus, setSubmitStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [rosterMap, setRosterMap] = useState<Map<string, string>>(new Map());
+  const [drillLibraryLoadStatus, setDrillLibraryLoadStatus] = useState<DrillLibraryDefinitionsLoadResult | null>(null);
   const store = teamDataStore.use();
 
   function leaveWorkoutDetail() {
@@ -219,19 +232,21 @@ export default function AthleteWorkoutDetail() {
     (async () => {
       const athleteSession = await resolveAthleteSessionContext();
       const visibleAthleteId = String(athleteSession.athleteId ?? athleteId ?? "").trim();
-      const [rosterMap, routines, drillItems, weekStartResult, storedCategories] = await Promise.all([
+      const [rosterMap, routines, drillLoadResult, weekStartResult, storedCategories] = await Promise.all([
         loadRosterAny(),
         loadAuxiliaryRoutineDefinitions(),
-        loadDrillLibraryDefinitions(),
+        loadDrillLibraryDefinitionsWithStatus(),
         loadWeekStartSetting(),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       ]);
+      const drillItems = drillLoadResult.items;
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
       const loadedRoutineById = new Map(routines.map((routine) => [routine.id, routine] as const));
       const loadedDrillById = new Map(drillItems.map((drill) => [drill.id, drill] as const));
       setRosterMap(rosterMap);
       setRoutineById(loadedRoutineById);
       setDrillById(loadedDrillById);
+      setDrillLibraryLoadStatus(drillLoadResult);
       setCategories(normalizeCategories(storedCategories));
       setWeekStartsOn(resolvedWeekStart);
 
@@ -582,6 +597,48 @@ export default function AthleteWorkoutDetail() {
                 ) : null}
               </View>
             ))}
+          </View>
+        ) : null}
+
+        {showRoutineLinkDebug ? (
+          <View style={{ borderWidth: 1, borderColor: "#f59e0b", borderRadius: 12, backgroundColor: "#fffbeb", padding: 10, gap: 8 }}>
+            <Text style={{ color: "#92400e", fontSize: 12, fontWeight: "900" }}>ROUTINE LINK DEBUG</Text>
+            <Text selectable style={{ color: "#78350f", fontSize: 12, lineHeight: 18 }}>
+              Drill library loaded from cloud: {drillLibraryLoadStatus?.loadedFromCloud ? "yes" : "no"}
+              {drillLibraryLoadStatus?.cloudError ? `\nCloud read issue: ${drillLibraryLoadStatus.cloudError}` : ""}
+            </Text>
+            {[...preRoutines.map((routine) => ({ phase: "pre", routine })), ...postRoutines.map((routine) => ({ phase: "post", routine }))].map(({ phase, routine }) => {
+              const items = Array.isArray(routine.items) ? routine.items : [];
+              return (
+                <View key={`${phase}-${routine.id}-debug`} style={{ borderTopWidth: 1, borderTopColor: "#fde68a", paddingTop: 6, gap: 4 }}>
+                  <Text selectable style={{ color: "#78350f", fontSize: 12, fontWeight: "900" }}>
+                    {phase} routine: {routine.title} ({routine.id})
+                  </Text>
+                  <Text selectable style={{ color: "#78350f", fontSize: 12 }}>
+                    legacy details contain links: {containsHttpUrl(routine.details) ? "yes" : "no"}
+                  </Text>
+                  {items.length === 0 ? (
+                    <Text selectable style={{ color: "#78350f", fontSize: 12 }}>No structured items.</Text>
+                  ) : (
+                    items.map((item) => {
+                      const hydrated = hydrateRoutineLibraryDrillItem(item, drillById);
+                      const storedFallback = item.kind === "libraryDrill" ? String(item.drillVideoUrl ?? "") : "";
+                      const hydratedUrl = hydrated?.drill?.videoUrl ?? "";
+                      const finalUrl = hydrated?.videoUrl ?? "";
+                      return (
+                        <Text key={`${phase}-${routine.id}-${item.id}-debug`} selectable style={{ color: "#78350f", fontSize: 12, lineHeight: 18 }}>
+                          item {item.id} | kind: {item.kind}
+                          {item.kind === "libraryDrill" ? `\ndrillId: ${item.drillId}` : ""}
+                          {item.kind === "libraryDrill" ? `\nstored fallback item.drillVideoUrl: ${storedFallback || "(blank)"}` : ""}
+                          {item.kind === "libraryDrill" ? `\nhydrated drill library videoUrl: ${hydratedUrl || "(blank)"}` : ""}
+                          {item.kind === "libraryDrill" ? `\nfinal videoUrl used: ${finalUrl || "(blank)"}` : ""}
+                        </Text>
+                      );
+                    })
+                  )}
+                </View>
+              );
+            })}
           </View>
         ) : null}
 

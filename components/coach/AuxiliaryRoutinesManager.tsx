@@ -31,6 +31,7 @@ import { getCurrentTeamRole, normalizeTeamRole, type TeamRole } from "../../lib/
 import type { WorkoutCategory } from "../../lib/types";
 
 type AutosaveStatus = "idle" | "dirty" | "saving" | "saved" | "error";
+type DrillSaveStatus = "idle" | "saving" | "saved" | "error";
 type CategoryAssignmentTarget = "pre" | "post";
 type ManagerTab = "routines" | "drills";
 const ALL_FOLDERS_ID = "__all__";
@@ -126,6 +127,8 @@ export function AuxiliaryRoutinesManager() {
   const [drillVideoUrlDraft, setDrillVideoUrlDraft] = useState("");
   const [drillDetailsDraft, setDrillDetailsDraft] = useState("");
   const [drillBusy, setDrillBusy] = useState(false);
+  const [drillSaveStatus, setDrillSaveStatus] = useState<DrillSaveStatus>("idle");
+  const [drillSaveError, setDrillSaveError] = useState("");
   const lastSavedSnapshotRef = React.useRef("");
   const saveSeqRef = React.useRef(0);
   const commitInFlightRef = React.useRef<Promise<boolean> | null>(null);
@@ -664,6 +667,8 @@ export function AuxiliaryRoutinesManager() {
     setDrillFolderIdDraft(String(item?.folderId ?? "").trim() || null);
     setDrillVideoUrlDraft(item?.videoUrl ?? "");
     setDrillDetailsDraft(item?.defaultDetails ?? "");
+    setDrillSaveStatus("idle");
+    setDrillSaveError("");
   }, []);
 
   const createNewDrillDraft = useCallback(() => {
@@ -703,14 +708,19 @@ export function AuxiliaryRoutinesManager() {
       : [...drillLibraryItems, nextItem];
     const sorted = updated.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
     setDrillBusy(true);
-    setDrillLibraryItems(sorted);
-    selectDrillForEdit(nextItem);
+    setDrillSaveStatus("saving");
+    setDrillSaveError("");
     try {
       await saveDrillLibraryItems(sorted);
+      setDrillLibraryItems(sorted);
+      selectDrillForEdit(nextItem);
+      setDrillSaveStatus("saved");
     } catch (error) {
       const message = getErrorMessage(error);
-      Alert.alert("Drill save failed", message);
-      void loadManagerData();
+      const cloudMessage = `Could not save to cloud. Athletes may still see the old version. ${message}`;
+      setDrillSaveStatus("error");
+      setDrillSaveError(cloudMessage);
+      Alert.alert("Drill save failed", cloudMessage);
     } finally {
       setDrillBusy(false);
     }
@@ -729,14 +739,22 @@ export function AuxiliaryRoutinesManager() {
   const deleteSelectedDrill = useCallback(async () => {
     if (!selectedDrillId) return;
     const updated = drillLibraryItems.filter((item) => item.id !== selectedDrillId);
-    setDrillLibraryItems(updated);
-    selectDrillForEdit(null);
+    setDrillBusy(true);
+    setDrillSaveStatus("saving");
+    setDrillSaveError("");
     try {
       await saveDrillLibraryItems(updated);
+      setDrillLibraryItems(updated);
+      selectDrillForEdit(null);
+      setDrillSaveStatus("saved");
     } catch (error) {
       const message = getErrorMessage(error);
-      Alert.alert("Drill delete failed", message);
-      void loadManagerData();
+      const cloudMessage = `Could not save to cloud. Athletes may still see the old version. ${message}`;
+      setDrillSaveStatus("error");
+      setDrillSaveError(cloudMessage);
+      Alert.alert("Drill delete failed", cloudMessage);
+    } finally {
+      setDrillBusy(false);
     }
   }, [drillLibraryItems, loadManagerData, selectDrillForEdit, selectedDrillId]);
 
@@ -1558,9 +1576,20 @@ export function AuxiliaryRoutinesManager() {
                   <LinkifiedText text={drillVideoUrlDraft} style={styles.linkPreviewText} />
                 </View>
               ) : null}
+              {drillSaveError ? (
+                <Text selectable style={styles.errorText}>{drillSaveError}</Text>
+              ) : null}
 
               <View style={styles.editorFooter}>
-                <Text style={styles.statusText}>{drillBusy ? "Saving..." : "Ready"}</Text>
+                <Text style={[styles.statusText, drillSaveStatus === "error" && styles.errorText]}>
+                  {drillSaveStatus === "saving"
+                    ? "Saving to cloud..."
+                    : drillSaveStatus === "saved"
+                    ? "Saved"
+                    : drillSaveStatus === "error"
+                    ? "Cloud save failed"
+                    : "Ready"}
+                </Text>
                 <View style={styles.buttonRow}>
                   <Pressable
                     onPress={() => void saveSelectedDrill()}

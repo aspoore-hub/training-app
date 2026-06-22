@@ -1,4 +1,4 @@
-import { loadJSON, saveJSON } from "./storage";
+import { loadJSON } from "./storage";
 import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
 import { saveJSONWithTeamCloudSyncStrict } from "./teamCloudSync";
@@ -144,13 +144,9 @@ export async function loadAuxiliaryRoutineDefinitions(): Promise<AuxiliaryRoutin
 
 export async function saveAuxiliaryRoutines(
   list: AuxiliaryRoutine[],
-  options?: { requireCloudSync?: boolean }
+  _options?: { requireCloudSync?: boolean }
 ) {
-  if (options?.requireCloudSync) {
-    await saveJSONWithTeamCloudSyncStrict(AUXILIARY_ROUTINES_KEY, list);
-    return;
-  }
-  await saveJSON(AUXILIARY_ROUTINES_KEY, list);
+  await saveJSONWithTeamCloudSyncStrict(AUXILIARY_ROUTINES_KEY, list);
 }
 
 export async function createAuxiliaryRoutine(input: {
