@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Linking, Platform, Pressable, Text, View } from "react-native";
 import type { AuxiliaryRoutine, DrillRoutineItem } from "../../lib/auxiliaryRoutines";
 import type { DrillLibraryItem } from "../../lib/drillLibrary";
 import { LinkifiedText } from "../ui/LinkifiedText";
@@ -34,6 +34,42 @@ function itemDetails(item: DrillRoutineItem, drillById?: Map<string, DrillLibrar
 function itemVideoUrl(item: DrillRoutineItem, drillById?: Map<string, DrillLibraryItem>) {
   if (item.kind !== "libraryDrill") return "";
   return resolveDrill(item, drillById)?.videoUrl || item.drillVideoUrl || "";
+}
+
+function openVideoUrl(url: string, event?: any) {
+  event?.stopPropagation?.();
+  const clean = String(url ?? "").trim();
+  if (!/^https?:\/\//i.test(clean)) return;
+  if (Platform.OS === "web" && typeof window !== "undefined" && typeof window.open === "function") {
+    window.open(clean, "_blank", "noopener,noreferrer");
+    return;
+  }
+  void Linking.openURL(clean).catch((error) => {
+    console.warn("[athlete-routine-details] open video failed", { url: clean, error });
+  });
+}
+
+function VideoLinkButton({ url }: { url: string }) {
+  const clean = String(url ?? "").trim();
+  if (!clean) return null;
+  return (
+    <Pressable
+      accessibilityRole="link"
+      accessibilityLabel="Open drill video"
+      hitSlop={8}
+      onPress={(event) => openVideoUrl(clean, event)}
+      style={{
+        minWidth: 32,
+        minHeight: 32,
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 16,
+        backgroundColor: "#eff6ff",
+      }}
+    >
+      <Text style={{ color: "#2563eb", fontSize: 16, fontWeight: "900" }}>↗</Text>
+    </Pressable>
+  );
 }
 
 export function getRoutinePreviewText(routine: AuxiliaryRoutine, drillById?: Map<string, DrillLibraryItem>) {
@@ -103,11 +139,25 @@ export function AthleteRoutineDetails({
           <LinkifiedText text={description} style={{ color: "#475569", lineHeight: 19 }} />
         </View>
       ) : null}
+      <View style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 12, backgroundColor: "#ffffff", overflow: "hidden" }}>
       {items.map((item, index) => {
         if (item.kind === "text") {
           return (
-            <View key={item.id} style={{ borderRadius: 10, backgroundColor: "#f8fafc", padding: 10 }}>
-              <LinkifiedText text={item.text} style={{ color: "#334155", lineHeight: 19, fontWeight: "700" }} />
+            <View
+              key={item.id}
+              style={{
+                borderTopWidth: index === 0 ? 0 : 1,
+                borderTopColor: "#f1f5f9",
+                paddingHorizontal: 10,
+                paddingVertical: 8,
+                flexDirection: "row",
+                gap: 8,
+              }}
+            >
+              <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900", width: 22 }}>{index + 1}.</Text>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <LinkifiedText text={item.text} style={{ color: "#334155", lineHeight: 19, fontWeight: "700" }} />
+              </View>
             </View>
           );
         }
@@ -121,33 +171,35 @@ export function AthleteRoutineDetails({
         const canExpand = Boolean(details || customNotes);
 
         return (
-          <View key={item.id} style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 12, backgroundColor: "#ffffff", overflow: "hidden" }}>
-            <Pressable
-              onPress={() => {
-                if (canExpand) toggleItem(item.id);
-              }}
-              style={{ padding: 10, gap: 6 }}
-            >
-              <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
-                <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900" }}>{index + 1}.</Text>
-                <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
+          <View key={item.id} style={{ borderTopWidth: index === 0 ? 0 : 1, borderTopColor: "#f1f5f9" }}>
+            <View style={{ paddingHorizontal: 10, paddingVertical: 8, gap: 6 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900", width: 22 }}>{index + 1}.</Text>
+                <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={{ color: "#0f172a", fontWeight: "900", lineHeight: 19 }}>
                     {prescription ? `${prescription} ` : ""}{title}
                   </Text>
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-                    {videoUrl ? <LinkifiedText text={videoUrl} style={{ color: "#2563eb", fontSize: 12, fontWeight: "900" }} /> : null}
-                    {canExpand ? (
-                      <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "800" }}>
-                        {expanded ? "Hide cues" : "Show cues"}
-                      </Text>
-                    ) : null}
-                  </View>
                 </View>
+                {canExpand ? (
+                  <Pressable
+                    onPress={() => toggleItem(item.id)}
+                    hitSlop={8}
+                    style={{
+                      minHeight: 32,
+                      justifyContent: "center",
+                      paddingHorizontal: 6,
+                    }}
+                  >
+                    <Text style={{ color: "#2563eb", fontSize: 12, fontWeight: "900" }}>
+                      {expanded ? "Hide cues" : "Show cues"}
+                    </Text>
+                  </Pressable>
+                ) : null}
+                {videoUrl ? <VideoLinkButton url={videoUrl} /> : null}
               </View>
-            </Pressable>
 
             {expanded ? (
-              <View style={{ borderTopWidth: 1, borderTopColor: "#f1f5f9", padding: 10, gap: 8 }}>
+              <View style={{ marginLeft: 30, borderTopWidth: 1, borderTopColor: "#f1f5f9", paddingTop: 8, gap: 8 }}>
                 {details ? (
                   <View style={{ gap: 3 }}>
                     <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900" }}>Library cues</Text>
@@ -162,9 +214,11 @@ export function AthleteRoutineDetails({
                 ) : null}
               </View>
             ) : null}
+            </View>
           </View>
         );
       })}
+      </View>
 
       {legacyDetails ? (
         <View style={{ borderTopWidth: 1, borderTopColor: "#f1f5f9", paddingTop: 8, gap: 4 }}>

@@ -247,13 +247,7 @@ export default function AthleteWorkoutDetail() {
 
         setGroupMateNames([]);
         setBatchHeaderNotes("");
-        setExpandedRoutineIds(
-          new Set(
-            [...(Array.isArray(found.preRoutineIds) ? found.preRoutineIds : []), ...(Array.isArray(found.postRoutineIds) ? found.postRoutineIds : [])]
-              .map((routineId) => cleanDisplayText(routineId))
-              .filter((routineId) => routineHasDisplayDetails(loadedRoutineById.get(routineId)))
-          )
-        );
+        setExpandedRoutineIds(new Set());
 
         if (foundRow?.batch_id) {
           const [batchRows, headerRows] = await Promise.all([
