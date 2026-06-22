@@ -10,7 +10,7 @@ import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../li
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import {
   loadDrillFolders,
-  loadDrillLibraryItems,
+  loadDrillLibraryDefinitions,
   loadRoutineFolders,
   type DrillFolder,
   type DrillLibraryItem,
@@ -69,7 +69,7 @@ export default function AthleteWarmupsScreen() {
         loadAuxiliaryRoutineDefinitions(),
         loadRoutineFolders(),
         loadDrillFolders(),
-        loadDrillLibraryItems(),
+        loadDrillLibraryDefinitions(),
       ]);
       const accountContext = await getActiveAccountContext();
       setAthleteName(session.athleteName);

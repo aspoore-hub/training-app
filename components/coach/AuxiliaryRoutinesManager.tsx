@@ -741,17 +741,23 @@ export function AuxiliaryRoutinesManager() {
 
   function getLibraryDrillTitle(item: DrillRoutineItem) {
     if (item.kind !== "libraryDrill") return "";
-    return resolveLibraryDrill(item)?.name || item.drillTitle || "Library drill";
+    const drill = resolveLibraryDrill(item);
+    if (drill) return drill.name || "Library drill";
+    return item.drillTitle || "Missing drill";
   }
 
   function getLibraryDrillDetails(item: DrillRoutineItem) {
     if (item.kind !== "libraryDrill") return "";
-    return resolveLibraryDrill(item)?.defaultDetails || item.drillDefaultDetails || "";
+    const drill = resolveLibraryDrill(item);
+    if (drill) return drill.defaultDetails;
+    return item.drillDefaultDetails || "";
   }
 
   function getLibraryDrillVideoUrl(item: DrillRoutineItem) {
     if (item.kind !== "libraryDrill") return "";
-    return resolveLibraryDrill(item)?.videoUrl || item.drillVideoUrl || "";
+    const drill = resolveLibraryDrill(item);
+    if (drill) return drill.videoUrl;
+    return item.drillVideoUrl || "";
   }
 
   const insertDrillIntoRoutine = useCallback((item: DrillLibraryItem | null) => {
@@ -1186,9 +1192,14 @@ export function AuxiliaryRoutinesManager() {
                                 <Pressable onPress={() => insertDrillIntoRoutine(item)} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
                                   <Text style={styles.smallActionBtnText}>Add item</Text>
                                 </Pressable>
-                                <Pressable onPress={() => insertDrillAsTextIntoRoutine(item)} disabled={readOnly} style={[styles.smallGhostBtn, readOnly && styles.disabledBtn]}>
-                                  <Text style={styles.smallGhostBtnText}>As text</Text>
-                                </Pressable>
+                                <View style={{ gap: 3, alignItems: "flex-end", maxWidth: 180 }}>
+                                  <Pressable onPress={() => insertDrillAsTextIntoRoutine(item)} disabled={readOnly} style={[styles.smallGhostBtn, readOnly && styles.disabledBtn]}>
+                                    <Text style={styles.smallGhostBtnText}>As text</Text>
+                                  </Pressable>
+                                  <Text style={[styles.cardHint, { fontSize: 11, textAlign: "right" }]}>
+                                    Copies text; future library edits won't update it.
+                                  </Text>
+                                </View>
                               </View>
                             </View>
                           ))

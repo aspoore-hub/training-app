@@ -19,7 +19,7 @@ import {
   upsertMileageFeedback,
 } from "../../../lib/mileageFeedback";
 import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
-import { loadDrillLibraryItems, type DrillLibraryItem } from "../../../lib/drillLibrary";
+import { loadDrillLibraryDefinitions, type DrillLibraryItem } from "../../../lib/drillLibrary";
 import { parseNumericLike } from "../../../lib/feedbackParsing";
 import { getCurrentTeamId } from "../../../lib/team";
 import { resolveAthleteSessionContext } from "../../../lib/athleteSession";
@@ -222,7 +222,7 @@ export default function AthleteWorkoutDetail() {
       const [rosterMap, routines, drillItems, weekStartResult, storedCategories] = await Promise.all([
         loadRosterAny(),
         loadAuxiliaryRoutineDefinitions(),
-        loadDrillLibraryItems(),
+        loadDrillLibraryDefinitions(),
         loadWeekStartSetting(),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
       ]);

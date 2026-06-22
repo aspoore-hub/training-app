@@ -23,17 +23,23 @@ function resolveDrill(item: DrillRoutineItem, drillById?: Map<string, DrillLibra
 
 function itemTitle(item: DrillRoutineItem, drillById?: Map<string, DrillLibraryItem>) {
   if (item.kind === "text") return item.text;
-  return resolveDrill(item, drillById)?.name || item.drillTitle || "Library drill";
+  const drill = resolveDrill(item, drillById);
+  if (drill) return drill.name || "Library drill";
+  return item.drillTitle || "Missing drill";
 }
 
 function itemDetails(item: DrillRoutineItem, drillById?: Map<string, DrillLibraryItem>) {
   if (item.kind === "text") return item.text;
-  return resolveDrill(item, drillById)?.defaultDetails || item.drillDefaultDetails || "";
+  const drill = resolveDrill(item, drillById);
+  if (drill) return drill.defaultDetails;
+  return item.drillDefaultDetails || "";
 }
 
 function itemVideoUrl(item: DrillRoutineItem, drillById?: Map<string, DrillLibraryItem>) {
   if (item.kind !== "libraryDrill") return "";
-  return resolveDrill(item, drillById)?.videoUrl || item.drillVideoUrl || "";
+  const drill = resolveDrill(item, drillById);
+  if (drill) return drill.videoUrl;
+  return item.drillVideoUrl || "";
 }
 
 function openVideoUrl(url: string, event?: any) {

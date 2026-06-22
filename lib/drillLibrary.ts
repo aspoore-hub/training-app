@@ -1,4 +1,6 @@
 import { loadJSON, saveJSON } from "./storage";
+import { supabase } from "./supabase";
+import { getCurrentTeamId } from "./team";
 
 export const DRILL_FOLDERS_KEY = "training_app_drill_folders_v1";
 export const DRILL_LIBRARY_KEY = "training_app_drill_library_v1";
@@ -111,6 +113,29 @@ export async function loadDrillLibraryItems(): Promise<DrillLibraryItem[]> {
     .map((item) => normalizeDrill(item))
     .filter((item): item is DrillLibraryItem => !!item)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+}
+
+export async function loadDrillLibraryDefinitions(): Promise<DrillLibraryItem[]> {
+  try {
+    const teamId = await getCurrentTeamId();
+    const { data, error } = await supabase
+      .from("team_kv_blobs")
+      .select("data")
+      .eq("team_id", teamId)
+      .eq("key", DRILL_LIBRARY_KEY)
+      .maybeSingle();
+
+    if (!error && Array.isArray(data?.data)) {
+      return data.data
+        .map((item) => normalizeDrill(item))
+        .filter((item): item is DrillLibraryItem => !!item)
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    }
+  } catch {
+    // Fall back to the synced storage path below.
+  }
+
+  return loadDrillLibraryItems();
 }
 
 export async function saveDrillLibraryItems(list: DrillLibraryItem[]) {
