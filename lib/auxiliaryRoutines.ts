@@ -26,6 +26,7 @@ export type AuxiliaryRoutine = {
   id: string;
   folderId?: string | null;
   title: string;
+  description?: string;
   details: string;
   items?: DrillRoutineItem[];
   categoryNames?: string[];
@@ -90,6 +91,7 @@ function normalizeRoutineItems(raw: any): DrillRoutineItem[] {
 function normalizeRoutine(raw: any): AuxiliaryRoutine | null {
   if (!raw || typeof raw !== "object") return null;
   const title = String(raw.title ?? "").trim() || "Routine";
+  const description = String(raw.description ?? "").trim();
   const details = String(raw.details ?? "").trim();
   const createdAt = Number(raw.createdAt);
   const updatedAt = Number(raw.updatedAt);
@@ -97,6 +99,7 @@ function normalizeRoutine(raw: any): AuxiliaryRoutine | null {
     id: String(raw.id ?? "").trim() || createRoutineId(),
     folderId: String(raw.folderId ?? "").trim() || null,
     title,
+    description: description || undefined,
     details,
     items: normalizeRoutineItems(raw.items),
     categoryNames: normalizeCategoryNames(raw.categoryNames),
@@ -152,6 +155,7 @@ export async function saveAuxiliaryRoutines(
 
 export async function createAuxiliaryRoutine(input: {
   title?: string;
+  description?: string;
   details?: string;
   categoryNames?: string[];
   preCategoryNames?: string[];
@@ -171,6 +175,7 @@ export async function createAuxiliaryRoutine(input: {
     id: createRoutineId(),
     folderId: String(input.folderId ?? "").trim() || null,
     title: String(input.title ?? "").trim() || "Routine",
+    description: String(input.description ?? "").trim() || undefined,
     details: String(input.details ?? "").trim(),
     items: normalizeRoutineItems(input.items),
     categoryNames,
@@ -188,6 +193,7 @@ export async function updateAuxiliaryRoutine(
   id: string,
   patch: {
     title?: string;
+    description?: string;
     details?: string;
     categoryNames?: string[];
     preCategoryNames?: string[];
@@ -220,6 +226,7 @@ export async function updateAuxiliaryRoutine(
       ...item,
       folderId: patch.folderId !== undefined ? String(patch.folderId ?? "").trim() || null : item.folderId ?? null,
       title: patch.title != null ? String(patch.title).trim() || "Routine" : item.title,
+      description: patch.description != null ? String(patch.description).trim() || undefined : item.description,
       details: patch.details != null ? String(patch.details).trim() : item.details,
       items: patch.items != null ? normalizeRoutineItems(patch.items) : normalizeRoutineItems(item.items),
       categoryNames,

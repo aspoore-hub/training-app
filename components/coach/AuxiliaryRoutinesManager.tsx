@@ -52,6 +52,7 @@ function getErrorMessage(error: unknown): string {
 function buildDraftSnapshotFrom(
   id: string | null,
   title: string,
+  description: string,
   details: string,
   preCategoryNames: string[],
   postCategoryNames: string[],
@@ -62,6 +63,7 @@ function buildDraftSnapshotFrom(
     id,
     folderId,
     title: String(title ?? "").trim(),
+    description: String(description ?? "").trim(),
     details: String(details ?? "").trim(),
     items,
     pre: [...preCategoryNames].sort(),
@@ -90,6 +92,7 @@ export function AuxiliaryRoutinesManager() {
   const [auxiliaryRoutines, setAuxiliaryRoutines] = useState<AuxiliaryRoutine[]>([]);
   const [selectedAuxiliaryRoutineId, setSelectedAuxiliaryRoutineId] = useState<string | null>(null);
   const [auxiliaryTitleDraft, setAuxiliaryTitleDraft] = useState("");
+  const [auxiliaryDescriptionDraft, setAuxiliaryDescriptionDraft] = useState("");
   const [auxiliaryDetailsDraft, setAuxiliaryDetailsDraft] = useState("");
   const [auxiliaryItemsDraft, setAuxiliaryItemsDraft] = useState<DrillRoutineItem[]>([]);
   const [auxiliaryFolderIdDraft, setAuxiliaryFolderIdDraft] = useState<string | null>(null);
@@ -121,6 +124,7 @@ export function AuxiliaryRoutinesManager() {
   const commitInFlightRef = React.useRef<Promise<boolean> | null>(null);
   const selectedRoutineIdRef = React.useRef<string | null>(null);
   const titleDraftRef = React.useRef("");
+  const descriptionDraftRef = React.useRef("");
   const detailsDraftRef = React.useRef("");
   const itemsDraftRef = React.useRef<DrillRoutineItem[]>([]);
   const folderIdDraftRef = React.useRef<string | null>(null);
@@ -208,6 +212,7 @@ export function AuxiliaryRoutinesManager() {
   useEffect(() => {
     selectedRoutineIdRef.current = selectedAuxiliaryRoutineId;
     titleDraftRef.current = auxiliaryTitleDraft;
+    descriptionDraftRef.current = auxiliaryDescriptionDraft;
     detailsDraftRef.current = auxiliaryDetailsDraft;
     itemsDraftRef.current = auxiliaryItemsDraft;
     folderIdDraftRef.current = auxiliaryFolderIdDraft;
@@ -216,6 +221,7 @@ export function AuxiliaryRoutinesManager() {
   }, [
     selectedAuxiliaryRoutineId,
     auxiliaryTitleDraft,
+    auxiliaryDescriptionDraft,
     auxiliaryDetailsDraft,
     auxiliaryItemsDraft,
     auxiliaryFolderIdDraft,
@@ -226,6 +232,7 @@ export function AuxiliaryRoutinesManager() {
   const loadRoutineIntoDrafts = useCallback((routine: AuxiliaryRoutine | null) => {
     if (!routine) {
       setAuxiliaryTitleDraft("");
+      setAuxiliaryDescriptionDraft("");
       setAuxiliaryDetailsDraft("");
       setAuxiliaryItemsDraft([]);
       setAuxiliaryFolderIdDraft(null);
@@ -237,6 +244,7 @@ export function AuxiliaryRoutinesManager() {
     }
 
     setAuxiliaryTitleDraft(String(routine.title ?? ""));
+    setAuxiliaryDescriptionDraft(String(routine.description ?? ""));
     setAuxiliaryDetailsDraft(String(routine.details ?? ""));
     setAuxiliaryItemsDraft(Array.isArray(routine.items) ? routine.items : []);
     setAuxiliaryFolderIdDraft(String(routine.folderId ?? "").trim() || null);
@@ -245,6 +253,7 @@ export function AuxiliaryRoutinesManager() {
     lastSavedSnapshotRef.current = buildDraftSnapshotFrom(
       routine.id,
       String(routine.title ?? ""),
+      String(routine.description ?? ""),
       String(routine.details ?? ""),
       Array.isArray(routine.preCategoryNames) ? routine.preCategoryNames : [],
       Array.isArray(routine.postCategoryNames) ? routine.postCategoryNames : [],
@@ -332,12 +341,13 @@ export function AuxiliaryRoutinesManager() {
       if (!routineId) return true;
 
       const titleDraft = titleDraftRef.current;
+      const descriptionDraft = descriptionDraftRef.current;
       const detailsDraft = detailsDraftRef.current;
       const itemsDraft = itemsDraftRef.current;
       const folderIdDraft = folderIdDraftRef.current;
       const preDraft = preCategoryNamesDraftRef.current;
       const postDraft = postCategoryNamesDraftRef.current;
-      const savedSnapshot = buildDraftSnapshotFrom(routineId, titleDraft, detailsDraft, preDraft, postDraft, folderIdDraft, itemsDraft);
+      const savedSnapshot = buildDraftSnapshotFrom(routineId, titleDraft, descriptionDraft, detailsDraft, preDraft, postDraft, folderIdDraft, itemsDraft);
       if (savedSnapshot === lastSavedSnapshotRef.current) return true;
 
       const title = String(titleDraft ?? "").trim();
@@ -358,6 +368,7 @@ export function AuxiliaryRoutinesManager() {
         setAuxiliaryAutosaveStatus("saving");
         await updateAuxiliaryRoutine(routineId, {
           title,
+          description: String(descriptionDraft ?? "").trim(),
           details,
           items: itemsDraft,
           folderId: folderIdDraft,
@@ -373,6 +384,7 @@ export function AuxiliaryRoutinesManager() {
         const latestDraftSnapshot = buildDraftSnapshotFrom(
           selectedRoutineIdRef.current,
           titleDraftRef.current,
+          descriptionDraftRef.current,
           detailsDraftRef.current,
           preCategoryNamesDraftRef.current,
           postCategoryNamesDraftRef.current,
@@ -423,6 +435,7 @@ export function AuxiliaryRoutinesManager() {
       const snapshot = buildDraftSnapshotFrom(
       selectedAuxiliaryRoutineId,
       auxiliaryTitleDraft,
+      auxiliaryDescriptionDraft,
       auxiliaryDetailsDraft,
       auxiliaryPreCategoryNamesDraft,
       auxiliaryPostCategoryNamesDraft,
@@ -435,6 +448,7 @@ export function AuxiliaryRoutinesManager() {
   }, [
     selectedAuxiliaryRoutineId,
     auxiliaryTitleDraft,
+    auxiliaryDescriptionDraft,
     auxiliaryDetailsDraft,
     auxiliaryItemsDraft,
     auxiliaryFolderIdDraft,
@@ -1046,6 +1060,24 @@ export function AuxiliaryRoutinesManager() {
                     );
                   })}
                 </ScrollView>
+
+                <Text style={[styles.label, { marginTop: 10 }]}>Description</Text>
+                <Text style={styles.fieldHint}>General instructions for the full routine.</Text>
+                <TextInput
+                  value={auxiliaryDescriptionDraft}
+                  onChangeText={setAuxiliaryDescriptionDraft}
+                  onBlur={() => void commitDraft("description-blur")}
+                  placeholder="Perform on grass or soft surface..."
+                  style={[styles.input, styles.descriptionInput, readOnly && styles.inputDisabled]}
+                  multiline
+                  editable={!readOnly}
+                />
+                {auxiliaryDescriptionDraft.trim() ? (
+                  <View style={styles.linkPreviewBox}>
+                    <Text style={styles.linkPreviewLabel}>Routine description preview</Text>
+                    <LinkifiedText text={auxiliaryDescriptionDraft} style={styles.linkPreviewText} />
+                  </View>
+                ) : null}
 
                 <View style={styles.routineItemsPanel}>
                   <View style={styles.insertPanelHeader}>
@@ -1693,6 +1725,12 @@ const styles = StyleSheet.create({
   },
   editorTitle: { fontSize: 16, fontWeight: "900", color: "#172033", marginBottom: 10 },
   label: { fontSize: 12, fontWeight: "900", color: "#4f5f7a", marginBottom: 6 },
+  fieldHint: {
+    color: "#68758d",
+    fontSize: 12,
+    fontWeight: "700",
+    marginBottom: 6,
+  },
   input: {
     borderWidth: 1,
     borderColor: "#d7deeb",
@@ -1709,6 +1747,10 @@ const styles = StyleSheet.create({
   },
   detailsInput: {
     minHeight: 220,
+    textAlignVertical: "top",
+  },
+  descriptionInput: {
+    minHeight: 96,
     textAlignVertical: "top",
   },
   detailsInputDesktop: {

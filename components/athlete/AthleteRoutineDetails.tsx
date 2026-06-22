@@ -9,7 +9,11 @@ export function hasStructuredRoutineItems(routine: AuxiliaryRoutine | null | und
 }
 
 export function routineHasDisplayDetails(routine: AuxiliaryRoutine | null | undefined) {
-  return hasStructuredRoutineItems(routine) || String(routine?.details ?? "").trim().length > 0;
+  return (
+    hasStructuredRoutineItems(routine) ||
+    String(routine?.description ?? "").trim().length > 0 ||
+    String(routine?.details ?? "").trim().length > 0
+  );
 }
 
 function resolveDrill(item: DrillRoutineItem, drillById?: Map<string, DrillLibraryItem>) {
@@ -34,8 +38,9 @@ function itemVideoUrl(item: DrillRoutineItem, drillById?: Map<string, DrillLibra
 
 export function getRoutinePreviewText(routine: AuxiliaryRoutine, drillById?: Map<string, DrillLibraryItem>) {
   const items = Array.isArray(routine.items) ? routine.items : [];
+  const description = String(routine.description ?? "").trim();
   if (items.length > 0) {
-    return items
+    const itemPreview = items
       .slice(0, 3)
       .map((item) => {
         if (item.kind === "text") return item.text;
@@ -45,8 +50,9 @@ export function getRoutinePreviewText(routine: AuxiliaryRoutine, drillById?: Map
       })
       .filter(Boolean)
       .join("\n");
+    return [description, itemPreview].filter(Boolean).join("\n");
   }
-  return String(routine.details ?? "").trim();
+  return [description, String(routine.details ?? "").trim()].filter(Boolean).join("\n");
 }
 
 export function AthleteRoutineDetails({
@@ -58,6 +64,7 @@ export function AthleteRoutineDetails({
 }) {
   const items = useMemo(() => (Array.isArray(routine.items) ? routine.items : []), [routine.items]);
   const [expandedItemIds, setExpandedItemIds] = useState<Set<string>>(new Set());
+  const description = String(routine.description ?? "").trim();
   const legacyDetails = String(routine.details ?? "").trim();
 
   function toggleItem(id: string) {
@@ -70,13 +77,32 @@ export function AthleteRoutineDetails({
   }
 
   if (items.length === 0) {
-    return legacyDetails ? (
-      <LinkifiedText text={legacyDetails} style={{ color: "#475569", lineHeight: 19 }} />
+    return description || legacyDetails ? (
+      <View style={{ gap: 8 }}>
+        {description ? (
+          <View style={{ gap: 4 }}>
+            <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900" }}>Description</Text>
+            <LinkifiedText text={description} style={{ color: "#475569", lineHeight: 19 }} />
+          </View>
+        ) : null}
+        {legacyDetails ? (
+          <View style={{ gap: 4 }}>
+            {description ? <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900" }}>Additional notes</Text> : null}
+            <LinkifiedText text={legacyDetails} style={{ color: "#475569", lineHeight: 19 }} />
+          </View>
+        ) : null}
+      </View>
     ) : null;
   }
 
   return (
     <View style={{ gap: 8 }}>
+      {description ? (
+        <View style={{ borderRadius: 10, backgroundColor: "#f8fafc", padding: 10, gap: 4 }}>
+          <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900" }}>Description</Text>
+          <LinkifiedText text={description} style={{ color: "#475569", lineHeight: 19 }} />
+        </View>
+      ) : null}
       {items.map((item, index) => {
         if (item.kind === "text") {
           return (
