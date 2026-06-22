@@ -33,10 +33,10 @@ using (
         and ta.claimed_user_id = auth.uid()
         and coalesce(ta.roster_status, 'active') <> 'archived'
         and coalesce(aso.is_excluded, false) = false
-        and coalesce(aso.start_date, s.start_date)::text <= (team_season_week_visibility.week_start_iso::date + interval '6 days')::date::text
-        and coalesce(aso.end_date, s.end_date)::text >= team_season_week_visibility.week_start_iso
-        and (ta.team_start_date is null or ta.team_start_date::text <= (team_season_week_visibility.week_start_iso::date + interval '6 days')::date::text)
-        and (ta.team_end_date is null or ta.team_end_date::text >= team_season_week_visibility.week_start_iso)
+        and coalesce(aso.start_date::date, s.start_date::date) <= (team_season_week_visibility.week_start_iso::date + interval '6 days')::date
+        and coalesce(aso.end_date::date, s.end_date::date) >= team_season_week_visibility.week_start_iso::date
+        and (ta.team_start_date is null or ta.team_start_date::date <= (team_season_week_visibility.week_start_iso::date + interval '6 days')::date)
+        and (ta.team_end_date is null or ta.team_end_date::date >= team_season_week_visibility.week_start_iso::date)
     )
   )
 );
@@ -75,8 +75,8 @@ from (
   from public.team_mileage_week_visibility v
   join public.team_seasons s
     on s.team_id = v.team_id
-   and s.start_date::text <= (v.week_start_iso::date + interval '6 days')::date::text
-   and s.end_date::text >= v.week_start_iso
+    and s.start_date::date <= (v.week_start_iso::date + interval '6 days')::date
+    and s.end_date::date >= v.week_start_iso::date
   join public.team_athletes ta
     on ta.team_id = v.team_id
    and ta.id = v.athlete_profile_id
@@ -86,10 +86,10 @@ from (
    and aso.athlete_profile_id = v.athlete_profile_id
   where coalesce(ta.roster_status, 'active') <> 'archived'
     and coalesce(aso.is_excluded, false) = false
-    and coalesce(aso.start_date, s.start_date)::text <= (v.week_start_iso::date + interval '6 days')::date::text
-    and coalesce(aso.end_date, s.end_date)::text >= v.week_start_iso
-    and (ta.team_start_date is null or ta.team_start_date::text <= (v.week_start_iso::date + interval '6 days')::date::text)
-    and (ta.team_end_date is null or ta.team_end_date::text >= v.week_start_iso)
+    and coalesce(aso.start_date::date, s.start_date::date) <= (v.week_start_iso::date + interval '6 days')::date
+    and coalesce(aso.end_date::date, s.end_date::date) >= v.week_start_iso::date
+    and (ta.team_start_date is null or ta.team_start_date::date <= (v.week_start_iso::date + interval '6 days')::date)
+    and (ta.team_end_date is null or ta.team_end_date::date >= v.week_start_iso::date)
 ) inferred
 group by inferred.team_id, inferred.season_id, inferred.week_start_iso
 on conflict (team_id, season_id, week_start_iso) do nothing;
