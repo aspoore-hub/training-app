@@ -1437,6 +1437,8 @@ export default function CoachWorkoutsDay() {
   const alreadyScrolledForBatchRef = useRef<string | null>(null);
   const previousDayISORef = useRef<string | null>(null);
   const flushPendingEditsRef = useRef<() => Promise<void>>(async () => {});
+  const creatingBatchRef = useRef(false);
+  const duplicatingKeysRef = useRef<Set<string>>(new Set());
 
   const [loading, setLoading] = useState(true);
   const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
@@ -1523,6 +1525,7 @@ export default function CoachWorkoutsDay() {
   const [batchDatePickerDraftDate, setBatchDatePickerDraftDate] = useState("");
   const [batchDatePickerError, setBatchDatePickerError] = useState<string | null>(null);
   const [creatingBatch, setCreatingBatch] = useState(false);
+  const [quickActionError, setQuickActionError] = useState<string | null>(null);
   const [saveSignalTick, setSaveSignalTick] = useState(0);
   const [lastSavedAtMs, setLastSavedAtMs] = useState<number | null>(null);
   const [currentTeamRoleLoaded, setCurrentTeamRoleLoaded] = useState(false);
@@ -3932,7 +3935,10 @@ export default function CoachWorkoutsDay() {
   }, [confirmDelete, dayISO, refreshDayGuarded]);
 
   const duplicateBatchOrSingle = async (row: WorksheetBatchRow) => {
+    if (duplicatingKeysRef.current.has(row.key)) return;
+    duplicatingKeysRef.current.add(row.key);
     try {
+      setQuickActionError(null);
       setDuplicatingKey(row.key);
       const teamId = await ensureTeamId();
       if (!teamId) throw new Error("No team selected.");
@@ -4008,9 +4014,11 @@ export default function CoachWorkoutsDay() {
       });
     } catch (e: any) {
       const message = String(e?.message ?? e ?? "Could not duplicate row.");
+      setQuickActionError(`Duplicate failed: ${message}`);
       patchAppRuntime({ lastSaveError: message });
       Alert.alert("Duplicate failed", message);
     } finally {
+      duplicatingKeysRef.current.delete(row.key);
       setDuplicatingKey((prev) => (prev === row.key ? null : prev));
     }
   };
@@ -4204,19 +4212,27 @@ export default function CoachWorkoutsDay() {
   }, [openAthletePickerBatch, openAthletePickerBatchKey]);
 
   const handleQuickCreateBatch = useCallback(async () => {
-    if (creatingBatch) return;
+    if (creatingBatch || creatingBatchRef.current) {
+      return;
+    }
 
+    creatingBatchRef.current = true;
+    setQuickActionError(null);
     setCreatingBatch(true);
     try {
       const teamId = await ensureTeamId();
       if (!teamId) {
-        Alert.alert("Create failed", "No team selected.");
+        const message = "No team selected.";
+        setQuickActionError(`Create failed: ${message}`);
+        Alert.alert("Create failed", message);
         return;
       }
 
       const eligibleRosterOptions = getEligibleRosterOptionsForDate(dayISO);
       if (eligibleRosterOptions.length === 0) {
-        Alert.alert("Create failed", "No athletes found on roster.");
+        const message = "No eligible athletes found for the current date, group, and season filters.";
+        setQuickActionError(`Create failed: ${message}`);
+        Alert.alert("Create failed", message);
         return;
       }
 
@@ -4248,7 +4264,9 @@ export default function CoachWorkoutsDay() {
         }));
 
       if (payload.length === 0) {
-        Alert.alert("Create failed", "No athletes found on roster.");
+        const message = "No athletes found on roster.";
+        setQuickActionError(`Create failed: ${message}`);
+        Alert.alert("Create failed", message);
         return;
       }
 
@@ -4264,14 +4282,17 @@ export default function CoachWorkoutsDay() {
       const key = `batch:${newBatchId}`;
       setExpandedByBatchKey((prev) => ({ ...prev, [key]: true }));
       setHighlightBatchKey(key);
+      setQuickActionError(null);
       setTimeout(() => {
         setHighlightBatchKey((prev) => (prev === key ? null : prev));
       }, 2200);
     } catch (e: any) {
       const message = String(e?.message ?? e ?? "Could not create workout batch.");
+      setQuickActionError(`Create failed: ${message}`);
       patchAppRuntime({ lastSaveError: message });
       Alert.alert("Create failed", message);
     } finally {
+      creatingBatchRef.current = false;
       setCreatingBatch(false);
     }
   }, [creatingBatch, dayISO, ensureTeamId, getEligibleRosterOptionsForDate, patchAppRuntime, practiceDefaults, refreshDayGuarded]);
@@ -4932,6 +4953,15 @@ export default function CoachWorkoutsDay() {
           {!readOnlyTraining ? (
             <Pressable
               onPress={() => void handleQuickCreateBatch()}
+              {...(Platform.OS === "web"
+                ? ({
+                    onClick: (event: any) => {
+                      event?.preventDefault?.();
+                      event?.stopPropagation?.();
+                      void handleQuickCreateBatch();
+                    },
+                  } as any)
+                : null)}
               disabled={creatingBatch}
               style={{
                 borderWidth: 1,
@@ -4954,6 +4984,12 @@ export default function CoachWorkoutsDay() {
       {readOnlyTraining ? (
         <View style={{ marginHorizontal: 10, marginTop: 8, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 10, backgroundColor: "#f8fafc", paddingHorizontal: 10, paddingVertical: 8 }}>
           <Text style={{ fontSize: 12, fontWeight: "800", color: "#475569" }}>Viewer access: editing is disabled.</Text>
+        </View>
+      ) : null}
+
+      {quickActionError ? (
+        <View style={{ marginHorizontal: 10, marginTop: 8, borderWidth: 1, borderColor: "#fecaca", borderRadius: 10, backgroundColor: "#fff1f2", paddingHorizontal: 10, paddingVertical: 8 }}>
+          <Text selectable style={{ fontSize: 12, fontWeight: "800", color: "#be123c" }}>{quickActionError}</Text>
         </View>
       ) : null}
 
@@ -5372,6 +5408,15 @@ export default function CoachWorkoutsDay() {
                       <View style={{ ...batchSheetCellBase, minWidth: 230, flexDirection: "row", alignItems: "center", gap: 6, borderRightWidth: 0, backgroundColor: BATCH_GROUP_UTILITY_BG }}>
                         <Pressable
                           onPress={() => void duplicateBatchOrSingle(batchRow)}
+                          {...(Platform.OS === "web"
+                            ? ({
+                                onClick: (event: any) => {
+                                  event?.preventDefault?.();
+                                  event?.stopPropagation?.();
+                                  void duplicateBatchOrSingle(batchRow);
+                                },
+                              } as any)
+                            : null)}
                           disabled={duplicatingKey === batchRow.key}
                           style={{ borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 4, opacity: duplicatingKey === batchRow.key ? 0.6 : 1, backgroundColor: "#fff" }}
                         >
