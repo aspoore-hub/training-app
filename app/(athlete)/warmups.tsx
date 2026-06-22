@@ -1,19 +1,25 @@
 import { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { AccountContextSelector } from "../../components/account/AccountContextSelector";
 import { AthleteRoutineDetails, getRoutinePreviewText } from "../../components/athlete/AthleteRoutineDetails";
 import { LinkifiedText } from "../../components/ui/LinkifiedText";
 import { getActiveAccountContext } from "../../lib/accountContexts";
-import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
+import {
+  loadAuxiliaryRoutineDefinitionsWithStatus,
+  type AuxiliaryRoutine,
+  type AuxiliaryRoutineDefinitionsLoadResult,
+} from "../../lib/auxiliaryRoutines";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import {
-  loadDrillFolders,
-  loadDrillLibraryDefinitions,
-  loadRoutineFolders,
   type DrillFolder,
+  type FolderDefinitionsLoadResult,
   type DrillLibraryItem,
+  type DrillLibraryDefinitionsLoadResult,
+  loadDrillFoldersWithStatus,
+  loadDrillLibraryDefinitionsWithStatus,
+  loadRoutineFoldersWithStatus,
   type RoutineFolder,
 } from "../../lib/drillLibrary";
 import { supabase } from "../../lib/supabase";
@@ -40,8 +46,31 @@ function formatUpdatedAt(value: number): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function firstParam(value: string | string[] | undefined): string {
+  return String(Array.isArray(value) ? value[0] ?? "" : value ?? "").trim();
+}
+
+function formatCloudStatus(
+  label: string,
+  status:
+    | AuxiliaryRoutineDefinitionsLoadResult
+    | DrillLibraryDefinitionsLoadResult
+    | FolderDefinitionsLoadResult
+    | null
+): string {
+  if (!status) return `${label}: not loaded`;
+  const meta = [status.version != null ? `version ${status.version}` : "", status.updatedAt ? `updated_at ${status.updatedAt}` : ""]
+    .filter(Boolean)
+    .join(", ");
+  return `${label}: cloud loaded ${status.loadedFromCloud ? "yes" : "no"}${meta ? ` (${meta})` : ""}${
+    status.cloudError ? `\n${label} error: ${status.cloudError}` : ""
+  }`;
+}
+
 export default function AthleteWarmupsScreen() {
   const router = useRouter();
+  const { debugRoutineLinks } = useLocalSearchParams<{ debugRoutineLinks?: string | string[] }>();
+  const showRoutineLinkDebug = firstParam(debugRoutineLinks) === "1";
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<LibraryTab>("routines");
   const [routines, setRoutines] = useState<AuxiliaryRoutine[]>([]);
@@ -58,32 +87,64 @@ export default function AthleteWarmupsScreen() {
   const [accountEmail, setAccountEmail] = useState<string | null>(null);
   const [athleteName, setAthleteName] = useState<string | null>(null);
   const [teamName, setTeamName] = useState<string | null>(null);
+  const [routineLoadStatus, setRoutineLoadStatus] = useState<AuxiliaryRoutineDefinitionsLoadResult | null>(null);
+  const [drillLibraryLoadStatus, setDrillLibraryLoadStatus] = useState<DrillLibraryDefinitionsLoadResult | null>(null);
+  const [routineFolderLoadStatus, setRoutineFolderLoadStatus] = useState<FolderDefinitionsLoadResult<RoutineFolder> | null>(null);
+  const [drillFolderLoadStatus, setDrillFolderLoadStatus] = useState<FolderDefinitionsLoadResult<DrillFolder> | null>(null);
 
   const loadScreen = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [session, userResult, routineList, routineFolderList, drillFolderList, loadedDrillItems] = await Promise.all([
+      const [session, userResult, routineResult, routineFolderResult, drillFolderResult, drillResult] = await Promise.all([
         resolveAthleteSessionContext(true),
         supabase.auth.getUser(),
-        loadAuxiliaryRoutineDefinitions(),
-        loadRoutineFolders(),
-        loadDrillFolders(),
-        loadDrillLibraryDefinitions(),
+        loadAuxiliaryRoutineDefinitionsWithStatus(),
+        loadRoutineFoldersWithStatus(),
+        loadDrillFoldersWithStatus(),
+        loadDrillLibraryDefinitionsWithStatus(),
       ]);
       const accountContext = await getActiveAccountContext();
       setAthleteName(session.athleteName);
       setAccountEmail(userResult.data.user?.email ?? null);
       setTeamName(String(accountContext?.teamName ?? "").trim() || null);
-      setRoutines(routineList);
-      setRoutineFolders(routineFolderList);
-      setDrillFolders(drillFolderList);
-      setDrillItems(loadedDrillItems);
-      setDrillById(new Map(loadedDrillItems.map((drill) => [drill.id, drill] as const)));
+      setRoutineLoadStatus(routineResult);
+      setRoutineFolderLoadStatus(routineFolderResult);
+      setDrillFolderLoadStatus(drillFolderResult);
+      setDrillLibraryLoadStatus(drillResult);
+
+      const failedReads = [
+        ["routines", routineResult],
+        ["routine folders", routineFolderResult],
+        ["drill folders", drillFolderResult],
+        ["drill library", drillResult],
+      ].filter(([, status]) => !(status as { loadedFromCloud: boolean }).loadedFromCloud);
+
+      if (failedReads.length > 0) {
+        setRoutines([]);
+        setRoutineFolders([]);
+        setDrillFolders([]);
+        setDrillItems([]);
+        setDrillById(new Map());
+        setError(
+          [
+            "Could not load latest drill routines. Refresh or contact your coach.",
+            ...failedReads.map(([label, status]) => `${label}: ${(status as { cloudError?: string }).cloudError ?? "cloud read failed"}`),
+          ].join("\n")
+        );
+        return;
+      }
+
+      setRoutines(routineResult.items);
+      setRoutineFolders(routineFolderResult.items);
+      setDrillFolders(drillFolderResult.items);
+      setDrillItems(drillResult.items);
+      setDrillById(new Map(drillResult.items.map((drill) => [drill.id, drill] as const)));
     } catch (err: any) {
       setError(String(err?.message ?? err ?? "Could not load warmups and drills."));
       setRoutines([]);
       setDrillItems([]);
+      setDrillById(new Map());
     } finally {
       setLoading(false);
     }
@@ -297,6 +358,29 @@ export default function AthleteWarmupsScreen() {
             </Pressable>
           ))}
         </ScrollView>
+      ) : null}
+
+      {showRoutineLinkDebug ? (
+        <View
+          style={{
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: "#f59e0b",
+            backgroundColor: "#fffbeb",
+            padding: 10,
+            gap: 6,
+          }}
+        >
+          <Text style={{ color: "#92400e", fontSize: 12, fontWeight: "900" }}>ROUTINE LINK DEBUG</Text>
+          <Text selectable style={{ color: "#78350f", fontSize: 12, lineHeight: 18 }}>
+            routine count: {routines.length}
+            {"\n"}drill count: {drillItems.length}
+            {"\n"}{formatCloudStatus("routines", routineLoadStatus)}
+            {"\n"}{formatCloudStatus("drill library", drillLibraryLoadStatus)}
+            {"\n"}{formatCloudStatus("drill folders", drillFolderLoadStatus)}
+            {"\n"}{formatCloudStatus("routine folders", routineFolderLoadStatus)}
+          </Text>
+        </View>
       ) : null}
 
       {loading ? (

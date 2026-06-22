@@ -18,11 +18,18 @@ import {
   type MileageSessionFeedback,
   upsertMileageFeedback,
 } from "../../../lib/mileageFeedback";
-import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
 import {
+  loadAuxiliaryRoutineDefinitionsWithStatus,
+  type AuxiliaryRoutine,
+  type AuxiliaryRoutineDefinitionsLoadResult,
+} from "../../../lib/auxiliaryRoutines";
+import {
+  loadDrillFoldersWithStatus,
   loadDrillLibraryDefinitionsWithStatus,
+  loadRoutineFoldersWithStatus,
   type DrillLibraryDefinitionsLoadResult,
   type DrillLibraryItem,
+  type FolderDefinitionsLoadResult,
 } from "../../../lib/drillLibrary";
 import { hydrateRoutineLibraryDrillItem } from "../../../lib/routineDrillHydration";
 import { parseNumericLike } from "../../../lib/feedbackParsing";
@@ -68,6 +75,23 @@ function firstParam(value: string | string[] | undefined): string {
 
 function containsHttpUrl(input: unknown): boolean {
   return /https?:\/\/[^\s<>"']+/i.test(String(input ?? ""));
+}
+
+function formatCloudStatus(
+  label: string,
+  status:
+    | AuxiliaryRoutineDefinitionsLoadResult
+    | DrillLibraryDefinitionsLoadResult
+    | FolderDefinitionsLoadResult
+    | null
+): string {
+  if (!status) return `${label}: not loaded`;
+  const meta = [status.version != null ? `version ${status.version}` : "", status.updatedAt ? `updated_at ${status.updatedAt}` : ""]
+    .filter(Boolean)
+    .join(", ");
+  return `${label}: cloud loaded ${status.loadedFromCloud ? "yes" : "no"}${meta ? ` (${meta})` : ""}${
+    status.cloudError ? `\n${label} error: ${status.cloudError}` : ""
+  }`;
 }
 
 function formatDisplayDate(iso: string) {
@@ -203,7 +227,11 @@ export default function AthleteWorkoutDetail() {
   const [submitStatus, setSubmitStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [rosterMap, setRosterMap] = useState<Map<string, string>>(new Map());
+  const [routineLoadStatus, setRoutineLoadStatus] = useState<AuxiliaryRoutineDefinitionsLoadResult | null>(null);
   const [drillLibraryLoadStatus, setDrillLibraryLoadStatus] = useState<DrillLibraryDefinitionsLoadResult | null>(null);
+  const [drillFolderLoadStatus, setDrillFolderLoadStatus] = useState<FolderDefinitionsLoadResult | null>(null);
+  const [routineFolderLoadStatus, setRoutineFolderLoadStatus] = useState<FolderDefinitionsLoadResult | null>(null);
+  const [routineDataLoadError, setRoutineDataLoadError] = useState<string | null>(null);
   const store = teamDataStore.use();
 
   function leaveWorkoutDetail() {
@@ -230,88 +258,119 @@ export default function AthleteWorkoutDetail() {
 
   useEffect(() => {
     (async () => {
-      const athleteSession = await resolveAthleteSessionContext();
-      const visibleAthleteId = String(athleteSession.athleteId ?? athleteId ?? "").trim();
-      const [rosterMap, routines, drillLoadResult, weekStartResult, storedCategories] = await Promise.all([
-        loadRosterAny(),
-        loadAuxiliaryRoutineDefinitions(),
-        loadDrillLibraryDefinitionsWithStatus(),
-        loadWeekStartSetting(),
-        loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
-      ]);
-      const drillItems = drillLoadResult.items;
-      const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
-      const loadedRoutineById = new Map(routines.map((routine) => [routine.id, routine] as const));
-      const loadedDrillById = new Map(drillItems.map((drill) => [drill.id, drill] as const));
-      setRosterMap(rosterMap);
-      setRoutineById(loadedRoutineById);
-      setDrillById(loadedDrillById);
-      setDrillLibraryLoadStatus(drillLoadResult);
-      setCategories(normalizeCategories(storedCategories));
-      setWeekStartsOn(resolvedWeekStart);
+      setLoading(true);
+      setRoutineDataLoadError(null);
+      try {
+        const athleteSession = await resolveAthleteSessionContext();
+        const visibleAthleteId = String(athleteSession.athleteId ?? athleteId ?? "").trim();
+        const [rosterMap, routineLoadResult, drillLoadResult, drillFolderResult, routineFolderResult, weekStartResult, storedCategories] = await Promise.all([
+          loadRosterAny(),
+          loadAuxiliaryRoutineDefinitionsWithStatus(),
+          loadDrillLibraryDefinitionsWithStatus(),
+          loadDrillFoldersWithStatus(),
+          loadRoutineFoldersWithStatus(),
+          loadWeekStartSetting(),
+          loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
+        ]);
+        setRoutineLoadStatus(routineLoadResult);
+        setDrillLibraryLoadStatus(drillLoadResult);
+        setDrillFolderLoadStatus(drillFolderResult);
+        setRoutineFolderLoadStatus(routineFolderResult);
 
-      const foundRow = visibleAthleteId ? await getVisibleAthleteWorkoutById(String(id), visibleAthleteId) : null;
-      const found = foundRow ? toAthleteWorkout(foundRow, rosterMap) : null;
+        const failedReads = [
+          ["routines", routineLoadResult],
+          ["drill library", drillLoadResult],
+          ["drill folders", drillFolderResult],
+          ["routine folders", routineFolderResult],
+        ].filter(([, status]) => !(status as { loadedFromCloud: boolean }).loadedFromCloud);
 
-      if (!isSynthetic && found) {
-        setWorkout(found);
-        setCompletedMilesText(found.completedMiles != null ? String(found.completedMiles) : "");
-        setCompletedTimeText(String(found.completedTime ?? ""));
-        setSplitsText(String(found.splitsOrPace ?? ""));
-        setAdditionalFeedbackText(String(found.additionalFeedback ?? found.feedback ?? ""));
-
-        setGroupMateNames([]);
-        setBatchHeaderNotes("");
-        setExpandedRoutineIds(new Set());
-
-        if (foundRow?.batch_id) {
-          const [batchRows, headerRows] = await Promise.all([
-            listTeamWorkoutsByBatch(foundRow.batch_id).catch(() => []),
-            listTeamWorkoutBatchHeadersForDate(String(foundRow.date_iso)).catch(() => []),
-          ]);
-          const visibleBatchRows = batchRows.filter((row) => row.athlete_visible !== false);
-          const groupNames = visibleBatchRows
-            .filter(
-              (row) =>
-                String(row.id) !== String(foundRow.id) &&
-                normalizeGroupId(row.group_id ?? undefined) === normalizeGroupId(foundRow.group_id ?? undefined)
-            )
-            .map((row) => rosterMap.get(String(row.athlete_profile_id ?? "").trim()) ?? fallbackAthleteName(String(row.athlete_profile_id ?? "")))
-            .filter(Boolean);
-          setGroupMateNames(Array.from(new Set(groupNames)));
-          const batchNotesByWorkoutId = buildBatchNotesByWorkoutId([foundRow, ...visibleBatchRows], headerRows);
-          setBatchHeaderNotes(batchNotesByWorkoutId.get(String(foundRow.id)) ?? "");
-        }
-
-        if (found?.athleteId && found?.dateISO) {
-          void teamDataStore.actions.loadVisibleMileageWeekForAthlete(
-            String(found.athleteId),
-            getWeekStartISO(String(found.dateISO), resolvedWeekStart)
+        if (failedReads.length > 0) {
+          setRoutineById(new Map());
+          setDrillById(new Map());
+          setRoutineDataLoadError(
+            [
+              "Could not load latest drill routines. Refresh or contact your coach.",
+              ...failedReads.map(([label, status]) => `${label}: ${(status as { cloudError?: string }).cloudError ?? "cloud read failed"}`),
+            ].join("\n")
           );
+          return;
         }
-      }
 
-      if (isSynthetic) {
-        await migrateLocalMileageFeedbackToTeamForAthlete({
-          athleteId: String(athleteId ?? "") || undefined,
-          athleteName: String(name ?? "") || undefined,
-        });
-        const feedbackId = buildMileageFeedbackId({
-          athleteId: String(athleteId ?? "") || undefined,
-          athleteName: String(name ?? "") || undefined,
-          dateISO: String(date ?? ""),
-          session: normalizeSession(session),
-        });
-        const existing = await getMileageFeedbackById(feedbackId);
-        if (existing) {
-          setCompletedMilesText(existing.completedMiles != null ? String(existing.completedMiles) : "");
-          setCompletedTimeText(String(existing.completedTime ?? ""));
-          setSplitsText(String(existing.splitsOrPace ?? ""));
-          setAdditionalFeedbackText(String(existing.additionalFeedback ?? ""));
+        const drillItems = drillLoadResult.items;
+        const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
+        const loadedRoutineById = new Map(routineLoadResult.items.map((routine) => [routine.id, routine] as const));
+        const loadedDrillById = new Map(drillItems.map((drill) => [drill.id, drill] as const));
+        setRosterMap(rosterMap);
+        setRoutineById(loadedRoutineById);
+        setDrillById(loadedDrillById);
+        setCategories(normalizeCategories(storedCategories));
+        setWeekStartsOn(resolvedWeekStart);
+
+        const foundRow = visibleAthleteId ? await getVisibleAthleteWorkoutById(String(id), visibleAthleteId) : null;
+        const found = foundRow ? toAthleteWorkout(foundRow, rosterMap) : null;
+
+        if (!isSynthetic && found) {
+          setWorkout(found);
+          setCompletedMilesText(found.completedMiles != null ? String(found.completedMiles) : "");
+          setCompletedTimeText(String(found.completedTime ?? ""));
+          setSplitsText(String(found.splitsOrPace ?? ""));
+          setAdditionalFeedbackText(String(found.additionalFeedback ?? found.feedback ?? ""));
+
+          setGroupMateNames([]);
+          setBatchHeaderNotes("");
+          setExpandedRoutineIds(new Set());
+
+          if (foundRow?.batch_id) {
+            const [batchRows, headerRows] = await Promise.all([
+              listTeamWorkoutsByBatch(foundRow.batch_id).catch(() => []),
+              listTeamWorkoutBatchHeadersForDate(String(foundRow.date_iso)).catch(() => []),
+            ]);
+            const visibleBatchRows = batchRows.filter((row) => row.athlete_visible !== false);
+            const groupNames = visibleBatchRows
+              .filter(
+                (row) =>
+                  String(row.id) !== String(foundRow.id) &&
+                  normalizeGroupId(row.group_id ?? undefined) === normalizeGroupId(foundRow.group_id ?? undefined)
+              )
+              .map((row) => rosterMap.get(String(row.athlete_profile_id ?? "").trim()) ?? fallbackAthleteName(String(row.athlete_profile_id ?? "")))
+              .filter(Boolean);
+            setGroupMateNames(Array.from(new Set(groupNames)));
+            const batchNotesByWorkoutId = buildBatchNotesByWorkoutId([foundRow, ...visibleBatchRows], headerRows);
+            setBatchHeaderNotes(batchNotesByWorkoutId.get(String(foundRow.id)) ?? "");
+          }
+
+          if (found?.athleteId && found?.dateISO) {
+            void teamDataStore.actions.loadVisibleMileageWeekForAthlete(
+              String(found.athleteId),
+              getWeekStartISO(String(found.dateISO), resolvedWeekStart)
+            );
+          }
         }
-      }
 
-      setLoading(false);
+        if (isSynthetic) {
+          await migrateLocalMileageFeedbackToTeamForAthlete({
+            athleteId: String(athleteId ?? "") || undefined,
+            athleteName: String(name ?? "") || undefined,
+          });
+          const feedbackId = buildMileageFeedbackId({
+            athleteId: String(athleteId ?? "") || undefined,
+            athleteName: String(name ?? "") || undefined,
+            dateISO: String(date ?? ""),
+            session: normalizeSession(session),
+          });
+          const existing = await getMileageFeedbackById(feedbackId);
+          if (existing) {
+            setCompletedMilesText(existing.completedMiles != null ? String(existing.completedMiles) : "");
+            setCompletedTimeText(String(existing.completedTime ?? ""));
+            setSplitsText(String(existing.splitsOrPace ?? ""));
+            setAdditionalFeedbackText(String(existing.additionalFeedback ?? ""));
+          }
+        }
+      } catch (error: any) {
+        setRoutineDataLoadError(String(error?.message ?? error ?? "Could not load latest drill routines."));
+      } finally {
+        setLoading(false);
+      }
     })();
   }, [id, isSynthetic, date, session, athleteId, name]);
 
@@ -411,6 +470,37 @@ export default function AthleteWorkoutDetail() {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
         <Text>Loading...</Text>
+      </View>
+    );
+  }
+
+  if (routineDataLoadError) {
+    return (
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", padding: 20, backgroundColor: "#f6f8fb" }}>
+        <View style={{ borderWidth: 1, borderColor: "#fecaca", borderRadius: 14, backgroundColor: "#fff1f2", padding: 14, gap: 10 }}>
+          <Text style={{ color: "#991b1b", fontWeight: "900", fontSize: 16 }}>Could not load latest drill routines.</Text>
+          <Text selectable style={{ color: "#be123c", lineHeight: 20 }}>{routineDataLoadError}</Text>
+          {showRoutineLinkDebug ? (
+            <Text selectable style={{ color: "#78350f", fontSize: 12, lineHeight: 18 }}>
+              {formatCloudStatus("routines", routineLoadStatus)}
+              {"\n"}{formatCloudStatus("drill library", drillLibraryLoadStatus)}
+              {"\n"}{formatCloudStatus("drill folders", drillFolderLoadStatus)}
+              {"\n"}{formatCloudStatus("routine folders", routineFolderLoadStatus)}
+            </Text>
+          ) : null}
+          <Pressable
+            onPress={leaveWorkoutDetail}
+            style={{
+              alignSelf: "flex-start",
+              borderRadius: 12,
+              backgroundColor: "#0f172a",
+              paddingHorizontal: 16,
+              paddingVertical: 10,
+            }}
+          >
+            <Text style={{ color: "white", fontWeight: "800" }}>Back</Text>
+          </Pressable>
+        </View>
       </View>
     );
   }
@@ -604,8 +694,10 @@ export default function AthleteWorkoutDetail() {
           <View style={{ borderWidth: 1, borderColor: "#f59e0b", borderRadius: 12, backgroundColor: "#fffbeb", padding: 10, gap: 8 }}>
             <Text style={{ color: "#92400e", fontSize: 12, fontWeight: "900" }}>ROUTINE LINK DEBUG</Text>
             <Text selectable style={{ color: "#78350f", fontSize: 12, lineHeight: 18 }}>
-              Drill library loaded from cloud: {drillLibraryLoadStatus?.loadedFromCloud ? "yes" : "no"}
-              {drillLibraryLoadStatus?.cloudError ? `\nCloud read issue: ${drillLibraryLoadStatus.cloudError}` : ""}
+              {formatCloudStatus("routines", routineLoadStatus)}
+              {"\n"}{formatCloudStatus("drill library", drillLibraryLoadStatus)}
+              {"\n"}{formatCloudStatus("drill folders", drillFolderLoadStatus)}
+              {"\n"}{formatCloudStatus("routine folders", routineFolderLoadStatus)}
             </Text>
             {[...preRoutines.map((routine) => ({ phase: "pre", routine })), ...postRoutines.map((routine) => ({ phase: "post", routine }))].map(({ phase, routine }) => {
               const items = Array.isArray(routine.items) ? routine.items : [];

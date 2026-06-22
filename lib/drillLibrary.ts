@@ -33,6 +33,16 @@ export type DrillLibraryDefinitionsLoadResult = {
   items: DrillLibraryItem[];
   loadedFromCloud: boolean;
   cloudError?: string;
+  version?: number;
+  updatedAt?: string;
+};
+
+export type FolderDefinitionsLoadResult<T extends DrillFolder = DrillFolder> = {
+  items: T[];
+  loadedFromCloud: boolean;
+  cloudError?: string;
+  version?: number;
+  updatedAt?: string;
 };
 
 function createId(prefix: string) {
@@ -78,6 +88,39 @@ function normalizeDrill(raw: any): DrillLibraryItem | null {
     createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
     updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
   };
+}
+
+function formatCloudError(error: any, fallback: string) {
+  return String(error?.message ?? error?.details ?? error?.hint ?? error ?? fallback);
+}
+
+async function loadTeamKVBlob(key: string): Promise<{
+  data: any;
+  version?: number;
+  updatedAt?: string;
+  error?: string;
+}> {
+  try {
+    const teamId = await getCurrentTeamId();
+    const { data, error } = await supabase
+      .from("team_kv_blobs")
+      .select("data,version,updated_at")
+      .eq("team_id", teamId)
+      .eq("key", key)
+      .maybeSingle();
+
+    if (error) {
+      return { data: null, error: formatCloudError(error, `${key} cloud read failed.`) };
+    }
+
+    return {
+      data: data?.data,
+      version: typeof data?.version === "number" ? data.version : undefined,
+      updatedAt: typeof data?.updated_at === "string" ? data.updated_at : undefined,
+    };
+  } catch (error: any) {
+    return { data: null, error: formatCloudError(error, `${key} cloud read failed.`) };
+  }
 }
 
 export async function loadDrillFolders(): Promise<DrillFolder[]> {
@@ -128,36 +171,75 @@ export async function loadDrillLibraryDefinitions(): Promise<DrillLibraryItem[]>
 }
 
 export async function loadDrillLibraryDefinitionsWithStatus(): Promise<DrillLibraryDefinitionsLoadResult> {
-  let cloudError = "";
-  try {
-    const teamId = await getCurrentTeamId();
-    const { data, error } = await supabase
-      .from("team_kv_blobs")
-      .select("data")
-      .eq("team_id", teamId)
-      .eq("key", DRILL_LIBRARY_KEY)
-      .maybeSingle();
-
-    if (!error && Array.isArray(data?.data)) {
-      return {
-        items: data.data
-          .map((item) => normalizeDrill(item))
-          .filter((item): item is DrillLibraryItem => !!item)
-          .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
-        loadedFromCloud: true,
-      };
-    }
-    if (error) cloudError = String(error.message ?? error);
-    else cloudError = "Drill library cloud row missing or invalid.";
-  } catch (error: any) {
-    cloudError = String(error?.message ?? error ?? "Drill library cloud read failed.");
-    // Fall back to the synced storage path below.
+  const result = await loadTeamKVBlob(DRILL_LIBRARY_KEY);
+  if (Array.isArray(result.data)) {
+    return {
+      items: result.data
+        .map((item) => normalizeDrill(item))
+        .filter((item): item is DrillLibraryItem => !!item)
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
+      loadedFromCloud: true,
+      version: result.version,
+      updatedAt: result.updatedAt,
+    };
   }
 
   return {
-    items: await loadDrillLibraryItems(),
+    items: [],
     loadedFromCloud: false,
-    cloudError,
+    cloudError: result.error || "Drill library cloud row missing or invalid.",
+    version: result.version,
+    updatedAt: result.updatedAt,
+  };
+}
+
+export async function loadDrillFoldersWithStatus(): Promise<FolderDefinitionsLoadResult<DrillFolder>> {
+  const result = await loadTeamKVBlob(DRILL_FOLDERS_KEY);
+  if (Array.isArray(result.data)) {
+    return {
+      items: result.data
+        .map((item) => normalizeFolder(item))
+        .filter((item): item is DrillFolder => !!item)
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
+      loadedFromCloud: true,
+      version: result.version,
+      updatedAt: result.updatedAt,
+    };
+  }
+  if (result.data == null && !result.error) {
+    return { items: [], loadedFromCloud: true, version: result.version, updatedAt: result.updatedAt };
+  }
+  return {
+    items: [],
+    loadedFromCloud: false,
+    cloudError: result.error || "Drill folders cloud row invalid.",
+    version: result.version,
+    updatedAt: result.updatedAt,
+  };
+}
+
+export async function loadRoutineFoldersWithStatus(): Promise<FolderDefinitionsLoadResult<RoutineFolder>> {
+  const result = await loadTeamKVBlob(ROUTINE_FOLDERS_KEY);
+  if (Array.isArray(result.data)) {
+    return {
+      items: result.data
+        .map((item) => normalizeFolder(item))
+        .filter((item): item is RoutineFolder => !!item)
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
+      loadedFromCloud: true,
+      version: result.version,
+      updatedAt: result.updatedAt,
+    };
+  }
+  if (result.data == null && !result.error) {
+    return { items: [], loadedFromCloud: true, version: result.version, updatedAt: result.updatedAt };
+  }
+  return {
+    items: [],
+    loadedFromCloud: false,
+    cloudError: result.error || "Routine folders cloud row invalid.",
+    version: result.version,
+    updatedAt: result.updatedAt,
   };
 }
 

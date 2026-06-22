@@ -36,6 +36,14 @@ export type AuxiliaryRoutine = {
   updatedAt: number;
 };
 
+export type AuxiliaryRoutineDefinitionsLoadResult = {
+  items: AuxiliaryRoutine[];
+  loadedFromCloud: boolean;
+  cloudError?: string;
+  version?: number;
+  updatedAt?: string;
+};
+
 function normalizeCategoryNames(raw: any): string[] {
   if (!Array.isArray(raw)) return [];
   return Array.from(
@@ -110,6 +118,10 @@ function normalizeRoutine(raw: any): AuxiliaryRoutine | null {
   };
 }
 
+function formatCloudError(error: any, fallback: string) {
+  return String(error?.message ?? error?.details ?? error?.hint ?? error ?? fallback);
+}
+
 export async function loadAuxiliaryRoutines(): Promise<AuxiliaryRoutine[]> {
   const raw = await loadJSON<any[]>(AUXILIARY_ROUTINES_KEY, []);
   if (!Array.isArray(raw)) return [];
@@ -120,26 +132,54 @@ export async function loadAuxiliaryRoutines(): Promise<AuxiliaryRoutine[]> {
 }
 
 export async function loadAuxiliaryRoutineDefinitions(): Promise<AuxiliaryRoutine[]> {
+  const result = await loadAuxiliaryRoutineDefinitionsWithStatus();
+  return result.items;
+}
+
+export async function loadAuxiliaryRoutineDefinitionsWithStatus(): Promise<AuxiliaryRoutineDefinitionsLoadResult> {
   try {
     const teamId = await getCurrentTeamId();
     const { data, error } = await supabase
       .from("team_kv_blobs")
-      .select("data")
+      .select("data,version,updated_at")
       .eq("team_id", teamId)
       .eq("key", AUXILIARY_ROUTINES_KEY)
       .maybeSingle();
 
-    if (!error && Array.isArray(data?.data)) {
-      return data.data
-        .map((item) => normalizeRoutine(item))
-        .filter((item): item is AuxiliaryRoutine => !!item)
-        .sort((a, b) => b.updatedAt - a.updatedAt);
+    if (error) {
+      return {
+        items: [],
+        loadedFromCloud: false,
+        cloudError: formatCloudError(error, "Routine cloud read failed."),
+      };
     }
-  } catch {
-    // Fall back to the synced storage path below.
-  }
 
-  return loadAuxiliaryRoutines();
+    if (Array.isArray(data?.data)) {
+      return {
+        items: data.data
+          .map((item) => normalizeRoutine(item))
+          .filter((item): item is AuxiliaryRoutine => !!item)
+          .sort((a, b) => b.updatedAt - a.updatedAt),
+        loadedFromCloud: true,
+        version: typeof data?.version === "number" ? data.version : undefined,
+        updatedAt: typeof data?.updated_at === "string" ? data.updated_at : undefined,
+      };
+    }
+
+    return {
+      items: [],
+      loadedFromCloud: false,
+      cloudError: "Routine cloud row missing or invalid.",
+      version: typeof data?.version === "number" ? data.version : undefined,
+      updatedAt: typeof data?.updated_at === "string" ? data.updated_at : undefined,
+    };
+  } catch (error: any) {
+    return {
+      items: [],
+      loadedFromCloud: false,
+      cloudError: formatCloudError(error, "Routine cloud read failed."),
+    };
+  }
 }
 
 export async function saveAuxiliaryRoutines(
