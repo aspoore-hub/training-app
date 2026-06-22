@@ -14,12 +14,16 @@ import { containsHttpUrl, LinkifiedText } from "../ui/LinkifiedText";
 import {
   createDrillFolderDraft,
   createDrillLibraryItemDraft,
+  createRoutineFolderDraft,
   loadDrillFolders,
   loadDrillLibraryItems,
+  loadRoutineFolders,
   saveDrillFolders,
   saveDrillLibraryItems,
+  saveRoutineFolders,
   type DrillFolder,
   type DrillLibraryItem,
+  type RoutineFolder,
 } from "../../lib/drillLibrary";
 import { loadCoreCoachSettings } from "../../lib/settings";
 import { getCurrentTeamRole, normalizeTeamRole, type TeamRole } from "../../lib/teamPermissions";
@@ -103,10 +107,12 @@ export function AuxiliaryRoutinesManager() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ManagerTab>("routines");
   const [openCategorySelector, setOpenCategorySelector] = useState<CategoryAssignmentTarget | null>(null);
+  const [routineFolders, setRoutineFolders] = useState<RoutineFolder[]>([]);
   const [drillFolders, setDrillFolders] = useState<DrillFolder[]>([]);
   const [drillLibraryItems, setDrillLibraryItems] = useState<DrillLibraryItem[]>([]);
   const [selectedFolderFilterId, setSelectedFolderFilterId] = useState(ALL_FOLDERS_ID);
-  const [newFolderName, setNewFolderName] = useState("");
+  const [newRoutineFolderName, setNewRoutineFolderName] = useState("");
+  const [newDrillFolderName, setNewDrillFolderName] = useState("");
   const [libraryQuery, setLibraryQuery] = useState("");
   const [libraryFolderFilterId, setLibraryFolderFilterId] = useState(ALL_FOLDERS_ID);
   const [insertPickerOpen, setInsertPickerOpen] = useState(false);
@@ -190,8 +196,8 @@ export function AuxiliaryRoutinesManager() {
   );
 
   const selectedFilterFolder = useMemo(
-    () => drillFolders.find((folder) => folder.id === selectedFolderFilterId) ?? null,
-    [drillFolders, selectedFolderFilterId]
+    () => routineFolders.find((folder) => folder.id === selectedFolderFilterId) ?? null,
+    [routineFolders, selectedFolderFilterId]
   );
 
   const selectedLibraryFilterFolder = useMemo(
@@ -199,7 +205,13 @@ export function AuxiliaryRoutinesManager() {
     [drillFolders, libraryFolderFilterId]
   );
 
-  function folderName(folderId?: string | null) {
+  function routineFolderName(folderId?: string | null) {
+    const id = String(folderId ?? "").trim();
+    if (!id) return "Uncategorized";
+    return routineFolders.find((folder) => folder.id === id)?.name ?? "Uncategorized";
+  }
+
+  function drillFolderName(folderId?: string | null) {
     const id = String(folderId ?? "").trim();
     if (!id) return "Uncategorized";
     return drillFolders.find((folder) => folder.id === id)?.name ?? "Uncategorized";
@@ -295,10 +307,11 @@ export function AuxiliaryRoutinesManager() {
     async (isActive?: () => boolean) => {
       try {
         setLoadError(null);
-        const [role, coreSettings, routines, folders, libraryItems] = await Promise.all([
+        const [role, coreSettings, routines, routineFolderList, drillFolderList, libraryItems] = await Promise.all([
           getCurrentTeamRole(),
           loadCoreCoachSettings(),
           loadAuxiliaryRoutines(),
+          loadRoutineFolders(),
           loadDrillFolders(),
           loadDrillLibraryItems(),
         ]);
@@ -306,7 +319,8 @@ export function AuxiliaryRoutinesManager() {
         setCurrentTeamRole(role);
         setCategories(coreSettings.categories ?? []);
         setAuxiliaryRoutines(routines);
-        setDrillFolders(folders);
+        setRoutineFolders(routineFolderList);
+        setDrillFolders(drillFolderList);
         setDrillLibraryItems(libraryItems);
         const selected = routines.find((routine) => routine.id === selectedRoutineIdRef.current) ?? routines[0] ?? null;
         setSelectedRoutine(selected);
@@ -564,12 +578,49 @@ export function AuxiliaryRoutinesManager() {
     sortedAuxiliaryRoutines,
   ]);
 
-  const createFolder = useCallback(async () => {
+  const createRoutineFolder = useCallback(async () => {
+    if (readOnly) {
+      Alert.alert("Viewer access", "Only Owners and Editors can manage routine folders.");
+      return;
+    }
+    const name = newRoutineFolderName.trim();
+    if (!name) {
+      Alert.alert("Folder name required", "Enter a folder name.");
+      return;
+    }
+    const next = createRoutineFolderDraft(name, routineFolders.length + 1);
+    const updated = [...routineFolders, next].sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    setRoutineFolders(updated);
+    setNewRoutineFolderName("");
+    setSelectedFolderFilterId(next.id);
+    try {
+      await saveRoutineFolders(updated);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      Alert.alert("Folder save failed", message);
+      void loadManagerData();
+    }
+  }, [loadManagerData, newRoutineFolderName, readOnly, routineFolders]);
+
+  const updateRoutineFolderName = useCallback(
+    async (folderId: string, name: string) => {
+      const cleaned = name.trim();
+      if (!cleaned) return;
+      const updated = routineFolders.map((folder) =>
+        folder.id === folderId ? { ...folder, name: cleaned, updatedAt: Date.now() } : folder
+      );
+      setRoutineFolders(updated);
+      await saveRoutineFolders(updated);
+    },
+    [routineFolders]
+  );
+
+  const createDrillFolder = useCallback(async () => {
     if (readOnly) {
       Alert.alert("Viewer access", "Only Owners and Editors can manage drill folders.");
       return;
     }
-    const name = newFolderName.trim();
+    const name = newDrillFolderName.trim();
     if (!name) {
       Alert.alert("Folder name required", "Enter a folder name.");
       return;
@@ -577,8 +628,7 @@ export function AuxiliaryRoutinesManager() {
     const next = createDrillFolderDraft(name, drillFolders.length + 1);
     const updated = [...drillFolders, next].sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
     setDrillFolders(updated);
-    setNewFolderName("");
-    setSelectedFolderFilterId(next.id);
+    setNewDrillFolderName("");
     setLibraryFolderFilterId(next.id);
     try {
       await saveDrillFolders(updated);
@@ -587,9 +637,9 @@ export function AuxiliaryRoutinesManager() {
       Alert.alert("Folder save failed", message);
       void loadManagerData();
     }
-  }, [drillFolders, loadManagerData, newFolderName, readOnly]);
+  }, [drillFolders, loadManagerData, newDrillFolderName, readOnly]);
 
-  const updateFolderName = useCallback(
+  const updateDrillFolderName = useCallback(
     async (folderId: string, name: string) => {
       const cleaned = name.trim();
       if (!cleaned) return;
@@ -951,13 +1001,13 @@ export function AuxiliaryRoutinesManager() {
 
               <View style={styles.newFolderRow}>
                 <TextInput
-                  value={newFolderName}
-                  onChangeText={setNewFolderName}
-                  placeholder="New folder"
+                  value={newRoutineFolderName}
+                  onChangeText={setNewRoutineFolderName}
+                  placeholder="New routine folder"
                   style={[styles.compactInput, readOnly && styles.inputDisabled]}
                   editable={!readOnly}
                 />
-                <Pressable onPress={() => void createFolder()} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
+                <Pressable onPress={() => void createRoutineFolder()} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
                   <Text style={styles.smallActionBtnText}>Add</Text>
                 </Pressable>
               </View>
@@ -966,7 +1016,7 @@ export function AuxiliaryRoutinesManager() {
                 {[
                   { id: ALL_FOLDERS_ID, name: "All" },
                   { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
-                  ...drillFolders,
+                  ...routineFolders,
                 ].map((folder) => {
                   const active = selectedFolderFilterId === folder.id;
                   return (
@@ -986,8 +1036,8 @@ export function AuxiliaryRoutinesManager() {
                   <Text style={styles.label}>Rename selected routine folder</Text>
                   <TextInput
                     defaultValue={selectedFilterFolder.name}
-                    onSubmitEditing={(event) => void updateFolderName(selectedFilterFolder.id, event.nativeEvent.text)}
-                    onEndEditing={(event) => void updateFolderName(selectedFilterFolder.id, event.nativeEvent.text)}
+                    onSubmitEditing={(event) => void updateRoutineFolderName(selectedFilterFolder.id, event.nativeEvent.text)}
+                    onEndEditing={(event) => void updateRoutineFolderName(selectedFilterFolder.id, event.nativeEvent.text)}
                     style={styles.compactInput}
                   />
                 </View>
@@ -1012,7 +1062,7 @@ export function AuxiliaryRoutinesManager() {
                         {routine.title || "Routine"}
                       </Text>
                       <Text style={styles.listRowMeta}>
-                        {folderName(routine.folderId)} • {preCount} pre • {postCount} post
+                        {routineFolderName(routine.folderId)} • {preCount} pre • {postCount} post
                       </Text>
                     </Pressable>
                   );
@@ -1043,7 +1093,7 @@ export function AuxiliaryRoutinesManager() {
 
                 <Text style={[styles.label, { marginTop: 10 }]}>Routine folder</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
-                  {[{ id: "", name: "Uncategorized" }, ...drillFolders].map((folder) => {
+                  {[{ id: "", name: "Uncategorized" }, ...routineFolders].map((folder) => {
                     const folderId = String(folder.id ?? "").trim() || null;
                     const active = (auxiliaryFolderIdDraft ?? null) === folderId;
                     return (
@@ -1127,7 +1177,7 @@ export function AuxiliaryRoutinesManager() {
                             <View key={`insert-drill-${item.id}`} style={styles.insertRow}>
                               <View style={{ flex: 1, minWidth: 0 }}>
                                 <Text style={styles.drillRowTitle}>{item.name}</Text>
-                                <Text style={styles.drillRowMeta}>{folderName(item.folderId)}</Text>
+                                <Text style={styles.drillRowMeta}>{drillFolderName(item.folderId)}</Text>
                                 {item.defaultDetails ? (
                                   <Text numberOfLines={2} style={styles.drillRowDetails}>{item.defaultDetails}</Text>
                                 ) : null}
@@ -1369,13 +1419,13 @@ export function AuxiliaryRoutinesManager() {
 
               <View style={styles.newFolderRow}>
                 <TextInput
-                  value={newFolderName}
-                  onChangeText={setNewFolderName}
-                  placeholder="New folder"
+                  value={newDrillFolderName}
+                  onChangeText={setNewDrillFolderName}
+                  placeholder="New drill folder"
                   style={[styles.compactInput, readOnly && styles.inputDisabled]}
                   editable={!readOnly}
                 />
-                <Pressable onPress={() => void createFolder()} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
+                <Pressable onPress={() => void createDrillFolder()} disabled={readOnly} style={[styles.smallActionBtn, readOnly && styles.disabledBtn]}>
                   <Text style={styles.smallActionBtnText}>Add</Text>
                 </Pressable>
               </View>
@@ -1411,8 +1461,8 @@ export function AuxiliaryRoutinesManager() {
                   <Text style={styles.label}>Rename selected drill folder</Text>
                   <TextInput
                     defaultValue={selectedLibraryFilterFolder.name}
-                    onSubmitEditing={(event) => void updateFolderName(selectedLibraryFilterFolder.id, event.nativeEvent.text)}
-                    onEndEditing={(event) => void updateFolderName(selectedLibraryFilterFolder.id, event.nativeEvent.text)}
+                    onSubmitEditing={(event) => void updateDrillFolderName(selectedLibraryFilterFolder.id, event.nativeEvent.text)}
+                    onEndEditing={(event) => void updateDrillFolderName(selectedLibraryFilterFolder.id, event.nativeEvent.text)}
                     style={styles.compactInput}
                   />
                 </View>
@@ -1432,7 +1482,7 @@ export function AuxiliaryRoutinesManager() {
                       style={[styles.drillRow, active && styles.drillRowActive]}
                     >
                       <Text style={styles.drillRowTitle}>{item.name}</Text>
-                      <Text style={styles.drillRowMeta}>{folderName(item.folderId)}</Text>
+                      <Text style={styles.drillRowMeta}>{drillFolderName(item.folderId)}</Text>
                       {item.defaultDetails ? (
                         <Text numberOfLines={2} style={styles.drillRowDetails}>{item.defaultDetails}</Text>
                       ) : null}

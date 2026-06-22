@@ -3,6 +3,7 @@ import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
 import type { PostgrestError } from "@supabase/supabase-js";
 import { requireTeamPermission } from "./teamPermissions";
+import { ensureLegacyMileageVisibilityFromSeasonWeek } from "./seasonWeekVisibility";
 
 const DEBUG_MILEAGE_CLOUD = false;
 function debugMileageCloud(...args: unknown[]) {
@@ -241,26 +242,11 @@ export async function ensureHiddenMileageWeekVisibility(
   if (!athleteProfileId) throw new Error("ensureHiddenMileageWeekVisibility: missing athleteProfileId");
   const teamId = await getCurrentTeamId();
   const cleanWeekStartISO = normalizeWeekStartISO(weekStartISO);
-  const userId = await getUserIdOrNull();
-  const now = new Date().toISOString();
-  const { error: insertError } = await supabase
-    .from("team_mileage_week_visibility")
-    .upsert({
-      team_id: teamId,
-      athlete_profile_id: athleteProfileId,
-      week_start_iso: cleanWeekStartISO,
-      athlete_visible: false,
-      athlete_visible_updated_at: now,
-      published_at: null,
-      hidden_at: now,
-      updated_by: userId,
-      updated_at: now,
-    }, {
-      onConflict: "team_id,athlete_profile_id,week_start_iso",
-      ignoreDuplicates: true,
-    });
-
-  if (insertError) throw insertError;
+  await ensureLegacyMileageVisibilityFromSeasonWeek({
+    teamId,
+    athleteId: athleteProfileId,
+    weekStartISO: cleanWeekStartISO,
+  });
 }
 
 export async function setMileageVisibilityByWeeks(input: {

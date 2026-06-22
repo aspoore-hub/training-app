@@ -1,6 +1,7 @@
 import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
 import { requireTeamPermission } from "./teamPermissions";
+import { loadInheritedSeasonWeekVisibilityForWorkoutRows } from "./seasonWeekVisibility";
 
 // Authoritative workout source: team_workouts.
 // Do not add alternative workout read/write paths for this domain.
@@ -45,32 +46,7 @@ async function loadInheritedWorkoutWeekVisibility(
   teamId: string,
   rows: TeamWorkoutInsertInput[]
 ): Promise<Map<string, boolean>> {
-  const athleteIds = Array.from(new Set(
-    rows.map((row) => String(row.athlete_profile_id ?? "").trim()).filter(Boolean)
-  ));
-  const weekStartISOs = Array.from(new Set(
-    rows.flatMap((row) => possibleWorkoutWeekStartISOs(row.date_iso))
-  ));
-
-  const byAthleteAndWeek = new Map<string, boolean>();
-  if (athleteIds.length === 0 || weekStartISOs.length === 0) return byAthleteAndWeek;
-
-  const { data, error } = await supabase
-    .from("team_mileage_week_visibility")
-    .select("athlete_profile_id,week_start_iso,athlete_visible")
-    .eq("team_id", teamId)
-    .in("athlete_profile_id", athleteIds)
-    .in("week_start_iso", weekStartISOs);
-
-  if (error) throw error;
-
-  for (const row of data ?? []) {
-    const athleteId = String((row as any).athlete_profile_id ?? "").trim();
-    const weekStartISO = String((row as any).week_start_iso ?? "").trim();
-    if (!athleteId || !weekStartISO) continue;
-    byAthleteAndWeek.set(workoutWeekVisibilityKey(athleteId, weekStartISO), !!(row as any).athlete_visible);
-  }
-  return byAthleteAndWeek;
+  return loadInheritedSeasonWeekVisibilityForWorkoutRows(teamId, rows, 1);
 }
 
 export type TeamWorkoutRow = {

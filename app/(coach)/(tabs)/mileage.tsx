@@ -49,11 +49,10 @@ import {
 } from "../../../lib/workoutEntryParser";
 import {
   fetchMileageWeekVisibilityForWeek,
-  setMileageVisibilityByDateRange,
-  setMileageVisibilityByWeeks,
   type MileageWeekVisibilityRow,
 } from "../../../lib/mileageCloud";
-import { listTeamWorkoutsInRange, setWorkoutVisibilityByDateRange, type TeamWorkoutRow } from "../../../lib/teamWorkoutsCloud";
+import { listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../../lib/teamWorkoutsCloud";
+import { setSeasonWeekVisibility, setSeasonWeekVisibilityByDateRange } from "../../../lib/seasonWeekVisibility";
 import { canEditMileage, canExport, canPublishTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -1548,14 +1547,20 @@ export default function CoachMileageTab() {
   }, [teamWeekVisibleAthletes, weekVisibilityRows]);
 
   const setDisplayedMileageWeekVisibility = useCallback(async (visible: boolean) => {
-    const athleteIds = teamWeekVisibleAthletes.map((athlete) => String(athlete.id ?? "").trim()).filter(Boolean);
-    if (athleteIds.length === 0) return;
+    const seasonId = String(selectedSeason?.id ?? "").trim();
+    if (!seasonId) {
+      Alert.alert("Select a season", "Choose a season before publishing or hiding a week.");
+      return;
+    }
     setWeekVisibilityBusy(true);
     try {
-      await Promise.all([
-        setMileageVisibilityByWeeks({ athleteIds, weekStartISOs: [weekStartISO], visible }),
-        setWorkoutVisibilityByDateRange({ startISO: weekStartISO, endISO: weekEndISO, athleteIds, visible }),
-      ]);
+      await setSeasonWeekVisibility({
+        seasonId,
+        weekStartISO,
+        visible,
+        includeMileage: true,
+        includeWorkouts: true,
+      });
       await refreshMileageWeekVisibility();
       setActionBannerText(visible ? "Published this week to athletes." : "Hid this week from athletes.");
     } catch (error: any) {
@@ -1563,7 +1568,7 @@ export default function CoachMileageTab() {
     } finally {
       setWeekVisibilityBusy(false);
     }
-  }, [refreshMileageWeekVisibility, teamWeekVisibleAthletes, weekEndISO, weekStartISO]);
+  }, [refreshMileageWeekVisibility, selectedSeason, weekStartISO]);
 
   const openTrainingVisibilityModal = useCallback((content: TrainingVisibilityContent = "both") => {
     setTrainingVisibilityContent(content);
@@ -1578,7 +1583,6 @@ export default function CoachMileageTab() {
     const visible = trainingVisibilityAction === "publish";
     const includeWorkouts = trainingVisibilityContent === "workouts" || trainingVisibilityContent === "both";
     const includeMileage = trainingVisibilityContent === "mileage" || trainingVisibilityContent === "both";
-    const athleteIds = teamWeekVisibleAthletes.map((athlete) => String(athlete.id ?? "").trim()).filter(Boolean);
     const weekStartsOnForMileage = weekStartsOn === 0 ? 0 : 1;
     setTrainingVisibilityError(null);
 
@@ -1587,8 +1591,8 @@ export default function CoachMileageTab() {
       Alert.alert(title, message);
     };
 
-    if (athleteIds.length === 0) {
-      showValidation("No athletes", "There are no athletes in the current Team Week scope.");
+    if (!selectedSeason) {
+      showValidation("No season selected", "Select a season before applying visibility.");
       return;
     }
     if (trainingVisibilityRange === "custom") {
@@ -1599,36 +1603,7 @@ export default function CoachMileageTab() {
         return;
       }
     }
-    if (trainingVisibilityRange === "season" && !selectedSeason) {
-      showValidation("No season selected", "Select a season before applying visibility.");
-      return;
-    }
-
-    const seasonWindows: Array<{ athleteId: string; startISO: string; endISO: string }> = [];
-    let targetAthleteCount = athleteIds.length;
-    if (trainingVisibilityRange === "season" && selectedSeason) {
-      const seasonId = String(selectedSeason.id ?? "").trim();
-      if (!seasonId) {
-        showValidation("No season selected", "Select a season before applying visibility.");
-        return;
-      }
-      const rosterById = new Map((s.roster ?? []).map((athlete) => [String(athlete?.id ?? "").trim(), athlete]));
-      for (const athleteId of athleteIds) {
-        if (isAthleteExcludedFromSeason(athleteId, seasonId, s.athleteSeasonOverrides ?? [])) continue;
-        const athlete = rosterById.get(athleteId) ?? null;
-        const override = athleteSeasonOverridesBySeasonAndAthlete.get(`${seasonId}:${athleteId}`) ?? null;
-        const resolved = resolveAthleteSeasonWindowWithTenure(athlete as any, selectedSeason as any, override as any);
-        const startISO = String(resolved.start_date ?? "").trim();
-        const endISO = String(resolved.end_date ?? "").trim();
-        if (!isValidISODate(startISO) || !isValidISODate(endISO) || startISO > endISO) continue;
-        seasonWindows.push({ athleteId, startISO, endISO });
-      }
-      targetAthleteCount = seasonWindows.length;
-      if (seasonWindows.length === 0) {
-        showValidation("No eligible athletes", "No eligible athletes found for this season.");
-        return;
-      }
-    }
+    let targetAthleteCount = 0;
 
     if (!includeWorkouts && !includeMileage) {
       showValidation("Choose training", "Select workouts, mileage, or both.");
@@ -1638,41 +1613,30 @@ export default function CoachMileageTab() {
     const run = async () => {
       setTrainingVisibilityApplying(true);
       try {
-        let mileageRows = 0;
-        let workoutRows = 0;
-        if (trainingVisibilityRange === "season" && selectedSeason) {
-          for (const { athleteId, startISO, endISO } of seasonWindows) {
-            if (includeWorkouts) {
-              workoutRows += await setWorkoutVisibilityByDateRange({ startISO, endISO, athleteIds: [athleteId], visible });
-            }
-            if (includeMileage) {
-              const result = await setMileageVisibilityByDateRange({
-                athleteIds: [athleteId],
-                startISO,
-                endISO,
-                visible,
-                weekStartsOn: weekStartsOnForMileage,
-              });
-              mileageRows += result.rowCount;
-            }
-          }
-        } else {
-          const startISO = trainingVisibilityRange === "week" ? weekStartISO : String(trainingVisibilityStartISO ?? "").trim();
-          const endISO = trainingVisibilityRange === "week" ? weekEndISO : String(trainingVisibilityEndISO ?? "").trim();
-          if (includeWorkouts) {
-            workoutRows = await setWorkoutVisibilityByDateRange({ startISO, endISO, athleteIds, visible });
-          }
-          if (includeMileage) {
-            const result = await setMileageVisibilityByDateRange({
-              athleteIds,
-              startISO,
-              endISO,
-              visible,
-              weekStartsOn: weekStartsOnForMileage,
-            });
-            mileageRows = result.rowCount;
-          }
-        }
+        const startISO =
+          trainingVisibilityRange === "season"
+            ? String(selectedSeason.start_date ?? "").trim()
+            : trainingVisibilityRange === "week"
+              ? weekStartISO
+              : String(trainingVisibilityStartISO ?? "").trim();
+        const endISO =
+          trainingVisibilityRange === "season"
+            ? String(selectedSeason.end_date ?? "").trim()
+            : trainingVisibilityRange === "week"
+              ? weekEndISO
+              : String(trainingVisibilityEndISO ?? "").trim();
+        const result = await setSeasonWeekVisibilityByDateRange({
+          seasonId: String(selectedSeason.id ?? "").trim(),
+          startISO,
+          endISO,
+          visible,
+          weekStartsOn: weekStartsOnForMileage,
+          includeWorkouts,
+          includeMileage,
+        });
+        const mileageRows = result.mileageRows;
+        const workoutRows = result.workoutRows;
+        targetAthleteCount = result.athleteCount;
 
         if ((includeWorkouts ? workoutRows : 0) === 0 && (includeMileage ? mileageRows : 0) === 0) {
           const message =
@@ -1702,7 +1666,7 @@ export default function CoachMileageTab() {
           content: trainingVisibilityContent,
           action: trainingVisibilityAction,
           selectedSeasonId: selectedSeason ? String(selectedSeason.id ?? "") : null,
-          athleteCount: athleteIds.length,
+          athleteCount: targetAthleteCount,
           error,
         });
         setTrainingVisibilityError(message);
@@ -1723,12 +1687,8 @@ export default function CoachMileageTab() {
       { text: visible ? "Publish" : "Hide", style: visible ? "default" : "destructive", onPress: () => void run() },
     ]);
   }, [
-    athleteSeasonOverridesBySeasonAndAthlete,
     refreshMileageWeekVisibility,
-    s.athleteSeasonOverrides,
-    s.roster,
     selectedSeason,
-    teamWeekVisibleAthletes,
     trainingVisibilityAction,
     trainingVisibilityContent,
     trainingVisibilityEndISO,
@@ -4670,19 +4630,19 @@ export default function CoachMileageTab() {
                 <Button
                   title="Visibility"
                   variant="secondary"
-                  disabled={weekVisibilityBusy || teamWeekVisibleAthletes.length === 0}
+                  disabled={weekVisibilityBusy}
                   onPress={() => openTrainingVisibilityModal("both")}
                 />
                 <Button
                   title={weekVisibilityBusy ? "Publishing..." : "Publish Week"}
                   variant="secondary"
-                  disabled={weekVisibilityBusy || teamWeekVisibleAthletes.length === 0}
+                  disabled={weekVisibilityBusy}
                   onPress={() => void setDisplayedMileageWeekVisibility(true)}
                 />
                 <Button
                   title={weekVisibilityBusy ? "Hiding..." : "Hide Week"}
                   variant="secondary"
-                  disabled={weekVisibilityBusy || teamWeekVisibleAthletes.length === 0}
+                  disabled={weekVisibilityBusy}
                   onPress={() => void setDisplayedMileageWeekVisibility(false)}
                 />
               </View>
@@ -5586,7 +5546,7 @@ export default function CoachMileageTab() {
             >
               <Text style={{ fontSize: 18, fontWeight: "900", color: colors.text }}>Training Visibility</Text>
               <Text style={{ fontSize: 12, fontWeight: "700", color: colors.mutedText }}>
-                Current scope: {teamWeekVisibleAthletes.length} Team Week athlete{teamWeekVisibleAthletes.length === 1 ? "" : "s"}.
+                Visibility applies to eligible athletes in the selected season and week range.
               </Text>
 
               <Text style={{ fontSize: 11, fontWeight: "900", color: colors.mutedText }}>Action</Text>

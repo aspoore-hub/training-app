@@ -4,11 +4,24 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { AccountContextSelector } from "../../components/account/AccountContextSelector";
 import { AthleteRoutineDetails, getRoutinePreviewText } from "../../components/athlete/AthleteRoutineDetails";
+import { LinkifiedText } from "../../components/ui/LinkifiedText";
 import { getActiveAccountContext } from "../../lib/accountContexts";
 import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../lib/auxiliaryRoutines";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
-import { loadDrillLibraryItems, type DrillLibraryItem } from "../../lib/drillLibrary";
+import {
+  loadDrillFolders,
+  loadDrillLibraryItems,
+  loadRoutineFolders,
+  type DrillFolder,
+  type DrillLibraryItem,
+  type RoutineFolder,
+} from "../../lib/drillLibrary";
 import { supabase } from "../../lib/supabase";
+
+type LibraryTab = "routines" | "drills";
+
+const ALL_FOLDERS_ID = "__all__";
+const UNCATEGORIZED_FOLDER_ID = "__uncategorized__";
 
 function uniqueRoutineTags(routine: AuxiliaryRoutine): string[] {
   return Array.from(
@@ -30,11 +43,18 @@ function formatUpdatedAt(value: number): string {
 export default function AthleteWarmupsScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<LibraryTab>("routines");
   const [routines, setRoutines] = useState<AuxiliaryRoutine[]>([]);
+  const [routineFolders, setRoutineFolders] = useState<RoutineFolder[]>([]);
+  const [drillFolders, setDrillFolders] = useState<DrillFolder[]>([]);
+  const [drillItems, setDrillItems] = useState<DrillLibraryItem[]>([]);
   const [drillById, setDrillById] = useState<Map<string, DrillLibraryItem>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [routineFolderFilterId, setRoutineFolderFilterId] = useState(ALL_FOLDERS_ID);
+  const [drillFolderFilterId, setDrillFolderFilterId] = useState(ALL_FOLDERS_ID);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [expandedDrillIds, setExpandedDrillIds] = useState<Set<string>>(new Set());
   const [accountEmail, setAccountEmail] = useState<string | null>(null);
   const [athleteName, setAthleteName] = useState<string | null>(null);
   const [teamName, setTeamName] = useState<string | null>(null);
@@ -43,10 +63,12 @@ export default function AthleteWarmupsScreen() {
     setLoading(true);
     setError(null);
     try {
-      const [session, userResult, routineList, drillItems] = await Promise.all([
+      const [session, userResult, routineList, routineFolderList, drillFolderList, loadedDrillItems] = await Promise.all([
         resolveAthleteSessionContext(true),
         supabase.auth.getUser(),
         loadAuxiliaryRoutineDefinitions(),
+        loadRoutineFolders(),
+        loadDrillFolders(),
         loadDrillLibraryItems(),
       ]);
       const accountContext = await getActiveAccountContext();
@@ -54,14 +76,30 @@ export default function AthleteWarmupsScreen() {
       setAccountEmail(userResult.data.user?.email ?? null);
       setTeamName(String(accountContext?.teamName ?? "").trim() || null);
       setRoutines(routineList);
-      setDrillById(new Map(drillItems.map((drill) => [drill.id, drill] as const)));
+      setRoutineFolders(routineFolderList);
+      setDrillFolders(drillFolderList);
+      setDrillItems(loadedDrillItems);
+      setDrillById(new Map(loadedDrillItems.map((drill) => [drill.id, drill] as const)));
     } catch (err: any) {
       setError(String(err?.message ?? err ?? "Could not load warmups and drills."));
       setRoutines([]);
+      setDrillItems([]);
     } finally {
       setLoading(false);
     }
   }, []);
+
+  function routineFolderName(folderId?: string | null) {
+    const id = String(folderId ?? "").trim();
+    if (!id) return "Uncategorized";
+    return routineFolders.find((folder) => folder.id === id)?.name ?? "Uncategorized";
+  }
+
+  function drillFolderName(folderId?: string | null) {
+    const id = String(folderId ?? "").trim();
+    if (!id) return "Uncategorized";
+    return drillFolders.find((folder) => folder.id === id)?.name ?? "Uncategorized";
+  }
 
   useFocusEffect(
     useCallback(() => {
@@ -71,17 +109,44 @@ export default function AthleteWarmupsScreen() {
 
   const filteredRoutines = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return routines;
     return routines.filter((routine) => {
+      const folderId = String(routine.folderId ?? "").trim();
+      const folderMatches =
+        routineFolderFilterId === ALL_FOLDERS_ID ||
+        (routineFolderFilterId === UNCATEGORIZED_FOLDER_ID ? !folderId : folderId === routineFolderFilterId);
+      if (!folderMatches) return false;
+      if (!needle) return true;
       const haystack = [
         routine.title,
+        routine.description,
         routine.details,
+        routineFolderName(routine.folderId),
         getRoutinePreviewText(routine, drillById),
         ...uniqueRoutineTags(routine),
       ].join(" ").toLowerCase();
       return haystack.includes(needle);
     });
-  }, [drillById, query, routines]);
+  }, [drillById, query, routineFolderFilterId, routineFolders, routines]);
+
+  const filteredDrills = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return drillItems.filter((drill) => {
+      const folderId = String(drill.folderId ?? "").trim();
+      const folderMatches =
+        drillFolderFilterId === ALL_FOLDERS_ID ||
+        (drillFolderFilterId === UNCATEGORIZED_FOLDER_ID ? !folderId : folderId === drillFolderFilterId);
+      if (!folderMatches) return false;
+      if (!needle) return true;
+      const haystack = [
+        drill.name,
+        drill.defaultDetails,
+        drill.videoUrl,
+        drillFolderName(drill.folderId),
+        ...(drill.categoryNames ?? []),
+      ].join(" ").toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [drillFolderFilterId, drillFolders, drillItems, query]);
 
   const allTags = useMemo(() => {
     return Array.from(new Set(routines.flatMap((routine) => uniqueRoutineTags(routine)))).sort((a, b) => a.localeCompare(b));
@@ -89,6 +154,15 @@ export default function AthleteWarmupsScreen() {
 
   function toggleExpanded(id: string) {
     setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleDrillExpanded(id: string) {
+    setExpandedDrillIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -147,7 +221,64 @@ export default function AthleteWarmupsScreen() {
         ) : null}
       </View>
 
-      {allTags.length > 0 ? (
+      <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+        {([
+          ["routines", "Routines"],
+          ["drills", "Drills"],
+        ] as Array<[LibraryTab, string]>).map(([tab, label]) => {
+          const active = activeTab === tab;
+          return (
+            <Pressable
+              key={tab}
+              onPress={() => setActiveTab(tab)}
+              style={{
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: active ? "#1d4ed8" : "#cbd5e1",
+                backgroundColor: active ? "#1d4ed8" : "#ffffff",
+                paddingHorizontal: 14,
+                paddingVertical: 9,
+              }}
+            >
+              <Text style={{ color: active ? "#ffffff" : "#334155", fontSize: 13, fontWeight: "900" }}>{label}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+        {[
+          { id: ALL_FOLDERS_ID, name: "All" },
+          { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
+          ...(activeTab === "routines" ? routineFolders : drillFolders),
+        ].map((folder) => {
+          const active =
+            activeTab === "routines"
+              ? routineFolderFilterId === folder.id
+              : drillFolderFilterId === folder.id;
+          return (
+            <Pressable
+              key={`${activeTab}-folder-${folder.id}`}
+              onPress={() => {
+                if (activeTab === "routines") setRoutineFolderFilterId(folder.id);
+                else setDrillFolderFilterId(folder.id);
+              }}
+              style={{
+                borderRadius: 999,
+                borderWidth: 1,
+                borderColor: active ? "#2563eb" : "#cbd5e1",
+                backgroundColor: active ? "#eff6ff" : "#ffffff",
+                paddingHorizontal: 10,
+                paddingVertical: 7,
+              }}
+            >
+              <Text style={{ color: "#334155", fontSize: 12, fontWeight: "900" }}>{folder.name}</Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+
+      {activeTab === "routines" && allTags.length > 0 ? (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
           {allTags.slice(0, 12).map((tag) => (
             <Pressable
@@ -209,7 +340,7 @@ export default function AthleteWarmupsScreen() {
             <Text style={{ color: "#ffffff", fontWeight: "900" }}>Retry</Text>
           </Pressable>
         </View>
-      ) : filteredRoutines.length === 0 ? (
+      ) : activeTab === "routines" && filteredRoutines.length === 0 ? (
         <View
           style={{
             borderRadius: 14,
@@ -221,21 +352,42 @@ export default function AthleteWarmupsScreen() {
           }}
         >
           <Text style={{ fontSize: 18, fontWeight: "900", color: "#0f172a" }}>
-            {routines.length === 0 ? "No warmups or drills have been added yet." : "No routines match that search."}
+            {routines.length === 0 ? "No routines have been added yet." : "No routines match that search."}
           </Text>
           <Text style={{ color: "#64748b", lineHeight: 20 }}>
             {routines.length === 0
               ? "When your coach adds routines, they will appear here."
-              : "Try searching by routine name, details, or tag."}
+              : "Try searching by routine name, details, folder, or tag."}
           </Text>
         </View>
-      ) : (
+      ) : activeTab === "drills" && filteredDrills.length === 0 ? (
+        <View
+          style={{
+            borderRadius: 14,
+            borderWidth: 1,
+            borderColor: "#e2e8f0",
+            backgroundColor: "#ffffff",
+            padding: 18,
+            gap: 8,
+          }}
+        >
+          <Text style={{ fontSize: 18, fontWeight: "900", color: "#0f172a" }}>
+            {drillItems.length === 0 ? "No drills have been added yet." : "No drills match that search."}
+          </Text>
+          <Text style={{ color: "#64748b", lineHeight: 20 }}>
+            {drillItems.length === 0
+              ? "When your coach adds individual drills, they will appear here."
+              : "Try searching by drill name, cues, video link, or folder."}
+          </Text>
+        </View>
+      ) : activeTab === "routines" ? (
         <View style={{ gap: 10 }}>
           {filteredRoutines.map((routine) => {
             const expanded = expandedIds.has(routine.id);
             const tags = uniqueRoutineTags(routine);
             const updatedLabel = formatUpdatedAt(routine.updatedAt);
             const details = getRoutinePreviewText(routine, drillById);
+            const folderLabel = routineFolderName(routine.folderId);
             return (
               <View
                 key={routine.id}
@@ -254,6 +406,7 @@ export default function AthleteWarmupsScreen() {
                   <View style={{ flexDirection: "row", gap: 10, alignItems: "flex-start" }}>
                     <View style={{ flex: 1, gap: 5 }}>
                       <Text style={{ fontSize: 17, fontWeight: "900", color: "#0f172a" }}>{routine.title}</Text>
+                      <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900" }}>{folderLabel}</Text>
                       {details ? (
                         expanded ? (
                           <AthleteRoutineDetails routine={routine} drillById={drillById} />
@@ -287,6 +440,47 @@ export default function AthleteWarmupsScreen() {
                       ) : null}
                     </View>
                   ) : null}
+                </Pressable>
+              </View>
+            );
+          })}
+        </View>
+      ) : (
+        <View style={{ gap: 10 }}>
+          {filteredDrills.map((drill) => {
+            const expanded = expandedDrillIds.has(drill.id);
+            const details = String(drill.defaultDetails ?? "").trim();
+            const videoUrl = String(drill.videoUrl ?? "").trim();
+            const folderLabel = drillFolderName(drill.folderId);
+            return (
+              <View
+                key={drill.id}
+                style={{
+                  borderRadius: 14,
+                  borderWidth: 1,
+                  borderColor: expanded ? "#bfdbfe" : "#e2e8f0",
+                  backgroundColor: "#ffffff",
+                  overflow: "hidden",
+                }}
+              >
+                <Pressable onPress={() => toggleDrillExpanded(drill.id)} style={{ padding: 14, gap: 10 }}>
+                  <View style={{ flexDirection: "row", gap: 10, alignItems: "flex-start" }}>
+                    <View style={{ flex: 1, gap: 6 }}>
+                      <Text style={{ fontSize: 17, fontWeight: "900", color: "#0f172a" }}>{drill.name}</Text>
+                      <Text style={{ color: "#64748b", fontSize: 12, fontWeight: "900" }}>{folderLabel}</Text>
+                      {details ? (
+                        expanded ? (
+                          <LinkifiedText text={details} style={{ color: "#475569", lineHeight: 20 }} />
+                        ) : (
+                          <Text numberOfLines={2} style={{ color: "#475569", lineHeight: 20 }}>{details}</Text>
+                        )
+                      ) : (
+                        <Text style={{ color: "#94a3b8", fontWeight: "700" }}>No cues added.</Text>
+                      )}
+                      {videoUrl ? <LinkifiedText text={videoUrl} style={{ color: "#2563eb", fontSize: 12, fontWeight: "900" }} /> : null}
+                    </View>
+                    <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={20} color="#64748b" />
+                  </View>
                 </Pressable>
               </View>
             );

@@ -2,6 +2,7 @@ import { loadJSON, saveJSON } from "./storage";
 
 export const DRILL_FOLDERS_KEY = "training_app_drill_folders_v1";
 export const DRILL_LIBRARY_KEY = "training_app_drill_library_v1";
+export const ROUTINE_FOLDERS_KEY = "training_app_routine_folders_v1";
 
 export type DrillFolder = {
   id: string;
@@ -10,6 +11,8 @@ export type DrillFolder = {
   createdAt: number;
   updatedAt: number;
 };
+
+export type RoutineFolder = DrillFolder;
 
 export type DrillLibraryItem = {
   id: string;
@@ -81,6 +84,26 @@ export async function saveDrillFolders(list: DrillFolder[]) {
   await saveJSON(DRILL_FOLDERS_KEY, list);
 }
 
+export async function loadRoutineFolders(): Promise<RoutineFolder[]> {
+  const raw = await loadJSON<any[]>(ROUTINE_FOLDERS_KEY, []);
+  const normalized = Array.isArray(raw)
+    ? raw
+        .map((item) => normalizeFolder(item))
+        .filter((item): item is RoutineFolder => !!item)
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+    : [];
+  if (normalized.length > 0) return normalized;
+
+  // Backward compatibility: routine folders used to share the drill folder key.
+  // Preserve old routine.folderId references by treating legacy drill folders as
+  // routine folders until the new routine-folder key is saved.
+  return loadDrillFolders();
+}
+
+export async function saveRoutineFolders(list: RoutineFolder[]) {
+  await saveJSON(ROUTINE_FOLDERS_KEY, list);
+}
+
 export async function loadDrillLibraryItems(): Promise<DrillLibraryItem[]> {
   const raw = await loadJSON<any[]>(DRILL_LIBRARY_KEY, []);
   if (!Array.isArray(raw)) return [];
@@ -98,6 +121,17 @@ export function createDrillFolderDraft(name = "New Folder", sortOrder = Date.now
   const now = Date.now();
   return {
     id: createId("drill_folder"),
+    name,
+    sortOrder,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createRoutineFolderDraft(name = "New Folder", sortOrder = Date.now()): RoutineFolder {
+  const now = Date.now();
+  return {
+    id: createId("routine_folder"),
     name,
     sortOrder,
     createdAt: now,
