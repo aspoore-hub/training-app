@@ -1431,6 +1431,7 @@ export default function CoachCalendarMonth() {
     Record<string, Partial<Record<WeeklyBatchEditableField, boolean>>>
   >({});
   const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const [currentTeamRoleLoaded, setCurrentTeamRoleLoaded] = useState(false);
 
   const weeklyBatchDraftsRef = useRef<Record<string, WeeklyBatchDraft>>({});
   const weeklyBatchDirtyFieldsRef = useRef<Record<string, Partial<Record<WeeklyBatchEditableField, boolean>>>>({});
@@ -1447,8 +1448,8 @@ export default function CoachCalendarMonth() {
   const inFlightCalendarFetchKeyRef = useRef<string | null>(null);
 
   const isWebDesktop = Platform.OS === "web";
-  const canEditCalendarTraining = canEditTraining(currentTeamRole);
-  const canPublishCalendarTraining = canPublishTraining(currentTeamRole);
+  const canEditCalendarTraining = currentTeamRoleLoaded ? canEditTraining(currentTeamRole) : true;
+  const canPublishCalendarTraining = currentTeamRoleLoaded ? canPublishTraining(currentTeamRole) : true;
   const canExportCalendar = canExport(currentTeamRole);
   const todayISO = useMemo(() => toISODate(new Date()), []);
   const selectedTrainingGroupIds = teamStore.sharedSelectedTrainingGroupIds;
@@ -1458,11 +1459,17 @@ export default function CoachCalendarMonth() {
     let active = true;
     getCurrentTeamRole()
       .then((role) => {
-        if (active) setCurrentTeamRole(role);
+        if (active) {
+          setCurrentTeamRole(role);
+          setCurrentTeamRoleLoaded(true);
+        }
       })
       .catch((error) => {
         console.warn("[coach-calendar] role load failed", error);
-        if (active) setCurrentTeamRole(null);
+        if (active) {
+          setCurrentTeamRole(null);
+          setCurrentTeamRoleLoaded(true);
+        }
       });
     return () => {
       active = false;
@@ -2902,7 +2909,7 @@ export default function CoachCalendarMonth() {
     }
     try {
       router.push({
-        pathname: "/(coach)/(tabs)/planner",
+        pathname: "/(coach)/workouts",
         params: { date: targetDateISO },
       });
     } catch (error: any) {

@@ -1525,7 +1525,8 @@ export default function CoachWorkoutsDay() {
   const [creatingBatch, setCreatingBatch] = useState(false);
   const [saveSignalTick, setSaveSignalTick] = useState(0);
   const [lastSavedAtMs, setLastSavedAtMs] = useState<number | null>(null);
-  const readOnlyTraining = !canEditTraining(currentTeamRole);
+  const [currentTeamRoleLoaded, setCurrentTeamRoleLoaded] = useState(false);
+  const readOnlyTraining = currentTeamRoleLoaded ? !canEditTraining(currentTeamRole) : false;
   const justMovedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchHeaderInputRefs = useRef<Record<string, any>>({});
   const batchHeaderRegionRefs = useRef<Record<string, any>>({});
@@ -1547,11 +1548,17 @@ export default function CoachWorkoutsDay() {
     let active = true;
     getCurrentTeamRole()
       .then((role) => {
-        if (active) setCurrentTeamRole(role);
+        if (active) {
+          setCurrentTeamRole(role);
+          setCurrentTeamRoleLoaded(true);
+        }
       })
       .catch((error) => {
         console.warn("[coach-workouts] role load failed", error);
-        if (active) setCurrentTeamRole(null);
+        if (active) {
+          setCurrentTeamRole(null);
+          setCurrentTeamRoleLoaded(true);
+        }
       });
     return () => {
       active = false;
