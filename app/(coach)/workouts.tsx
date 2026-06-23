@@ -2197,6 +2197,7 @@ export default function CoachWorkoutsDay() {
   useEffect(() => {
     let mounted = true;
     (async () => {
+      let clearMoveAfterLoad = false;
       try {
         const previousDayISO = previousDayISORef.current;
         if (previousDayISO && previousDayISO !== dayISO) {
@@ -2206,13 +2207,16 @@ export default function CoachWorkoutsDay() {
             move.fromDateISO === previousDayISO &&
             move.toDateISO === dayISO;
           if (isExpectedMoveNavigation) {
-            batchDateMoveInFlightRef.current = null;
+            clearMoveAfterLoad = true;
           } else {
             void flushPendingEditsRef.current();
           }
         }
         setLoading(true);
         await refreshDayGuarded(dayISO);
+        if (clearMoveAfterLoad) {
+          batchDateMoveInFlightRef.current = null;
+        }
       } catch (e: any) {
         if (!mounted) return;
         patchAppRuntime({ lastSaveError: String(e?.message ?? e ?? "Could not load daily workouts.") });
@@ -3950,10 +3954,19 @@ export default function CoachWorkoutsDay() {
 
   const goToDate = useCallback((targetDateISO: string) => {
     void (async () => {
+      const currentDayISO = String(dayISO ?? "").trim();
+      const target = String(targetDateISO ?? "").trim();
+      const pendingMove = batchDateMoveInFlightRef.current;
+      if (pendingMove && target !== pendingMove.toDateISO) {
+        batchDateMoveInFlightRef.current = null;
+      }
+      if (currentDayISO) {
+        previousDayISORef.current = currentDayISO;
+      }
       await flushPendingEditsRef.current();
-      router.replace({ pathname: "/(coach)/workouts", params: { date: targetDateISO } });
+      router.replace({ pathname: "/(coach)/workouts", params: { date: target } });
     })();
-  }, [router]);
+  }, [dayISO, router]);
 
   const confirmDelete = useCallback(async (title: string, message: string): Promise<boolean> => {
     if (Platform.OS === "web" && typeof globalThis.confirm === "function") {
