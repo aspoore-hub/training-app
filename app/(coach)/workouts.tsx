@@ -3994,7 +3994,7 @@ export default function CoachWorkoutsDay() {
       });
       const insertedRows = await createTeamWorkoutBatch(payload, {
         visibilitySeasonId: selectedSeasonId,
-        requireVisibilitySeason: true,
+        requireVisibilitySeason: !!selectedSeasonId,
       });
       if (insertedRows.length > 0) {
         setRowsRaw((prev) => [...prev, ...insertedRows]);
@@ -4283,7 +4283,7 @@ export default function CoachWorkoutsDay() {
 
       const insertedRows = await createTeamWorkoutBatch(payload, {
         visibilitySeasonId: selectedSeasonId,
-        requireVisibilitySeason: true,
+        requireVisibilitySeason: !!selectedSeasonId,
       });
       if (insertedRows.length > 0) {
         setRowsRaw((prev) => [...prev, ...insertedRows]);
@@ -4434,7 +4434,7 @@ export default function CoachWorkoutsDay() {
 
       await createTeamWorkoutBatch([payload], {
         visibilitySeasonId: selectedSeasonId,
-        requireVisibilitySeason: true,
+        requireVisibilitySeason: !!selectedSeasonId,
       });
 
       await refreshDayGuarded(dayISO);
@@ -4621,7 +4621,7 @@ export default function CoachWorkoutsDay() {
         }));
         await createTeamWorkoutBatch(payload, {
           visibilitySeasonId: selectedSeasonId,
-          requireVisibilitySeason: true,
+          requireVisibilitySeason: !!selectedSeasonId,
         });
       }
 

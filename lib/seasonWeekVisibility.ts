@@ -158,6 +158,57 @@ function eligibleAthleteIdsForSeasonWeek(
     .map((athlete) => String(athlete.id ?? "").trim());
 }
 
+function seasonOverlapsWeek(season: TeamSeasonRow, weekStartISO: string): boolean {
+  const start = normalizeDateISO(season.start_date);
+  const end = normalizeDateISO(season.end_date);
+  const week = normalizeWeekStartISO(weekStartISO);
+  if (!isValidDateISO(start) || !isValidDateISO(end) || !isValidDateISO(week) || start > end) return false;
+  const weekEndISO = addDaysISO(week, 6);
+  return start <= weekEndISO && end >= week;
+}
+
+async function applySeasonWeekVisibility(input: {
+  teamId: string;
+  seasonId: string;
+  weekStartISO: string;
+  visible: boolean;
+  context: EligibilityContext;
+  userId: string | null;
+  athleteIds?: string[] | null;
+} & VisibilityContent): Promise<{ athleteIds: string[]; workoutRows: number; mileageRows: number }> {
+  const seasonId = String(input.seasonId ?? "").trim();
+  const weekStartISO = normalizeWeekStartISO(input.weekStartISO);
+  if (!seasonId) throw new Error("Select a season before changing visibility.");
+  if (!weekStartISO) throw new Error("Missing week start for visibility.");
+
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("team_season_week_visibility")
+    .upsert({
+      team_id: input.teamId,
+      season_id: seasonId,
+      week_start_iso: weekStartISO,
+      athlete_visible: !!input.visible,
+      updated_at: now,
+      updated_by: input.userId,
+    }, { onConflict: "team_id,season_id,week_start_iso" });
+  if (error) throw error;
+
+  const athleteIds = eligibleAthleteIdsForSeasonWeek(
+    input.context,
+    seasonId,
+    weekStartISO,
+    input.athleteIds?.map((id) => String(id ?? "").trim()).filter(Boolean) ?? undefined
+  );
+  const includeWorkouts = input.includeWorkouts !== false;
+  const includeMileage = input.includeMileage !== false;
+  const [workoutRows, mileageRows] = await Promise.all([
+    includeWorkouts ? syncWorkoutVisibility({ teamId: input.teamId, athleteIds, weekStartISO, visible: !!input.visible }) : Promise.resolve(0),
+    includeMileage ? syncLegacyMileageVisibility({ teamId: input.teamId, athleteIds, weekStartISO, visible: !!input.visible, userId: input.userId }) : Promise.resolve(0),
+  ]);
+  return { athleteIds, workoutRows, mileageRows };
+}
+
 async function syncLegacyMileageVisibility(input: {
   teamId: string;
   athleteIds: string[];
@@ -246,38 +297,21 @@ export async function setSeasonWeekVisibility(input: {
   if (!weekStartISO) throw new Error("Missing week start for visibility.");
 
   const userId = await getUserIdOrNull();
-  const now = new Date().toISOString();
-  const { error } = await supabase
-    .from("team_season_week_visibility")
-    .upsert({
-      team_id: teamId,
-      season_id: seasonId,
-      week_start_iso: weekStartISO,
-      athlete_visible: !!input.visible,
-      updated_at: now,
-      updated_by: userId,
-    }, { onConflict: "team_id,season_id,week_start_iso" });
-  if (error) throw error;
-
   const context = await loadEligibilityContext(teamId);
-  const athleteIds = eligibleAthleteIdsForSeasonWeek(
+  const result = await applySeasonWeekVisibility({
+    ...input,
+    teamId,
     context,
     seasonId,
     weekStartISO,
-    input.athleteIds?.map((id) => String(id ?? "").trim()).filter(Boolean) ?? undefined
-  );
-  const includeWorkouts = input.includeWorkouts !== false;
-  const includeMileage = input.includeMileage !== false;
-  const [workoutRows, mileageRows] = await Promise.all([
-    includeWorkouts ? syncWorkoutVisibility({ teamId, athleteIds, weekStartISO, visible: !!input.visible }) : Promise.resolve(0),
-    includeMileage ? syncLegacyMileageVisibility({ teamId, athleteIds, weekStartISO, visible: !!input.visible, userId }) : Promise.resolve(0),
-  ]);
-  return { athleteCount: athleteIds.length, workoutRows, mileageRows };
+    userId,
+  });
+  return { athleteCount: result.athleteIds.length, workoutRows: result.workoutRows, mileageRows: result.mileageRows };
 }
 
 export async function setSeasonWeekVisibilityByDateRange(input: {
   teamId?: string | null;
-  seasonId: string;
+  seasonId?: string | null;
   startISO: string;
   endISO: string;
   visible: boolean;
@@ -285,16 +319,47 @@ export async function setSeasonWeekVisibilityByDateRange(input: {
   athleteIds?: string[] | null;
 } & VisibilityContent): Promise<{ athleteCount: number; weekCount: number; workoutRows: number; mileageRows: number; weekStartISOs: string[] }> {
   const weekStartISOs = weekStartISOsForDateRange(input.startISO, input.endISO, input.weekStartsOn ?? 1);
-  let athleteCount = 0;
+  const seasonId = String(input.seasonId ?? "").trim();
+  if (seasonId) {
+    let athleteCount = 0;
+    let workoutRows = 0;
+    let mileageRows = 0;
+    for (const weekStartISO of weekStartISOs) {
+      const result = await setSeasonWeekVisibility({ ...input, seasonId, weekStartISO });
+      athleteCount = Math.max(athleteCount, result.athleteCount);
+      workoutRows += result.workoutRows;
+      mileageRows += result.mileageRows;
+    }
+    return { athleteCount, weekCount: weekStartISOs.length, workoutRows, mileageRows, weekStartISOs };
+  }
+
+  const teamId = input.teamId ?? await requireTeamId();
+  await requireTeamPermission("training.publish", teamId);
+  const userId = await getUserIdOrNull();
+  const context = await loadEligibilityContext(teamId);
+  const activeSeasons = context.seasons.filter((season) => !season.archived_at);
+  const affectedAthleteIds = new Set<string>();
   let workoutRows = 0;
   let mileageRows = 0;
+  let affectedSeasonWeeks = 0;
   for (const weekStartISO of weekStartISOs) {
-    const result = await setSeasonWeekVisibility({ ...input, weekStartISO });
-    athleteCount = Math.max(athleteCount, result.athleteCount);
-    workoutRows += result.workoutRows;
-    mileageRows += result.mileageRows;
+    const seasonsForWeek = activeSeasons.filter((season) => seasonOverlapsWeek(season, weekStartISO));
+    for (const season of seasonsForWeek) {
+      const result = await applySeasonWeekVisibility({
+        ...input,
+        teamId,
+        seasonId: String(season.id ?? "").trim(),
+        weekStartISO,
+        context,
+        userId,
+      });
+      affectedSeasonWeeks += 1;
+      result.athleteIds.forEach((athleteId) => affectedAthleteIds.add(athleteId));
+      workoutRows += result.workoutRows;
+      mileageRows += result.mileageRows;
+    }
   }
-  return { athleteCount, weekCount: weekStartISOs.length, workoutRows, mileageRows, weekStartISOs };
+  return { athleteCount: affectedAthleteIds.size, weekCount: affectedSeasonWeeks || weekStartISOs.length, workoutRows, mileageRows, weekStartISOs };
 }
 
 export async function loadInheritedSeasonWeekVisibilityForWorkoutRows(

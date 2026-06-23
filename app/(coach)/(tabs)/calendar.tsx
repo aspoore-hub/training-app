@@ -52,7 +52,7 @@ import { normalizeWorkoutTimeInput } from "../../../lib/time";
 import { formatMileageForSheet, getWeekIndex, getWeekStartISO } from "../../../lib/mileagePlan";
 import { getWeekLabelTone, getWeekLabelToneColors, getWeekLabelToneText, type WeekLabelType } from "../../../lib/weekLabelStyle";
 import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../../lib/teamDataStore";
-import { setSeasonWeekVisibility, setSeasonWeekVisibilityByDateRange } from "../../../lib/seasonWeekVisibility";
+import { setSeasonWeekVisibilityByDateRange } from "../../../lib/seasonWeekVisibility";
 import { canEditTraining, canExport, canPublishTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
 
 const SCREEN_W = Dimensions.get("window").width;
@@ -1959,16 +1959,14 @@ export default function CoachCalendarMonth() {
 
   const setCalendarWeekVisibility = useCallback(async (visible: boolean) => {
     const seasonId = String(selectedSeason?.id ?? "").trim();
-    if (!seasonId) {
-      Alert.alert("Select a season", "Choose a season before publishing or hiding a week.");
-      return;
-    }
     setWeekVisibilityBusy(true);
     try {
-      await setSeasonWeekVisibility({
-        seasonId,
-        weekStartISO: currentWeekStartISO,
+      await setSeasonWeekVisibilityByDateRange({
+        seasonId: seasonId || null,
+        startISO: currentWeekStartISO,
+        endISO: currentWeekEndISO,
         visible,
+        weekStartsOn: weekStartsOn === 0 ? 0 : 1,
         includeWorkouts: true,
         includeMileage: true,
       });
@@ -1978,7 +1976,7 @@ export default function CoachCalendarMonth() {
     } finally {
       setWeekVisibilityBusy(false);
     }
-  }, [currentWeekStartISO, loadCalendarData, selectedSeason]);
+  }, [currentWeekEndISO, currentWeekStartISO, loadCalendarData, selectedSeason, weekStartsOn]);
 
   const openTrainingVisibilityModal = useCallback((content: TrainingVisibilityContent = "both") => {
     setTrainingVisibilityContent(content);
@@ -2005,14 +2003,14 @@ export default function CoachCalendarMonth() {
       showValidation("Choose training", "Select workouts, mileage, or both.");
       return;
     }
-    if (!selectedSeason) {
-      showValidation("No season selected", "Select a season before applying visibility.");
-      return;
-    }
     const customStart = String(trainingVisibilityStartISO ?? "").trim();
     const customEnd = String(trainingVisibilityEndISO ?? "").trim();
     if (trainingVisibilityRange === "custom" && (!isValidISODate(customStart) || !isValidISODate(customEnd) || customStart > customEnd)) {
       showValidation("Invalid range", "Enter a valid start and end date.");
+      return;
+    }
+    if (trainingVisibilityRange === "season" && !selectedSeason) {
+      showValidation("Choose a range", "Season: All applies to current week or custom range. Choose a season to use Selected season.");
       return;
     }
     let targetAthleteCount = 0;
@@ -2022,18 +2020,18 @@ export default function CoachCalendarMonth() {
       try {
         const startISO =
           trainingVisibilityRange === "season"
-            ? String(selectedSeason.start_date ?? "").trim()
+            ? String(selectedSeason?.start_date ?? "").trim()
             : trainingVisibilityRange === "week"
               ? currentWeekStartISO
               : customStart;
         const endISO =
           trainingVisibilityRange === "season"
-            ? String(selectedSeason.end_date ?? "").trim()
+            ? String(selectedSeason?.end_date ?? "").trim()
             : trainingVisibilityRange === "week"
               ? currentWeekEndISO
               : customEnd;
         const result = await setSeasonWeekVisibilityByDateRange({
-          seasonId: String(selectedSeason.id ?? "").trim(),
+          seasonId: String(selectedSeason?.id ?? "").trim() || null,
           startISO,
           endISO,
           visible,
@@ -4719,7 +4717,9 @@ export default function CoachCalendarMonth() {
           <Pressable style={styles.exportModalCard} onPress={() => {}}>
             <Text style={styles.exportModalTitle}>Training Visibility</Text>
             <Text style={styles.exportModalHint}>
-              Visibility applies to eligible athletes in the selected season and week range.
+              {selectedSeason
+                ? "Visibility applies to eligible athletes in the selected season and week range."
+                : "Visibility applies to eligible athletes across all seasons in the chosen week range."}
             </Text>
 
             <View style={styles.exportModalField}>
@@ -4766,8 +4766,19 @@ export default function CoachCalendarMonth() {
                 ] as Array<[TrainingVisibilityRange, string]>).map(([value, label]) => (
                   <Pressable
                     key={`visibility-range-${value}`}
-                    onPress={() => setTrainingVisibilityRange(value)}
-                    style={[styles.visibilityChoice, trainingVisibilityRange === value && styles.visibilityChoiceSelected]}
+                    onPress={() => {
+                      if (value === "season" && !selectedSeason) {
+                        setTrainingVisibilityError("Choose a season to use Selected season, or use Current week/Custom range for Season: All.");
+                        return;
+                      }
+                      setTrainingVisibilityError(null);
+                      setTrainingVisibilityRange(value);
+                    }}
+                    style={[
+                      styles.visibilityChoice,
+                      trainingVisibilityRange === value && styles.visibilityChoiceSelected,
+                      value === "season" && !selectedSeason && { opacity: 0.45 },
+                    ]}
                   >
                     <Text style={styles.visibilityChoiceText}>{label}</Text>
                   </Pressable>
@@ -4775,6 +4786,8 @@ export default function CoachCalendarMonth() {
               </View>
               {trainingVisibilityRange === "season" ? (
                 <Text style={styles.exportModalHint}>Season: {selectedSeasonLabel}</Text>
+              ) : !selectedSeason ? (
+                <Text style={styles.exportModalHint}>Scope: all seasons in range</Text>
               ) : null}
             </View>
 
