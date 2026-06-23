@@ -1439,6 +1439,11 @@ export default function CoachWorkoutsDay() {
   const flushPendingEditsRef = useRef<() => Promise<void>>(async () => {});
   const creatingBatchRef = useRef(false);
   const duplicatingKeysRef = useRef<Set<string>>(new Set());
+  const batchDateMoveInFlightRef = useRef<{
+    batchKey: string;
+    fromDateISO: string;
+    toDateISO: string;
+  } | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
@@ -2195,7 +2200,16 @@ export default function CoachWorkoutsDay() {
       try {
         const previousDayISO = previousDayISORef.current;
         if (previousDayISO && previousDayISO !== dayISO) {
-          void flushPendingEditsRef.current();
+          const move = batchDateMoveInFlightRef.current;
+          const isExpectedMoveNavigation =
+            move &&
+            move.fromDateISO === previousDayISO &&
+            move.toDateISO === dayISO;
+          if (isExpectedMoveNavigation) {
+            batchDateMoveInFlightRef.current = null;
+          } else {
+            void flushPendingEditsRef.current();
+          }
         }
         setLoading(true);
         await refreshDayGuarded(dayISO);
@@ -3071,6 +3085,8 @@ export default function CoachWorkoutsDay() {
         dirtyKeys,
         payload,
       });
+      const committedFromDateISO = dayISO;
+      const isDateMove = dirtyKeys.includes("date_iso") && isISODateOnly(String(draft.date_iso ?? "").trim());
       if (!isUnmountingRef.current) {
         setBatchSaveState((prev) => ({ ...prev, [batchKey]: { status: "saving" } }));
       }
@@ -3124,14 +3140,61 @@ export default function CoachWorkoutsDay() {
         }
 
         batchDirtyFieldsRef.current = { ...batchDirtyFieldsRef.current, [batchKey]: {} };
+        const nextDateISO = String(draft.date_iso ?? "").trim();
+        if (isDateMove && isISODateOnly(nextDateISO)) {
+          batchDateMoveInFlightRef.current = {
+            batchKey,
+            fromDateISO: committedFromDateISO,
+            toDateISO: nextDateISO,
+          };
+          const moveTimer = batchSaveTimersRef.current[batchKey];
+          if (moveTimer) clearTimeout(moveTimer);
+          delete batchSaveTimersRef.current[batchKey];
+          await loadPersistedDayDraftCache()
+            .then(async (cache) => {
+              const nextCache = { ...cache };
+              [committedFromDateISO, nextDateISO].forEach((dateKey) => {
+                const entry = nextCache[dateKey];
+                if (!entry) return;
+                const nextEntry: PersistedDayDraftState = {
+                  ...entry,
+                  batchDrafts: { ...(entry.batchDrafts ?? {}) },
+                  batchDirtyFields: { ...(entry.batchDirtyFields ?? {}) },
+                  athleteDrafts: { ...(entry.athleteDrafts ?? {}) },
+                };
+                delete nextEntry.batchDrafts[batchKey];
+                delete nextEntry.batchDirtyFields[batchKey];
+                const hasBatchDrafts = Object.keys(nextEntry.batchDrafts).length > 0;
+                const hasBatchDirty = Object.values(nextEntry.batchDirtyFields).some((dirty) => Object.keys(dirty ?? {}).length > 0);
+                const hasAthleteDrafts = Object.keys(nextEntry.athleteDrafts).length > 0;
+                if (!hasBatchDrafts && !hasBatchDirty && !hasAthleteDrafts) {
+                  delete nextCache[dateKey];
+                } else {
+                  nextCache[dateKey] = nextEntry;
+                }
+              });
+              await savePersistedDayDraftCache(nextCache);
+            })
+            .catch((cacheError) => {
+              console.warn("[workouts] clear moved batch draft cache failed", cacheError);
+            });
+        }
         if (!isUnmountingRef.current) {
           setBatchDirtyFields((prev) => ({ ...prev, [batchKey]: {} }));
+          if (isDateMove && isISODateOnly(nextDateISO)) {
+            setBatchDrafts((prev) => {
+              const next = { ...prev };
+              delete next[batchKey];
+              batchDraftsRef.current = next;
+              return next;
+            });
+            setRowsRaw((prev) => prev.filter((row) => getBatchKey(row) !== batchKey));
+          }
           setBatchSaveState((prev) => ({ ...prev, [batchKey]: { status: "saved" } }));
           setBatchSavedSoonIdle(batchKey);
           markSavedNow();
         }
         debugWorkouts("[workouts] commitBatchEdit:success", { batchKey, dirtyKeys });
-        const nextDateISO = String(draft.date_iso ?? "").trim();
         if (!isUnmountingRef.current && isISODateOnly(nextDateISO) && nextDateISO !== dayISO) {
           router.replace({
             pathname: "/(coach)/workouts",
