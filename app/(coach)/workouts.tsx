@@ -3077,7 +3077,11 @@ export default function CoachWorkoutsDay() {
 
       try {
         const parsed = parseBatchKey(batchKey);
-        const shouldSyncHeaderNotes = parsed.isBatch && dirtyKeys.includes("details");
+        const shouldSyncHeaderNotes = parsed.isBatch && (
+          dirtyKeys.includes("details") ||
+          dirtyKeys.includes("date_iso") ||
+          dirtyKeys.includes("session")
+        );
         const payloadForTeamWorkouts = { ...payload };
 
         if (shouldSyncHeaderNotes) {
@@ -3087,12 +3091,14 @@ export default function CoachWorkoutsDay() {
               date_iso: String(draft.date_iso ?? "").trim(),
               session: "AM",
               header_notes: String(draft.details ?? "").trim() || null,
+              propagate_to_rows: false,
             }),
             saveTeamWorkoutBatchHeaderNotes({
               batch_id: parsed.id,
               date_iso: String(draft.date_iso ?? "").trim(),
               session: "PM",
               header_notes: String(draft.details ?? "").trim() || null,
+              propagate_to_rows: false,
             }),
           ]);
           delete (payloadForTeamWorkouts as any).details;
@@ -3986,7 +3992,10 @@ export default function CoachWorkoutsDay() {
         sourceMainNotes: sourceBatchHeaderNotes ?? "(fallback: row details)",
         rowCount: payload.length,
       });
-      const insertedRows = await createTeamWorkoutBatch(payload);
+      const insertedRows = await createTeamWorkoutBatch(payload, {
+        visibilitySeasonId: selectedSeasonId,
+        requireVisibilitySeason: true,
+      });
       if (insertedRows.length > 0) {
         setRowsRaw((prev) => [...prev, ...insertedRows]);
       }
@@ -3998,12 +4007,14 @@ export default function CoachWorkoutsDay() {
             date_iso: dayISO,
             session: "AM",
             header_notes: sourceBatchHeaderNotes,
+            propagate_to_rows: false,
           }),
           saveTeamWorkoutBatchHeaderNotes({
             batch_id: newBatchId,
             date_iso: dayISO,
             session: "PM",
             header_notes: sourceBatchHeaderNotes,
+            propagate_to_rows: false,
           }),
         ]);
       }
@@ -4270,7 +4281,10 @@ export default function CoachWorkoutsDay() {
         return;
       }
 
-      const insertedRows = await createTeamWorkoutBatch(payload);
+      const insertedRows = await createTeamWorkoutBatch(payload, {
+        visibilitySeasonId: selectedSeasonId,
+        requireVisibilitySeason: true,
+      });
       if (insertedRows.length > 0) {
         setRowsRaw((prev) => [...prev, ...insertedRows]);
       }
@@ -4295,7 +4309,7 @@ export default function CoachWorkoutsDay() {
       creatingBatchRef.current = false;
       setCreatingBatch(false);
     }
-  }, [creatingBatch, dayISO, ensureTeamId, getEligibleRosterOptionsForDate, patchAppRuntime, practiceDefaults, refreshDayGuarded]);
+  }, [creatingBatch, dayISO, ensureTeamId, getEligibleRosterOptionsForDate, patchAppRuntime, practiceDefaults, refreshDayGuarded, selectedSeasonId]);
 
   const handleRemoveAthleteFromBatch = useCallback(
     async (batchRow: WorksheetBatchRow, athleteId: string) => {
@@ -4418,7 +4432,10 @@ export default function CoachWorkoutsDay() {
         planned_distance_unit: sample.planned_distance_unit ?? null,
       };
 
-      await createTeamWorkoutBatch([payload]);
+      await createTeamWorkoutBatch([payload], {
+        visibilitySeasonId: selectedSeasonId,
+        requireVisibilitySeason: true,
+      });
 
       await refreshDayGuarded(dayISO);
     } catch (e: any) {
@@ -4602,7 +4619,10 @@ export default function CoachWorkoutsDay() {
           planned_distance: sample.planned_distance ?? null,
           planned_distance_unit: sample.planned_distance_unit ?? null,
         }));
-        await createTeamWorkoutBatch(payload);
+        await createTeamWorkoutBatch(payload, {
+          visibilitySeasonId: selectedSeasonId,
+          requireVisibilitySeason: true,
+        });
       }
 
       if (toRemoveAthleteIds.length > 0) {
@@ -4619,7 +4639,7 @@ export default function CoachWorkoutsDay() {
       const serverRows = await listTeamWorkoutsByBatch(batchId);
       setRowsRaw((prev) => replaceBatchRows(prev, batchId, serverRows));
     },
-    [batchDrafts, dayISO, replaceBatchRows]
+    [batchDrafts, dayISO, replaceBatchRows, selectedSeasonId]
   );
 
   const applyBatchAthletePickerSelection = useCallback(async () => {

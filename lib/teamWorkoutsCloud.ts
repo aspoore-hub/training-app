@@ -44,9 +44,12 @@ function possibleWorkoutWeekStartISOs(dateISO: string): string[] {
 
 async function loadInheritedWorkoutWeekVisibility(
   teamId: string,
-  rows: TeamWorkoutInsertInput[]
+  rows: TeamWorkoutInsertInput[],
+  options?: TeamWorkoutBatchCreateOptions
 ): Promise<Map<string, boolean>> {
-  return loadInheritedSeasonWeekVisibilityForWorkoutRows(teamId, rows, 1);
+  const visibilitySeasonId = String(options?.visibilitySeasonId ?? "").trim();
+  if (options?.requireVisibilitySeason && !visibilitySeasonId) return new Map();
+  return loadInheritedSeasonWeekVisibilityForWorkoutRows(teamId, rows, 1, visibilitySeasonId || null);
 }
 
 export type TeamWorkoutRow = {
@@ -112,6 +115,11 @@ export type TeamWorkoutInsertInput = Omit<TeamWorkoutInsertRow, "team_id"> & {
   team_id?: string;
 };
 export type PlannedDistanceMap = ReadonlyMap<string, number | null | undefined> | Record<string, number | null | undefined>;
+
+export type TeamWorkoutBatchCreateOptions = {
+  visibilitySeasonId?: string | null;
+  requireVisibilitySeason?: boolean;
+};
 
 export type TeamWorkoutInsertParams = {
   selectedAthleteIds: string[];
@@ -202,14 +210,15 @@ export function buildTeamWorkoutInsertRows(params: TeamWorkoutInsertParams): Tea
 }
 
 export async function createTeamWorkoutBatch(
-  rows: TeamWorkoutInsertInput[]
+  rows: TeamWorkoutInsertInput[],
+  options?: TeamWorkoutBatchCreateOptions
 ): Promise<TeamWorkoutRow[]> {
   const teamId = await requireTeamId();
   await requireTeamPermission("training.edit", teamId);
   if (!Array.isArray(rows) || rows.length === 0) return [];
 
   const now = new Date().toISOString();
-  const inheritedVisibility = await loadInheritedWorkoutWeekVisibility(teamId, rows);
+  const inheritedVisibility = await loadInheritedWorkoutWeekVisibility(teamId, rows, options);
   const payload: TeamWorkoutInsertInput[] = rows.map((r) => ({
     ...r,
     team_id: r.team_id ?? teamId,

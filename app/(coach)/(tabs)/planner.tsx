@@ -1528,6 +1528,7 @@ export default function PlannerScreen() {
             date_iso: dateISO,
             session,
             header_notes: details.trim(),
+            propagate_to_rows: false,
           });
         } catch {
           // The per-athlete workout rows still carry details if a legacy environment

@@ -3623,12 +3623,14 @@ export default function CoachCalendarMonth() {
             date_iso: item.dateISO,
             session: "AM",
             header_notes: item.notes,
+            propagate_to_rows: false,
           }),
           saveTeamWorkoutBatchHeaderNotes({
             batch_id: item.batchId,
             date_iso: item.dateISO,
             session: "PM",
             header_notes: item.notes,
+            propagate_to_rows: false,
           }),
         ])
       );

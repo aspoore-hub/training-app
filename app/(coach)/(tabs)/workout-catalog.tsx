@@ -841,12 +841,14 @@ export default function CoachWorkoutCatalogTab() {
               date_iso: targetDateISO,
               session: "AM",
               header_notes: sourceMainNotes,
+              propagate_to_rows: false,
             }),
             saveTeamWorkoutBatchHeaderNotes({
               batch_id: newBatchId,
               date_iso: targetDateISO,
               session: "PM",
               header_notes: sourceMainNotes,
+              propagate_to_rows: false,
             }),
           ]);
         }

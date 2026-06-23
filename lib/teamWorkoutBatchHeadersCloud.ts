@@ -90,6 +90,7 @@ export async function saveTeamWorkoutBatchHeaderNotes(input: {
   date_iso: string;
   session: "AM" | "PM";
   header_notes: string | null;
+  propagate_to_rows?: boolean;
 }): Promise<{ handledRowPropagation: boolean }> {
   const teamId = await getCurrentTeamId();
   await requireTeamPermission("training.edit", teamId);
@@ -106,7 +107,7 @@ export async function saveTeamWorkoutBatchHeaderNotes(input: {
     p_date_iso: dateISO,
     p_session: session,
     p_header_notes: headerNotes,
-    p_propagate_to_rows: true,
+    p_propagate_to_rows: input.propagate_to_rows !== false,
   });
 
   if (!rpcResult.error) {

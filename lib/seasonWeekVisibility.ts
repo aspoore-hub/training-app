@@ -300,7 +300,8 @@ export async function setSeasonWeekVisibilityByDateRange(input: {
 export async function loadInheritedSeasonWeekVisibilityForWorkoutRows(
   teamId: string,
   rows: WorkoutVisibilityInputRow[],
-  weekStartsOn: 0 | 1 = 1
+  weekStartsOn: 0 | 1 = 1,
+  seasonId?: string | null
 ): Promise<Map<string, boolean>> {
   const cleanRows = (rows ?? []).map((row) => ({
     athleteId: String(row.athlete_profile_id ?? "").trim(),
@@ -309,12 +310,15 @@ export async function loadInheritedSeasonWeekVisibilityForWorkoutRows(
   const result = new Map<string, boolean>();
   if (cleanRows.length === 0) return result;
 
+  const selectedSeasonId = String(seasonId ?? "").trim();
   const weekStartISOs = Array.from(new Set(cleanRows.map((row) => getWeekStartISOForDate(row.dateISO, weekStartsOn)).filter(Boolean)));
-  const { data, error } = await supabase
+  let query = supabase
     .from("team_season_week_visibility")
     .select("season_id,week_start_iso,athlete_visible")
     .eq("team_id", teamId)
     .in("week_start_iso", weekStartISOs);
+  if (selectedSeasonId) query = query.eq("season_id", selectedSeasonId);
+  const { data, error } = await query;
   if (error) throw error;
 
   const visibilityRows = (data ?? []) as Array<{ season_id: string; week_start_iso: string; athlete_visible: boolean }>;
