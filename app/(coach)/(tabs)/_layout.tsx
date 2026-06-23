@@ -94,7 +94,10 @@ export default function CoachTabs() {
       <Tabs.Screen
         name="categories"
         options={{
-          href: null,
+          title: "Workout Categories",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="pricetags-outline" size={size} color={color} />
+          ),
         }}
       />
       <Tabs.Screen

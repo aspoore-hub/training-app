@@ -18,7 +18,6 @@ import {
   normalizeTeamRole,
   type TeamRole,
 } from "../../../lib/teamPermissions";
-import { CategoriesContent } from "./categories";
 import { formatPace, loadPaceSecondsPerMile, parsePace, savePaceSecondsPerMile } from "../../../lib/pace";
 import { loadJSON } from "../../../lib/storage";
 import {
@@ -142,7 +141,6 @@ export default function CoachSettingsTab() {
   const [staffStatus, setStaffStatus] = useState<string | null>(null);
   const [lastCoachInviteToken, setLastCoachInviteToken] = useState("");
 
-  const [workoutTypesOpen, setWorkoutTypesOpen] = useState(false);
   const [customGroupsOpen, setCustomGroupsOpen] = useState(false);
   const [seasonsOpen, setSeasonsOpen] = useState(false);
   const [individualPaceOpen, setIndividualPaceOpen] = useState(false);
@@ -934,7 +932,7 @@ export default function CoachSettingsTab() {
             <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
               <Text style={styles.cardTitle}>Team Settings</Text>
               <Text style={styles.cardHint}>
-                Team defaults, categories, routines, training groups, and seasons are editable by Owners and Editors.
+                Team defaults, routines, training groups, and seasons are editable by Owners and Editors.
               </Text>
             </View>
 
@@ -1426,39 +1424,6 @@ export default function CoachSettingsTab() {
                 <Pressable onPress={savePracticeDefaults} style={styles.saveBtn}>
                   <Text style={styles.saveBtnText}>Save Default Times</Text>
                 </Pressable>
-              </View>
-            </View>
-          ) : null}
-        </View>
-
-        <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}> 
-          <Pressable
-            style={styles.sectionHeader}
-            hitSlop={10}
-            onPress={() => void toggleSettingsSection("workout-categories-section-toggle", setWorkoutTypesOpen)}
-          >
-            <Text style={styles.cardTitle}>Workout Categories</Text>
-            <View style={styles.chevronTapTarget}>
-              <Text style={styles.chev}>{workoutTypesOpen ? "▾" : "▸"}</Text>
-            </View>
-          </Pressable>
-          <Text style={styles.cardHint}>Manage category names, colors, and ordering.</Text>
-
-          {workoutTypesOpen ? (
-            <View style={styles.collapsibleBody}>
-              <View
-                style={{
-                  maxHeight: 460,
-                  borderWidth: 1,
-                  borderColor: "#e8e8e8",
-                  borderRadius: 12,
-                  overflow: "hidden",
-                  backgroundColor: "#fff",
-                }}
-              >
-                <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled">
-                  <CategoriesContent useVirtualizedList />
-                </ScrollView>
               </View>
             </View>
           ) : null}

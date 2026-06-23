@@ -15,6 +15,7 @@ export const COACH_NAV_ITEMS: CoachNavItem[] = [
   { key: "roster", label: "Roster", href: "/(coach)/(tabs)/roster", icon: "people-outline" },
   { key: "workout-catalog", label: "Workout Catalog", href: "/(coach)/(tabs)/workout-catalog", icon: "library-outline" },
   { key: "auxiliary-routines", label: "Drill Routines", href: "/(coach)/(tabs)/auxiliary-routines", icon: "fitness-outline" },
+  { key: "categories", label: "Workout Categories", href: "/(coach)/(tabs)/categories", icon: "pricetags-outline" },
   { key: "settings", label: "Settings", href: "/(coach)/(tabs)/settings", icon: "settings-outline" },
 ];
 
@@ -30,6 +31,7 @@ export function resolveCoachTitle(pathname: string): string {
   if (path.includes("/roster")) return "Roster";
   if (path.includes("/workout-catalog")) return "Workout Catalog";
   if (path.includes("/auxiliary-routines")) return "Drill Routines";
+  if (path.includes("/categories")) return "Workout Categories";
   if (path.includes("/settings")) return "Settings";
   if (path.includes("/calendar")) return "Calendar";
   const matched = COACH_NAV_ITEMS.find((item) => path.startsWith(item.href));

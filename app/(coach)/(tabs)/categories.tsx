@@ -182,7 +182,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
         setCategories(list);
       } catch (error) {
         console.error("[settings-categories] load failed", error);
-        Alert.alert("Settings load failed", error instanceof Error ? error.message : String(error ?? "Unknown error"));
+        Alert.alert("Workout Categories load failed", error instanceof Error ? error.message : String(error ?? "Unknown error"));
       }
     })();
   }, []);
@@ -276,7 +276,7 @@ export function CategoriesContent({ useVirtualizedList = true }: { useVirtualize
       console.error("[settings-categories] save failed", error);
       setDebugLastSaveStatus("error");
       setDebugLastSaveError(error instanceof Error ? error.message : String(error ?? "Unknown error"));
-      Alert.alert("Settings save failed", error instanceof Error ? error.message : String(error ?? "Unknown error"));
+      Alert.alert("Workout Categories save failed", error instanceof Error ? error.message : String(error ?? "Unknown error"));
       throw error;
     }
   }
