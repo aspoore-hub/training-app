@@ -12,6 +12,7 @@ import {
   loadPracticeTimeDefaults,
 } from "./practiceDefaults";
 import { loadJSON, saveJSON } from "./storage";
+import { sortCategoriesForDisplay } from "./sortHelpers";
 import type { WorkoutCategory } from "./types";
 import { normalizeWeekLabelType, type WeekLabelType } from "./weekLabelStyle";
 
@@ -396,7 +397,7 @@ export function getCategoryOptions(
     });
   }
 
-  return out;
+  return sortCategoriesForDisplay(out);
 }
 
 export function toPracticeDefaults(settings: CoachAppSettings): PracticeTimeDefaults {

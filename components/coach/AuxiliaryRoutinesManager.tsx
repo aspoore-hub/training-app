@@ -27,6 +27,7 @@ import {
 } from "../../lib/drillLibrary";
 import { hydrateRoutineLibraryDrillItem } from "../../lib/routineDrillHydration";
 import { loadCoreCoachSettings } from "../../lib/settings";
+import { sortByFolderThenName, sortCategoriesForDisplay, sortFoldersForDisplay } from "../../lib/sortHelpers";
 import { getCurrentTeamRole, normalizeTeamRole, type TeamRole } from "../../lib/teamPermissions";
 import type { WorkoutCategory } from "../../lib/types";
 
@@ -141,15 +142,14 @@ export function AuxiliaryRoutinesManager() {
   const preCategoryNamesDraftRef = React.useRef<string[]>([]);
   const postCategoryNamesDraftRef = React.useRef<string[]>([]);
   const currentTeamRoleRef = React.useRef<TeamRole | null>(null);
+  const routineFoldersRef = React.useRef<RoutineFolder[]>([]);
+  const drillFoldersRef = React.useRef<DrillFolder[]>([]);
 
-  const sortedCategories = useMemo(
-    () => [...categories].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
-    [categories]
-  );
+  const sortedCategories = useMemo(() => sortCategoriesForDisplay(categories), [categories]);
 
   const sortedAuxiliaryRoutines = useMemo(
-    () => [...auxiliaryRoutines].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? ""))),
-    [auxiliaryRoutines]
+    () => sortByFolderThenName(auxiliaryRoutines, routineFolders),
+    [auxiliaryRoutines, routineFolders]
   );
 
   const visibleAuxiliaryRoutines = useMemo(() => {
@@ -162,7 +162,7 @@ export function AuxiliaryRoutinesManager() {
 
   const filteredDrillLibraryItems = useMemo(() => {
     const needle = libraryQuery.trim().toLowerCase();
-    return drillLibraryItems.filter((item) => {
+    return sortByFolderThenName(drillLibraryItems.filter((item) => {
       const folderMatches =
         libraryFolderFilterId === ALL_FOLDERS_ID ||
         (libraryFolderFilterId === UNCATEGORIZED_FOLDER_ID
@@ -174,12 +174,12 @@ export function AuxiliaryRoutinesManager() {
         .join(" ")
         .toLowerCase()
         .includes(needle);
-    });
-  }, [drillLibraryItems, libraryFolderFilterId, libraryQuery]);
+    }), drillFolders);
+  }, [drillFolders, drillLibraryItems, libraryFolderFilterId, libraryQuery]);
 
   const insertableDrillLibraryItems = useMemo(() => {
     const needle = insertQuery.trim().toLowerCase();
-    return drillLibraryItems.filter((item) => {
+    return sortByFolderThenName(drillLibraryItems.filter((item) => {
       const folderMatches =
         insertFolderFilterId === ALL_FOLDERS_ID ||
         (insertFolderFilterId === UNCATEGORIZED_FOLDER_ID
@@ -191,8 +191,8 @@ export function AuxiliaryRoutinesManager() {
         .join(" ")
         .toLowerCase()
         .includes(needle);
-    });
-  }, [drillLibraryItems, insertFolderFilterId, insertQuery]);
+    }), drillFolders);
+  }, [drillFolders, drillLibraryItems, insertFolderFilterId, insertQuery]);
 
   const drillById = useMemo(
     () => new Map(drillLibraryItems.map((drill) => [drill.id, drill] as const)),
@@ -229,6 +229,14 @@ export function AuxiliaryRoutinesManager() {
   useEffect(() => {
     currentTeamRoleRef.current = currentTeamRole;
   }, [currentTeamRole]);
+
+  useEffect(() => {
+    routineFoldersRef.current = routineFolders;
+  }, [routineFolders]);
+
+  useEffect(() => {
+    drillFoldersRef.current = drillFolders;
+  }, [drillFolders]);
 
   useEffect(() => {
     selectedRoutineIdRef.current = selectedAuxiliaryRoutineId;
@@ -297,7 +305,7 @@ export function AuxiliaryRoutinesManager() {
   const reloadAuxiliaryRoutines = useCallback(
     async (preferredRoutineId?: string | null) => {
       const loaded = await loadAuxiliaryRoutines();
-      const sorted = [...loaded].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
+      const sorted = sortByFolderThenName(loaded, routineFolders);
       setAuxiliaryRoutines(sorted);
       const targetId = preferredRoutineId ?? selectedRoutineIdRef.current;
       const selected = sorted.find((routine) => routine.id === targetId) ?? null;
@@ -309,7 +317,7 @@ export function AuxiliaryRoutinesManager() {
       setSelectedAuxiliaryRoutineId(null);
       loadRoutineIntoDrafts(null);
     },
-    [loadRoutineIntoDrafts]
+    [loadRoutineIntoDrafts, routineFolders]
   );
 
   const loadManagerData = useCallback(
@@ -326,12 +334,16 @@ export function AuxiliaryRoutinesManager() {
         ]);
         if (isActive && !isActive()) return;
         setCurrentTeamRole(role);
+        const sortedRoutineFolders = sortFoldersForDisplay(routineFolderList);
+        const sortedDrillFolders = sortFoldersForDisplay(drillFolderList);
+        const sortedRoutines = sortByFolderThenName(routines, sortedRoutineFolders);
+        const sortedLibraryItems = sortByFolderThenName(libraryItems, sortedDrillFolders);
         setCategories(coreSettings.categories ?? []);
-        setAuxiliaryRoutines(routines);
-        setRoutineFolders(routineFolderList);
-        setDrillFolders(drillFolderList);
-        setDrillLibraryItems(libraryItems);
-        const selected = routines.find((routine) => routine.id === selectedRoutineIdRef.current) ?? routines[0] ?? null;
+        setAuxiliaryRoutines(sortedRoutines);
+        setRoutineFolders(sortedRoutineFolders);
+        setDrillFolders(sortedDrillFolders);
+        setDrillLibraryItems(sortedLibraryItems);
+        const selected = sortedRoutines.find((routine) => routine.id === selectedRoutineIdRef.current) ?? sortedRoutines[0] ?? null;
         setSelectedRoutine(selected);
       } catch (error) {
         if (isActive && !isActive()) return;
@@ -401,7 +413,7 @@ export function AuxiliaryRoutinesManager() {
         });
 
         const loaded = await loadAuxiliaryRoutines();
-        const sorted = [...loaded].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
+        const sorted = sortByFolderThenName(loaded, routineFoldersRef.current);
         setAuxiliaryRoutines(sorted);
 
         const latestDraftSnapshot = buildDraftSnapshotFrom(
@@ -553,7 +565,7 @@ export function AuxiliaryRoutinesManager() {
       try {
         await deleteAuxiliaryRoutine(routineId, { requireCloudSync: true });
         const refreshed = await loadAuxiliaryRoutines();
-        const sorted = [...refreshed].sort((a, b) => String(a.title ?? "").localeCompare(String(b.title ?? "")));
+        const sorted = sortByFolderThenName(refreshed, routineFoldersRef.current);
         setAuxiliaryRoutines(sorted);
         const selected = fallback ? sorted.find((item) => item.id === fallback.id) ?? sorted[0] ?? null : sorted[0] ?? null;
         setSelectedRoutine(selected);
@@ -598,7 +610,7 @@ export function AuxiliaryRoutinesManager() {
       return;
     }
     const next = createRoutineFolderDraft(name, routineFolders.length + 1);
-    const updated = [...routineFolders, next].sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    const updated = sortFoldersForDisplay([...routineFolders, next]);
     setRoutineFolders(updated);
     setNewRoutineFolderName("");
     setSelectedFolderFilterId(next.id);
@@ -615,9 +627,9 @@ export function AuxiliaryRoutinesManager() {
     async (folderId: string, name: string) => {
       const cleaned = name.trim();
       if (!cleaned) return;
-      const updated = routineFolders.map((folder) =>
+      const updated = sortFoldersForDisplay(routineFolders.map((folder) =>
         folder.id === folderId ? { ...folder, name: cleaned, updatedAt: Date.now() } : folder
-      );
+      ));
       setRoutineFolders(updated);
       await saveRoutineFolders(updated);
     },
@@ -635,7 +647,7 @@ export function AuxiliaryRoutinesManager() {
       return;
     }
     const next = createDrillFolderDraft(name, drillFolders.length + 1);
-    const updated = [...drillFolders, next].sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    const updated = sortFoldersForDisplay([...drillFolders, next]);
     setDrillFolders(updated);
     setNewDrillFolderName("");
     setLibraryFolderFilterId(next.id);
@@ -652,9 +664,9 @@ export function AuxiliaryRoutinesManager() {
     async (folderId: string, name: string) => {
       const cleaned = name.trim();
       if (!cleaned) return;
-      const updated = drillFolders.map((folder) =>
+      const updated = sortFoldersForDisplay(drillFolders.map((folder) =>
         folder.id === folderId ? { ...folder, name: cleaned, updatedAt: Date.now() } : folder
-      );
+      ));
       setDrillFolders(updated);
       await saveDrillFolders(updated);
     },
@@ -706,7 +718,7 @@ export function AuxiliaryRoutinesManager() {
     const updated = existing
       ? drillLibraryItems.map((item) => (item.id === existing.id ? nextItem : item))
       : [...drillLibraryItems, nextItem];
-    const sorted = updated.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    const sorted = sortByFolderThenName(updated, drillFoldersRef.current);
     setDrillBusy(true);
     setDrillSaveStatus("saving");
     setDrillSaveError("");
@@ -1031,8 +1043,8 @@ export function AuxiliaryRoutinesManager() {
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
                 {[
                   { id: ALL_FOLDERS_ID, name: "All" },
-                  { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
                   ...routineFolders,
+                  { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
                 ].map((folder) => {
                   const active = selectedFolderFilterId === folder.id;
                   return (
@@ -1170,8 +1182,8 @@ export function AuxiliaryRoutinesManager() {
                       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
                         {[
                           { id: ALL_FOLDERS_ID, name: "All" },
-                          { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
                           ...drillFolders,
+                          { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
                         ].map((folder) => {
                           const active = insertFolderFilterId === folder.id;
                           return (
@@ -1461,8 +1473,8 @@ export function AuxiliaryRoutinesManager() {
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderChipRow}>
                 {[
                   { id: ALL_FOLDERS_ID, name: "All" },
-                  { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
                   ...drillFolders,
+                  { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
                 ].map((folder) => {
                   const active = libraryFolderFilterId === folder.id;
                   return (

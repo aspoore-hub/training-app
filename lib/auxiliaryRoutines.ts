@@ -2,6 +2,7 @@ import { loadJSON } from "./storage";
 import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
 import { saveJSONWithTeamCloudSyncStrict } from "./teamCloudSync";
+import { compareNames } from "./sortHelpers";
 
 export const AUXILIARY_ROUTINES_KEY = "training_app_auxiliary_routines_v1";
 
@@ -128,7 +129,7 @@ export async function loadAuxiliaryRoutines(): Promise<AuxiliaryRoutine[]> {
   return raw
     .map((item) => normalizeRoutine(item))
     .filter((item): item is AuxiliaryRoutine => !!item)
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+    .sort(compareNames);
 }
 
 export async function loadAuxiliaryRoutineDefinitions(): Promise<AuxiliaryRoutine[]> {
@@ -159,7 +160,7 @@ export async function loadAuxiliaryRoutineDefinitionsWithStatus(): Promise<Auxil
         items: data.data
           .map((item) => normalizeRoutine(item))
           .filter((item): item is AuxiliaryRoutine => !!item)
-          .sort((a, b) => b.updatedAt - a.updatedAt),
+          .sort(compareNames),
         loadedFromCloud: true,
         version: typeof data?.version === "number" ? data.version : undefined,
         updatedAt: typeof data?.updated_at === "string" ? data.updated_at : undefined,

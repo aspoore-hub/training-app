@@ -1,4 +1,5 @@
 import type { WorkoutCategory } from "./types";
+import { sortCategoriesForDisplay } from "./sortHelpers";
 
 export const CATEGORIES_KEY = "training_app_categories_v1";
 export const CATEGORY_COLOR_PALETTE = [
@@ -157,7 +158,7 @@ export function normalizeCategories(input: WorkoutCategory[] | null | undefined)
     });
   }
 
-  return normalized;
+  return sortCategoriesForDisplay(normalized);
 }
 
 export function pickUnusedCategoryColor(categories: WorkoutCategory[]) {

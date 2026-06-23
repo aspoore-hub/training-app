@@ -22,6 +22,7 @@ import {
   loadRoutineFoldersWithStatus,
   type RoutineFolder,
 } from "../../lib/drillLibrary";
+import { compareCategoryNames, sortByFolderThenName, sortFoldersForDisplay } from "../../lib/sortHelpers";
 import { supabase } from "../../lib/supabase";
 
 type LibraryTab = "routines" | "drills";
@@ -135,11 +136,15 @@ export default function AthleteWarmupsScreen() {
         return;
       }
 
-      setRoutines(routineResult.items);
-      setRoutineFolders(routineFolderResult.items);
-      setDrillFolders(drillFolderResult.items);
-      setDrillItems(drillResult.items);
-      setDrillById(new Map(drillResult.items.map((drill) => [drill.id, drill] as const)));
+      const sortedRoutineFolders = sortFoldersForDisplay(routineFolderResult.items);
+      const sortedDrillFolders = sortFoldersForDisplay(drillFolderResult.items);
+      const sortedRoutines = sortByFolderThenName(routineResult.items, sortedRoutineFolders);
+      const sortedDrillItems = sortByFolderThenName(drillResult.items, sortedDrillFolders);
+      setRoutines(sortedRoutines);
+      setRoutineFolders(sortedRoutineFolders);
+      setDrillFolders(sortedDrillFolders);
+      setDrillItems(sortedDrillItems);
+      setDrillById(new Map(sortedDrillItems.map((drill) => [drill.id, drill] as const)));
     } catch (err: any) {
       setError(String(err?.message ?? err ?? "Could not load warmups and drills."));
       setRoutines([]);
@@ -170,7 +175,7 @@ export default function AthleteWarmupsScreen() {
 
   const filteredRoutines = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return routines.filter((routine) => {
+    return sortByFolderThenName(routines.filter((routine) => {
       const folderId = String(routine.folderId ?? "").trim();
       const folderMatches =
         routineFolderFilterId === ALL_FOLDERS_ID ||
@@ -186,12 +191,12 @@ export default function AthleteWarmupsScreen() {
         ...uniqueRoutineTags(routine),
       ].join(" ").toLowerCase();
       return haystack.includes(needle);
-    });
+    }), routineFolders);
   }, [drillById, query, routineFolderFilterId, routineFolders, routines]);
 
   const filteredDrills = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return drillItems.filter((drill) => {
+    return sortByFolderThenName(drillItems.filter((drill) => {
       const folderId = String(drill.folderId ?? "").trim();
       const folderMatches =
         drillFolderFilterId === ALL_FOLDERS_ID ||
@@ -206,11 +211,11 @@ export default function AthleteWarmupsScreen() {
         ...(drill.categoryNames ?? []),
       ].join(" ").toLowerCase();
       return haystack.includes(needle);
-    });
+    }), drillFolders);
   }, [drillFolderFilterId, drillFolders, drillItems, query]);
 
   const allTags = useMemo(() => {
-    return Array.from(new Set(routines.flatMap((routine) => uniqueRoutineTags(routine)))).sort((a, b) => a.localeCompare(b));
+    return Array.from(new Set(routines.flatMap((routine) => uniqueRoutineTags(routine)))).sort(compareCategoryNames);
   }, [routines]);
 
   function toggleExpanded(id: string) {
@@ -310,8 +315,8 @@ export default function AthleteWarmupsScreen() {
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
         {[
           { id: ALL_FOLDERS_ID, name: "All" },
-          { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
           ...(activeTab === "routines" ? routineFolders : drillFolders),
+          { id: UNCATEGORIZED_FOLDER_ID, name: "Uncategorized" },
         ].map((folder) => {
           const active =
             activeTab === "routines"

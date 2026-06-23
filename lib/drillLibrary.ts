@@ -2,6 +2,7 @@ import { loadJSON, saveJSON } from "./storage";
 import { supabase } from "./supabase";
 import { getCurrentTeamId } from "./team";
 import { saveJSONWithTeamCloudSyncStrict } from "./teamCloudSync";
+import { compareNames, sortByFolderThenName, sortFoldersForDisplay } from "./sortHelpers";
 
 export const DRILL_FOLDERS_KEY = "training_app_drill_folders_v1";
 export const DRILL_LIBRARY_KEY = "training_app_drill_library_v1";
@@ -126,10 +127,9 @@ async function loadTeamKVBlob(key: string): Promise<{
 export async function loadDrillFolders(): Promise<DrillFolder[]> {
   const raw = await loadJSON<any[]>(DRILL_FOLDERS_KEY, []);
   if (!Array.isArray(raw)) return [];
-  return raw
+  return sortFoldersForDisplay(raw
     .map((item) => normalizeFolder(item))
-    .filter((item): item is DrillFolder => !!item)
-    .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    .filter((item): item is DrillFolder => !!item));
 }
 
 export async function saveDrillFolders(list: DrillFolder[]) {
@@ -142,9 +142,9 @@ export async function loadRoutineFolders(): Promise<RoutineFolder[]> {
     ? raw
         .map((item) => normalizeFolder(item))
         .filter((item): item is RoutineFolder => !!item)
-        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
     : [];
-  if (normalized.length > 0) return normalized;
+  const sorted = sortFoldersForDisplay(normalized);
+  if (sorted.length > 0) return sorted;
 
   // Backward compatibility: routine folders used to share the drill folder key.
   // Preserve old routine.folderId references by treating legacy drill folders as
@@ -159,10 +159,10 @@ export async function saveRoutineFolders(list: RoutineFolder[]) {
 export async function loadDrillLibraryItems(): Promise<DrillLibraryItem[]> {
   const raw = await loadJSON<any[]>(DRILL_LIBRARY_KEY, []);
   if (!Array.isArray(raw)) return [];
-  return raw
+  const folders = await loadDrillFolders();
+  return sortByFolderThenName(raw
     .map((item) => normalizeDrill(item))
-    .filter((item): item is DrillLibraryItem => !!item)
-    .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    .filter((item): item is DrillLibraryItem => !!item), folders);
 }
 
 export async function loadDrillLibraryDefinitions(): Promise<DrillLibraryItem[]> {
@@ -177,7 +177,7 @@ export async function loadDrillLibraryDefinitionsWithStatus(): Promise<DrillLibr
       items: result.data
         .map((item) => normalizeDrill(item))
         .filter((item): item is DrillLibraryItem => !!item)
-        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
+        .sort(compareNames),
       loadedFromCloud: true,
       version: result.version,
       updatedAt: result.updatedAt,
@@ -200,7 +200,7 @@ export async function loadDrillFoldersWithStatus(): Promise<FolderDefinitionsLoa
       items: result.data
         .map((item) => normalizeFolder(item))
         .filter((item): item is DrillFolder => !!item)
-        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
+        .sort(compareNames),
       loadedFromCloud: true,
       version: result.version,
       updatedAt: result.updatedAt,
@@ -225,7 +225,7 @@ export async function loadRoutineFoldersWithStatus(): Promise<FolderDefinitionsL
       items: result.data
         .map((item) => normalizeFolder(item))
         .filter((item): item is RoutineFolder => !!item)
-        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
+        .sort(compareNames),
       loadedFromCloud: true,
       version: result.version,
       updatedAt: result.updatedAt,

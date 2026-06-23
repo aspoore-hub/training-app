@@ -31,6 +31,7 @@ import {
   type TeamAthleteSeasonOverrideRow,
   type TeamSeasonRow,
 } from "./seasonsCloud";
+import { compareNames, sortSeasonsForDisplay } from "./sortHelpers";
 
 export type TeamAthlete = {
   id: string;
@@ -70,6 +71,10 @@ export type TeamTrainingGroup = TeamTrainingGroupRow;
 export type TeamTrainingGroupMembership = TeamTrainingGroupMembershipRow;
 export type TeamSeason = TeamSeasonRow;
 export type TeamAthleteSeasonOverride = TeamAthleteSeasonOverrideRow;
+
+function sortTrainingGroupsByName(rows: TeamTrainingGroup[]): TeamTrainingGroup[] {
+  return [...(Array.isArray(rows) ? rows : [])].sort(compareNames);
+}
 
 export function isActiveTrainingGroupMembership(
   membership: TeamTrainingGroupMembership | null | undefined
@@ -1478,7 +1483,7 @@ async function loadTrainingGroups(force = false) {
       listTrainingGroupMemberships(),
     ]);
     setState({
-      trainingGroups: Array.isArray(groups) ? groups : [],
+      trainingGroups: sortTrainingGroupsByName(Array.isArray(groups) ? groups : []),
       trainingGroupMemberships: Array.isArray(memberships) ? memberships : [],
       trainingGroupsLoaded: true,
       lastError: null,
@@ -1499,14 +1504,7 @@ async function loadTrainingGroups(force = false) {
 
 // ---------- seasons ----------
 function sortTeamSeasons(rows: TeamSeason[]): TeamSeason[] {
-  return [...rows].sort((a, b) => {
-    const aSort = Number.isFinite(a.sort_order as number) ? Number(a.sort_order) : Number.MAX_SAFE_INTEGER;
-    const bSort = Number.isFinite(b.sort_order as number) ? Number(b.sort_order) : Number.MAX_SAFE_INTEGER;
-    if (aSort !== bSort) return aSort - bSort;
-    const byStart = String(a.start_date ?? "").localeCompare(String(b.start_date ?? ""));
-    if (byStart !== 0) return byStart;
-    return String(a.name ?? "").localeCompare(String(b.name ?? ""));
-  });
+  return sortSeasonsForDisplay(rows);
 }
 
 async function loadTeamSeasons(force = false) {
@@ -1731,9 +1729,7 @@ async function createTrainingGroupInStore(name: string) {
   try {
     const created = await createTrainingGroup(name);
     setState({
-      trainingGroups: [...state.trainingGroups, created].sort((a, b) =>
-        String(a?.name ?? "").localeCompare(String(b?.name ?? ""))
-      ),
+      trainingGroups: sortTrainingGroupsByName([...state.trainingGroups, created]),
       lastError: null,
     });
     return created;
@@ -1750,9 +1746,7 @@ async function renameTrainingGroupInStore(groupId: string, name: string) {
   try {
     const updated = await updateTrainingGroupName(groupId, name);
     setState({
-      trainingGroups: state.trainingGroups
-        .map((row) => (row.id === groupId ? updated : row))
-        .sort((a, b) => String(a?.name ?? "").localeCompare(String(b?.name ?? ""))),
+      trainingGroups: sortTrainingGroupsByName(state.trainingGroups.map((row) => (row.id === groupId ? updated : row))),
       lastError: null,
     });
     return updated;
@@ -1769,9 +1763,7 @@ async function setTrainingGroupArchivedInStore(groupId: string, archived: boolea
   try {
     const updated = await setTrainingGroupArchived(groupId, archived);
     setState({
-      trainingGroups: state.trainingGroups
-        .map((row) => (row.id === groupId ? updated : row))
-        .sort((a, b) => String(a?.name ?? "").localeCompare(String(b?.name ?? ""))),
+      trainingGroups: sortTrainingGroupsByName(state.trainingGroups.map((row) => (row.id === groupId ? updated : row))),
       lastError: null,
     });
     return updated;
