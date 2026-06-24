@@ -29,10 +29,8 @@ import {
 } from "../../../lib/units";
 import { getSortableRoster, type TeamRosterAthlete } from "../../../lib/teamRoster";
 import {
-  isActiveTrainingGroupMembership,
   teamDataStore,
   type TeamSeason,
-  type TeamTrainingGroup,
 } from "../../../lib/teamDataStore";
 import {
   loadAthletePaceOverrides,
@@ -141,7 +139,6 @@ export default function CoachSettingsTab() {
   const [staffStatus, setStaffStatus] = useState<string | null>(null);
   const [lastCoachInviteToken, setLastCoachInviteToken] = useState("");
 
-  const [customGroupsOpen, setCustomGroupsOpen] = useState(false);
   const [seasonsOpen, setSeasonsOpen] = useState(false);
   const [individualPaceOpen, setIndividualPaceOpen] = useState(false);
   const [practiceDefaultsOpen, setPracticeDefaultsOpen] = useState(false);
@@ -150,17 +147,10 @@ export default function CoachSettingsTab() {
 
   const [roster, setRoster] = useState<TeamRosterAthlete[]>([]);
   const teamStore = teamDataStore.use();
-  const [trainingGroups, setTrainingGroups] = useState<TeamTrainingGroup[]>([]);
   const [teamSeasons, setTeamSeasons] = useState<TeamSeason[]>([]);
   const [practiceDefaults, setPracticeDefaults] = useState<PracticeTimeDefaults>(emptyPracticeTimeDefaults());
   const [athletePaceOverrides, setAthletePaceOverrides] = useState<AthletePaceOverrides>({});
   const [athletePaceTextById, setAthletePaceTextById] = useState<Record<string, string>>({});
-  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
-  const [groupNameText, setGroupNameText] = useState("");
-  const [draftAthleteIds, setDraftAthleteIds] = useState<string[]>([]);
-  const [groupSaveBusy, setGroupSaveBusy] = useState(false);
-  const [groupSaveError, setGroupSaveError] = useState<string | null>(null);
-  const [groupSaveSuccess, setGroupSaveSuccess] = useState<string | null>(null);
   const [editingSeasonId, setEditingSeasonId] = useState<string | null>(null);
   const [seasonNameText, setSeasonNameText] = useState("");
   const [seasonStartDateText, setSeasonStartDateText] = useState("");
@@ -197,7 +187,6 @@ export default function CoachSettingsTab() {
           loadFeedbackFlagSettings(),
         ]);
         await Promise.all([
-          teamDataStore.actions.loadTrainingGroups(true),
           teamDataStore.actions.loadTeamSeasons(true),
           teamDataStore.actions.loadAthleteSeasonOverrides(true),
         ]);
@@ -225,7 +214,6 @@ export default function CoachSettingsTab() {
         setFeedbackWarningMode(feedbackFlagSettings.mode ?? "all");
         setFeedbackStartDateText(String(feedbackFlagSettings.startDateISO ?? ""));
         await loadStaffAccess();
-        setTrainingGroups(Array.isArray(teamDataStore.getState().trainingGroups) ? teamDataStore.getState().trainingGroups : []);
         setTeamSeasons(Array.isArray(teamDataStore.getState().teamSeasons) ? teamDataStore.getState().teamSeasons : []);
         setAthletePaceOverrides(loadedOverrides);
         setPracticeDefaults(defaults);
@@ -264,12 +252,6 @@ export default function CoachSettingsTab() {
     }, [loadSettingsScreenData])
   );
 
-  const rosterById = useMemo(() => {
-    const map = new Map<string, TeamRosterAthlete>();
-    for (const athlete of roster) map.set(athlete.id, athlete);
-    return map;
-  }, [roster]);
-
   const sortedRoster = useMemo(() => {
     return [...roster].sort((a, b) => {
       const byLast = (a.lastName ?? "").localeCompare(b.lastName ?? "");
@@ -281,16 +263,8 @@ export default function CoachSettingsTab() {
   }, [roster]);
 
   useEffect(() => {
-    setTrainingGroups(Array.isArray(teamStore.trainingGroups) ? teamStore.trainingGroups : []);
-  }, [teamStore.trainingGroups]);
-
-  useEffect(() => {
     setTeamSeasons(Array.isArray(teamStore.teamSeasons) ? teamStore.teamSeasons : []);
   }, [teamStore.teamSeasons]);
-
-  const sortedGroups = useMemo(() => {
-    return [...trainingGroups].sort((a, b) => a.name.localeCompare(b.name));
-  }, [trainingGroups]);
 
   const sortedSeasons = useMemo(() => {
     return [...teamSeasons].sort((a, b) => {
@@ -558,161 +532,6 @@ export default function CoachSettingsTab() {
     }
   }
 
-  function resetGroupEditor() {
-    setEditingGroupId(null);
-    setGroupNameText("");
-    setDraftAthleteIds([]);
-  }
-
-  function toggleDraftAthlete(athleteId: string) {
-    setDraftAthleteIds((prev) =>
-      prev.includes(athleteId) ? prev.filter((id) => id !== athleteId) : [...prev, athleteId]
-    );
-  }
-
-  function startEditGroup(group: TeamTrainingGroup) {
-    setEditingGroupId(group.id);
-    setGroupNameText(group.name);
-    setGroupSaveError(null);
-    setGroupSaveSuccess(null);
-    const activeMembershipIds = teamStore.trainingGroupMemberships
-      .filter(
-        (row) =>
-          String(row.group_id ?? "").trim() === group.id &&
-          isActiveTrainingGroupMembership(row)
-      )
-      .map((row) => String(row.athlete_profile_id ?? "").trim())
-      .filter(Boolean);
-    setDraftAthleteIds(activeMembershipIds);
-    setCustomGroupsOpen(true);
-  }
-
-  async function saveGroup() {
-    const name = groupNameText.trim();
-    if (!name) {
-      Alert.alert("Group name required", "Enter a name for this training group.");
-      return;
-    }
-    if (groupSaveBusy) return;
-
-    setGroupSaveBusy(true);
-    setGroupSaveError(null);
-    setGroupSaveSuccess(null);
-    try {
-      const cleanAthleteIds = Array.from(
-        new Set((draftAthleteIds ?? []).map((id) => String(id ?? "").trim()).filter(Boolean))
-      );
-      console.log("[settings][training-groups] save start", {
-        mode: editingGroupId ? "update" : "create",
-        groupId: editingGroupId,
-        groupName: name,
-        selectedAthleteCount: cleanAthleteIds.length,
-        selectedAthleteSample: cleanAthleteIds.slice(0, 10),
-      });
-
-      let targetGroupId = editingGroupId;
-      if (editingGroupId) {
-        console.log("[TrainingGroups] rename start", { groupId: editingGroupId, name });
-        try {
-          const renamed = await teamDataStore.actions.renameTrainingGroup(editingGroupId, name);
-          console.log("[TrainingGroups] rename success", {
-            groupId: renamed?.id,
-            groupName: renamed?.name,
-          });
-        } catch (error) {
-          console.error("[TrainingGroups] rename failed", error);
-          throw new Error(`Update group name failed: ${getErrorMessage(error)}`);
-        }
-      } else {
-        console.log("[TrainingGroups] create start", { name });
-        try {
-          const created = await teamDataStore.actions.createTrainingGroup(name);
-          targetGroupId = String(created?.id ?? "").trim();
-          console.log("[TrainingGroups] create success", {
-            groupId: created?.id,
-            groupName: created?.name,
-          });
-        } catch (error) {
-          console.error("[TrainingGroups] create failed", error);
-          throw new Error(`Create group failed: ${getErrorMessage(error)}`);
-        }
-      }
-
-      if (!targetGroupId) {
-        throw new Error("Could not resolve training group id for membership save.");
-      }
-
-      console.log("[TrainingGroups] replace members start", {
-        groupId: targetGroupId,
-        selectedAthleteCount: cleanAthleteIds.length,
-        selectedAthleteSample: cleanAthleteIds.slice(0, 10),
-      });
-      try {
-        await teamDataStore.actions.replaceTrainingGroupMembers(targetGroupId, cleanAthleteIds);
-        console.log("[TrainingGroups] replace members success", {
-          groupId: targetGroupId,
-          selectedAthleteCount: cleanAthleteIds.length,
-        });
-      } catch (error) {
-        console.error("[TrainingGroups] replace members failed", error);
-        throw new Error(`Update group members failed: ${getErrorMessage(error)}`);
-      }
-
-      console.log("[TrainingGroups] reload groups start");
-      try {
-        await teamDataStore.actions.loadTrainingGroups(true);
-      } catch (error) {
-        console.error("[TrainingGroups] reload groups failed", error);
-        throw new Error(`Reload groups failed: ${getErrorMessage(error)}`);
-      }
-      const latestMembershipCount = teamDataStore
-        .getState()
-        .trainingGroupMemberships.filter(
-          (row) =>
-            String(row.group_id ?? "").trim() === targetGroupId &&
-            isActiveTrainingGroupMembership(row)
-        ).length;
-      console.log("[settings][training-groups] post-save reload complete", {
-        groupId: targetGroupId,
-        activeMembershipCount: latestMembershipCount,
-      });
-
-      setGroupSaveSuccess(
-        editingGroupId
-          ? `Group updated (${latestMembershipCount} athlete${latestMembershipCount === 1 ? "" : "s"}).`
-          : `Group created (${latestMembershipCount} athlete${latestMembershipCount === 1 ? "" : "s"}).`
-      );
-      resetGroupEditor();
-    } catch (error: any) {
-      const message = getErrorMessage(error);
-      console.error("[TrainingGroups] save failed", error);
-      console.error("[settings][training-groups] save failed", {
-        groupId: editingGroupId,
-        groupName: name,
-        selectedAthleteCount: draftAthleteIds.length,
-        error,
-      });
-      setGroupSaveError(message);
-      Alert.alert("Training group save failed", message);
-    } finally {
-      setGroupSaveBusy(false);
-    }
-  }
-
-  async function archiveGroup(groupId: string, archived: boolean) {
-    Alert.alert(archived ? "Archive group?" : "Restore group?", archived ? "This hides the training group from default selection." : "This restores the training group.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: archived ? "Archive" : "Restore",
-        style: archived ? "destructive" : "default",
-        onPress: async () => {
-          await teamDataStore.actions.setTrainingGroupArchived(groupId, archived);
-          if (editingGroupId === groupId) resetGroupEditor();
-        },
-      },
-    ]);
-  }
-
   function isValidDateOnlyISO(value: string): boolean {
     const text = String(value ?? "").trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
@@ -932,7 +751,7 @@ export default function CoachSettingsTab() {
             <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
               <Text style={styles.cardTitle}>Team Settings</Text>
               <Text style={styles.cardHint}>
-                Team defaults, routines, training groups, and seasons are editable by Owners and Editors.
+                Team defaults, routines, and seasons are editable by Owners and Editors.
               </Text>
             </View>
 
@@ -1440,161 +1259,6 @@ export default function CoachSettingsTab() {
           >
             <Text style={styles.groupActionBtnText}>Open Drill Routines</Text>
           </Pressable>
-        </View>
-
-        <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}> 
-          <Pressable
-            style={styles.sectionHeader}
-            hitSlop={10}
-            onPress={() => void toggleSettingsSection("training-groups-section-toggle", setCustomGroupsOpen)}
-          >
-          <Text style={styles.cardTitle}>Training Groups</Text>
-            <View style={styles.chevronTapTarget}>
-              <Text style={styles.chev}>{customGroupsOpen ? "▾" : "▸"}</Text>
-            </View>
-          </Pressable>
-          <Text style={styles.cardHint}>Create team-scoped groups for quick selection in Plan.</Text>
-
-          {customGroupsOpen ? (
-            <View style={styles.collapsibleBody}>
-              <View style={styles.placeholder}>
-                <Text style={styles.label}>Group name</Text>
-                <TextInput
-                  value={groupNameText}
-                  onChangeText={setGroupNameText}
-                  placeholder="e.g., Varsity Girls"
-                  style={styles.input}
-                />
-
-                <View style={{ flexDirection: "row", gap: 8, marginBottom: 8 }}>
-                  <Pressable
-                    disabled={groupSaveBusy}
-                    onPress={() => setDraftAthleteIds(sortedRoster.filter((a) => a.isActive !== false).map((a) => a.id))}
-                    style={[styles.groupActionBtn, groupSaveBusy && styles.disabledBtn]}
-                  >
-                  <Text style={styles.groupActionBtnText}>Select active</Text>
-                  </Pressable>
-                  <Pressable
-                    disabled={groupSaveBusy}
-                    onPress={() => setDraftAthleteIds([])}
-                    style={[styles.groupActionBtn, groupSaveBusy && styles.disabledBtn]}
-                  >
-                    <Text style={styles.groupActionBtnText}>Clear</Text>
-                  </Pressable>
-                  {(editingGroupId || groupNameText || draftAthleteIds.length > 0) ? (
-                    <Pressable
-                      disabled={groupSaveBusy}
-                      onPress={() => {
-                        setGroupSaveError(null);
-                        setGroupSaveSuccess(null);
-                        resetGroupEditor();
-                      }}
-                      style={[styles.groupActionBtn, groupSaveBusy && styles.disabledBtn]}
-                    >
-                      <Text style={styles.groupActionBtnText}>Cancel</Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-
-                <View style={{ borderWidth: 1, borderColor: "#eee", borderRadius: 12, maxHeight: 220 }}>
-                  <ScrollView nestedScrollEnabled>
-                    {sortedRoster.filter((athlete) => athlete.isActive !== false).map((athlete) => {
-                      const active = draftAthleteIds.includes(athlete.id);
-                      return (
-                        <Pressable
-                          key={athlete.id}
-                          disabled={groupSaveBusy}
-                          onPress={() => toggleDraftAthlete(athlete.id)}
-                          style={{
-                            flexDirection: "row",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            paddingVertical: 10,
-                            paddingHorizontal: 10,
-                            borderBottomWidth: 1,
-                            borderBottomColor: "#f1f1f1",
-                            backgroundColor: active ? "rgba(0,0,0,0.04)" : "#fff",
-                          }}
-                        >
-                          <Text style={{ fontWeight: "700", color: "#111", flex: 1, paddingRight: 8 }}>
-                            {athlete.displayName}
-                          </Text>
-                          <Text style={{ fontWeight: "900", color: active ? "#111" : "#999" }}>
-                            {active ? "✓" : "○"}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </ScrollView>
-                </View>
-
-                <Pressable
-                  disabled={groupSaveBusy}
-                  onPress={saveGroup}
-                  style={[styles.saveBtn, { marginTop: 10 }, groupSaveBusy && styles.disabledBtn]}
-                >
-                  <Text style={styles.saveBtnText}>
-                    {groupSaveBusy ? "Saving..." : editingGroupId ? "Update Group" : "Create Group"}
-                  </Text>
-                </Pressable>
-                {groupSaveError ? (
-                  <Text style={styles.errorText}>{groupSaveError}</Text>
-                ) : null}
-                {groupSaveSuccess ? (
-                  <Text style={styles.successText}>{groupSaveSuccess}</Text>
-                ) : null}
-              </View>
-
-              <View style={{ marginTop: 12 }}>
-                {sortedGroups.length === 0 ? (
-                  <Text style={{ color: "#666", fontWeight: "700" }}>No training groups yet.</Text>
-                ) : (
-                  sortedGroups.map((group) => {
-                    const memberIds = teamStore.trainingGroupMemberships
-                      .filter(
-                        (row) =>
-                          String(row.group_id ?? "").trim() === group.id &&
-                          isActiveTrainingGroupMembership(row)
-                      )
-                      .map((row) => String(row.athlete_profile_id ?? "").trim())
-                      .filter(Boolean);
-                    const names = memberIds
-                      .map((id) => rosterById.get(id))
-                      .filter((a): a is TeamRosterAthlete => !!a)
-                      .map((a) => a.displayName)
-                      .slice(0, 3);
-                    const extra = Math.max(0, memberIds.length - names.length);
-                    const archived = !!group.archived_at;
-
-                    return (
-                      <View key={group.id} style={styles.groupCard}>
-                        <View style={{ flex: 1, paddingRight: 8 }}>
-                          <Text style={styles.groupName}>{group.name}{archived ? " (Archived)" : ""}</Text>
-                          <Text style={styles.groupMeta}>
-                            {memberIds.length} athlete{memberIds.length === 1 ? "" : "s"}
-                            {names.length > 0 ? ` • ${names.join(", ")}${extra > 0 ? ` +${extra} more` : ""}` : ""}
-                          </Text>
-                        </View>
-                        <View style={{ flexDirection: "row", gap: 8 }}>
-                          <Pressable onPress={() => startEditGroup(group)} style={styles.groupActionBtn}>
-                            <Text style={styles.groupActionBtnText}>Edit</Text>
-                          </Pressable>
-                          <Pressable
-                            onPress={() => archiveGroup(group.id, !archived)}
-                            style={archived ? styles.groupActionBtn : styles.groupDeleteBtn}
-                          >
-                            <Text style={archived ? styles.groupActionBtnText : styles.groupDeleteBtnText}>
-                              {archived ? "Restore" : "Archive"}
-                            </Text>
-                          </Pressable>
-                        </View>
-                      </View>
-                    );
-                  })
-                )}
-              </View>
-            </View>
-          ) : null}
         </View>
 
         <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>

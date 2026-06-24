@@ -92,6 +92,15 @@ export default function CoachTabs() {
         }}
       />
       <Tabs.Screen
+        name="training-groups"
+        options={{
+          title: "Training Groups",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="people-circle-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="categories"
         options={{
           title: "Workout Categories",
