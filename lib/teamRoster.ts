@@ -1,5 +1,11 @@
 import { supabase } from "./supabase";
 import { getCurrentTeamId, listTeamAthletes, type TeamAthlete } from "./team";
+import {
+  compareAthleteDisplayNamesByLastFirst,
+  getAthleteDisplayName,
+  getAthleteFirstName,
+  getAthleteLastName,
+} from "./athleteName";
 
 // Authoritative roster source: team_athletes.
 // Do not add alternative roster read/write paths for this domain.
@@ -30,35 +36,12 @@ function isRosterStatusActive(status: string | null | undefined): boolean {
   return normalized === "active";
 }
 
-function splitDisplayName(displayName: string): { firstName: string; lastName: string } {
-  const clean = String(displayName ?? "").trim().replace(/\s+/g, " ");
-  if (!clean) return { firstName: "", lastName: "" };
-  const parts = clean.split(" ");
-  if (parts.length === 1) return { firstName: parts[0], lastName: "" };
-  return {
-    firstName: parts.slice(0, -1).join(" "),
-    lastName: parts[parts.length - 1] ?? "",
-  };
-}
-
 export function compareAthleteDisplayNamesByLastName(aName: string, bName: string): number {
-  const a = splitDisplayName(aName);
-  const b = splitDisplayName(bName);
-  const last = String(a.lastName ?? "").toLowerCase().localeCompare(String(b.lastName ?? "").toLowerCase());
-  if (last !== 0) return last;
-  const first = String(a.firstName ?? "").toLowerCase().localeCompare(String(b.firstName ?? "").toLowerCase());
-  if (first !== 0) return first;
-  return String(aName ?? "").toLowerCase().localeCompare(String(bName ?? "").toLowerCase());
+  return compareAthleteDisplayNamesByLastFirst(aName, bName);
 }
 
 function normalizeDisplayName(raw: Partial<TeamAthlete>): string {
-  const fromDisplay = String(raw.display_name ?? "").trim();
-  if (fromDisplay) return fromDisplay;
-
-  const first = String(raw.first_name ?? "").trim();
-  const last = String(raw.last_name ?? "").trim();
-  const joined = `${first} ${last}`.trim();
-  return joined || "Athlete";
+  return getAthleteDisplayName(raw);
 }
 
 function normalizeSearchText(parts: Array<string | null | undefined>): string {
@@ -80,8 +63,8 @@ export function normalizeTeamRosterAthlete(raw: Partial<TeamAthlete> & { active?
 
   const teamId = String(raw.team_id ?? "").trim();
   const displayName = normalizeDisplayName(raw);
-  const firstName = String(raw.first_name ?? "").trim() || splitDisplayName(displayName).firstName;
-  const lastName = String(raw.last_name ?? "").trim() || splitDisplayName(displayName).lastName;
+  const firstName = getAthleteFirstName({ ...raw, display_name: displayName });
+  const lastName = getAthleteLastName({ ...raw, display_name: displayName });
   const sortableName = `${String(lastName).toLowerCase()}|${String(firstName).toLowerCase()}|${String(displayName).toLowerCase()}`;
   const email = String(raw.email ?? "").trim() || null;
 

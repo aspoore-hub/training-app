@@ -54,6 +54,7 @@ import { getWeekLabelTone, getWeekLabelToneColors, getWeekLabelToneText, type We
 import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../../lib/teamDataStore";
 import { setSeasonWeekVisibilityByDateRange } from "../../../lib/seasonWeekVisibility";
 import { canEditTraining, canExport, canPublishTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
+import { splitDisplayNameForEdit } from "../../../lib/athleteName";
 
 const SCREEN_W = Dimensions.get("window").width;
 const COACH_CALENDAR_VIEW_PREFS_KEY = "coach_calendar_view_prefs_v1";
@@ -1170,8 +1171,8 @@ function athleteLastNamePreview(workout: WeeklyWorkoutSection): string {
           lastNames.add(trimmed.split(",")[0].trim());
           return;
         }
-        const parts = trimmed.split(/\s+/).filter(Boolean);
-        if (parts.length > 0) lastNames.add(parts[parts.length - 1]);
+        const lastName = splitDisplayNameForEdit(trimmed).lastName || trimmed;
+        lastNames.add(lastName);
       });
     });
   });
@@ -1240,10 +1241,9 @@ function parseDisplayName(fullName: string): ParsedDisplayName {
     return { full: "Unknown athlete", last: "", first: "", firstInitial: "", secondInitial: "" };
   }
   const parts = full.split(" ").filter(Boolean);
-  const last = parts[parts.length - 1] ?? "";
-  const givenParts = parts.slice(0, -1);
-  const first = givenParts[0] ?? "";
-  const second = givenParts[1] ?? "";
+  const first = parts[0] ?? "";
+  const last = parts.slice(1).join(" ");
+  const second: string = "";
   return {
     full,
     last,

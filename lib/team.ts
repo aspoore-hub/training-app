@@ -151,7 +151,7 @@ export async function getTeamAthlete(id: string): Promise<TeamAthlete | null> {
 
 export async function updateTeamAthlete(
   id: string,
-  patch: Partial<Pick<TeamAthlete, "display_name" | "email" | "team_start_date" | "team_end_date">>
+  patch: Partial<Pick<TeamAthlete, "first_name" | "last_name" | "display_name" | "email" | "team_start_date" | "team_end_date">>
 ) {
   const teamId = await getCurrentTeamId();
   if (!teamId) throw new Error("No current team");
@@ -159,6 +159,8 @@ export async function updateTeamAthlete(
 
   const payload: {
     updated_at: string;
+    first_name?: string | null;
+    last_name?: string | null;
     display_name?: string;
     email?: string | null;
     team_start_date?: string | null;
@@ -167,6 +169,8 @@ export async function updateTeamAthlete(
     updated_at: new Date().toISOString(),
   };
 
+  if (patch.first_name !== undefined) payload.first_name = patch.first_name?.trim() || null;
+  if (patch.last_name !== undefined) payload.last_name = patch.last_name?.trim() || null;
   if (patch.display_name !== undefined) payload.display_name = patch.display_name.trim();
   if (patch.email !== undefined) payload.email = patch.email?.trim() || null;
   if (patch.team_start_date !== undefined) payload.team_start_date = patch.team_start_date?.trim() || null;

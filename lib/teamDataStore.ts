@@ -785,6 +785,8 @@ function getInactiveRoster() {
 async function updateAthlete(
   athleteId: string,
   patch: {
+    first_name?: string | null;
+    last_name?: string | null;
     display_name?: string;
     email?: string | null;
     team_start_date?: string | null;
@@ -805,11 +807,15 @@ async function updateAthlete(
     });
 
     const update: {
+      first_name?: string | null;
+      last_name?: string | null;
       display_name?: string;
       email?: string | null;
       team_start_date?: string | null;
       team_end_date?: string | null;
     } = {};
+    if ("first_name" in patch) update.first_name = patch.first_name?.trim() || null;
+    if ("last_name" in patch) update.last_name = patch.last_name?.trim() || null;
     if (typeof patch.display_name === "string") update.display_name = patch.display_name;
     if ("email" in patch) update.email = patch.email ?? null;
     if ("team_start_date" in patch) update.team_start_date = patch.team_start_date ?? null;

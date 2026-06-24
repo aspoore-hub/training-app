@@ -22,6 +22,7 @@ import {
 } from "../../../lib/teamWorkoutsCloud";
 import { resolveAthleteSeasonWindowWithTenure } from "../../../lib/teamRoster";
 import { teamDataStore } from "../../../lib/teamDataStore";
+import { getAthleteDisplayName, getAthleteFirstName, getAthleteLastName } from "../../../lib/athleteName";
 import type { WorkoutCategory } from "../../../lib/types";
 import {
   loadWorkoutPlanBuilderDrafts,
@@ -160,18 +161,13 @@ function isRosterRowActive(row: { roster_status?: string | null } | null | undef
 }
 
 function rosterRowDisplayName(row: { display_name?: string | null; first_name?: string | null; last_name?: string | null; id?: string | null }) {
-  const display = String(row?.display_name ?? "").trim();
-  if (display) return display;
-  const joined = `${String(row?.first_name ?? "").trim()} ${String(row?.last_name ?? "").trim()}`.trim();
-  if (joined) return joined;
-  const id = String(row?.id ?? "").trim();
-  return id ? `Athlete (${id.slice(-6)})` : "Athlete";
+  return getAthleteDisplayName(row);
 }
 
 function rosterRowSortName(row: { display_name?: string | null; first_name?: string | null; last_name?: string | null; id?: string | null }) {
-  const display = rosterRowDisplayName(row).toLowerCase();
-  const first = String(row?.first_name ?? "").trim().toLowerCase();
-  const last = String(row?.last_name ?? "").trim().toLowerCase();
+  const display = getAthleteDisplayName(row).toLowerCase();
+  const first = getAthleteFirstName(row).toLowerCase();
+  const last = getAthleteLastName(row).toLowerCase();
   return `${last}|${first}|${display}`;
 }
 

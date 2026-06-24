@@ -14,6 +14,7 @@ import {
 import { teamDataStore, type TeamAthlete } from "../../lib/teamDataStore";
 import { canEditRoster, getCurrentTeamRole, type TeamRole } from "../../lib/teamPermissions";
 import { supabase } from "../../lib/supabase";
+import { compareAthletesByLastFirst, getAthleteDisplayName } from "../../lib/athleteName";
 import { AppText } from "../ui/AppText";
 import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
@@ -32,22 +33,6 @@ function buildInviteUrl(token: string) {
       ? window.location.origin
       : "https://www.tracksidecoach.com";
   return `${origin}/join?token=${encodeURIComponent(cleanToken)}`;
-}
-
-function splitName(displayName: string) {
-  const parts = String(displayName ?? "").trim().split(/\s+/).filter(Boolean);
-  const first = parts.slice(0, 1).join(" ");
-  const last = parts.slice(1).join(" "); // everything after first token
-  return { first, last };
-}
-
-function sortKeyForAthlete(a: TeamAthlete) {
-  const { first, last } = splitName(a.display_name ?? "");
-  // sort primarily by last, then first
-  return {
-    last: last.toLowerCase(),
-    first: first.toLowerCase(),
-  };
 }
 
 export function RosterListPane() {
@@ -128,19 +113,13 @@ export function RosterListPane() {
         : rosterFilter === "inactive"
           ? teamDataStore.getInactiveRoster()
           : teamDataStore.getActiveRoster();
-    const sorted = [...sourceRoster].sort((a, b) => {
-      const ak = sortKeyForAthlete(a);
-      const bk = sortKeyForAthlete(b);
-      const lastCmp = ak.last.localeCompare(bk.last);
-      if (lastCmp !== 0) return lastCmp;
-      return ak.first.localeCompare(bk.first);
-    });
+    const sorted = [...sourceRoster].sort(compareAthletesByLastFirst);
 
     if (!q) return sorted;
 
       return sorted.filter((a) => {
         const athleteId = String(a.id ?? "").toLowerCase();
-        const athleteName = String(a.display_name ?? "").toLowerCase();
+        const athleteName = getAthleteDisplayName(a).toLowerCase();
         const athleteEmail = String(a.email ?? "").toLowerCase();
         return athleteName.includes(q) || athleteEmail.includes(q) || athleteId.includes(q);
     });
@@ -191,7 +170,7 @@ export function RosterListPane() {
     const target = normName(`${first} ${last}`);
 
     return teamDataStore.getState().roster.some((a) => {
-      const existing = normName(a.display_name ?? "");
+      const existing = normName(getAthleteDisplayName(a));
       return existing === target;
     });
   }
@@ -527,7 +506,7 @@ export function RosterListPane() {
                   >
                     <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
                       <AppText variant="sub" numberOfLines={1} style={{ fontSize: 15 }}>
-                        {a.display_name ?? "Unnamed athlete"}
+                        {getAthleteDisplayName(a)}
                       </AppText>
                       <AppText variant="caption" color="mutedText" numberOfLines={1} style={{ fontSize: 11.5 }}>
                         {String(a.email ?? "").trim() ? a.email : "No email"}

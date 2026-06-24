@@ -37,6 +37,7 @@ import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../../../lib/pace";
 import { formatParsedWorkoutEntry, parseWorkoutEntryValue, workoutEntryMilesRange, workoutEntryXTRange } from "../../../../lib/workoutEntryParser";
 import type { WeekStartDay } from "../../../../lib/types";
 import { canEditRoster, getCurrentTeamRole, type TeamRole } from "../../../../lib/teamPermissions";
+import { getAthleteDisplayName, getAthleteFirstName, getAthleteLastName } from "../../../../lib/athleteName";
 
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
@@ -236,7 +237,8 @@ export default function CoachEditTeamAthlete() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
-  const [name, setName] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [teamStartDate, setTeamStartDate] = useState("");
   const [teamEndDate, setTeamEndDate] = useState("");
@@ -328,7 +330,8 @@ export default function CoachEditTeamAthlete() {
           return;
         }
 
-        setName(String(a.display_name ?? ""));
+        setFirstName(getAthleteFirstName(a));
+        setLastName(getAthleteLastName(a));
         setEmail(String(a.email ?? ""));
         setTeamStartDate(String(a.team_start_date ?? ""));
         setTeamEndDate(String(a.team_end_date ?? ""));
@@ -503,7 +506,7 @@ export default function CoachEditTeamAthlete() {
 
         if (cancelled || seasonTrainingRequestSeqRef.current !== requestSeq) return;
 
-        const athleteNameLower = String(name ?? "").trim().toLowerCase();
+        const athleteNameLower = getAthleteDisplayName({ firstName, lastName }).toLowerCase();
         const filteredFeedback = (Array.isArray(allMileageFeedback) ? allMileageFeedback : []).filter((entry) => {
           const dateISO = String(entry?.dateISO ?? "").trim();
           if (!dateISO || dateISO < startISO || dateISO > endISO) return false;
@@ -534,7 +537,7 @@ export default function CoachEditTeamAthlete() {
     return () => {
       cancelled = true;
     };
-  }, [athleteId, name, seasonTrainingWeekStarts, selectedTrainingResolvedWindow]);
+  }, [athleteId, firstName, lastName, seasonTrainingWeekStarts, selectedTrainingResolvedWindow]);
 
   const seasonTrainingSessionRows = useMemo(() => {
     if (!selectedTrainingResolvedWindow) return [] as AthleteSeasonSessionRow[];
@@ -850,7 +853,7 @@ export default function CoachEditTeamAthlete() {
     const season = activeSeasons.find((row) => String(row.id ?? "").trim() === String(seasonId ?? "").trim());
     if (!season) return;
     const existing = overridesBySeasonId.get(String(season.id ?? "").trim()) ?? null;
-    const athleteLabel = String(name ?? "").trim() || "this athlete";
+    const athleteLabel = getAthleteDisplayName({ firstName, lastName });
     const message = `Exclude ${String(season.name ?? "this season")} for ${athleteLabel}?\n\nThis only affects this athlete's season participation. Historical workouts and team season dates will not change.`;
     const run = async () => {
       setSeasonSavingById((prev) => ({ ...prev, [seasonId]: true }));
@@ -957,7 +960,7 @@ export default function CoachEditTeamAthlete() {
       return;
     }
 
-    const athleteLabel = String(name ?? "").trim() || "this athlete";
+    const athleteLabel = getAthleteDisplayName({ firstName, lastName });
     const nextSeasonName = String(nextSeason.name ?? "").trim() || "next season";
     const confirmMessage = `Set ${nextSeasonName} start date for ${athleteLabel} to ${nextStartISO}?\n\nThis will only update this athlete's season override. Team season dates will not change.`;
 
@@ -1013,9 +1016,18 @@ export default function CoachEditTeamAthlete() {
 
     setBusy(true);
     try {
+      const cleanFirstName = firstName.trim();
+      const cleanLastName = lastName.trim();
+      if (!cleanFirstName || !cleanLastName) {
+        Alert.alert("Name required", "Enter both a first and last name.");
+        return;
+      }
+      const displayName = `${cleanFirstName} ${cleanLastName}`.trim();
       const cleanEmail = email.trim();
       await teamDataStore.actions.updateAthlete(athleteId, {
-        display_name: name.trim(),
+        first_name: cleanFirstName,
+        last_name: cleanLastName,
+        display_name: displayName,
         email: cleanEmail || null,
         team_start_date: start || null,
         team_end_date: end || null,
@@ -1268,7 +1280,7 @@ export default function CoachEditTeamAthlete() {
               Roster profile
             </AppText>
             <AppText variant="title" numberOfLines={1}>
-              {name.trim() ? name : "Athlete Details"}
+              {getAthleteDisplayName({ firstName, lastName })}
             </AppText>
             <AppText variant="caption" color="mutedText" numberOfLines={1}>
               {athleteId}
@@ -1310,10 +1322,18 @@ export default function CoachEditTeamAthlete() {
         </View>
         <Divider />
         <TextField
-          label="Display name"
-          value={name}
-          onChangeText={setName}
-          placeholder="e.g. Alex Rivera"
+          label="First name"
+          value={firstName}
+          onChangeText={setFirstName}
+          placeholder="e.g. Alex"
+          autoCapitalize="words"
+          editable={!readOnlyRoster}
+        />
+        <TextField
+          label="Last name"
+          value={lastName}
+          onChangeText={setLastName}
+          placeholder="e.g. Rivera or Somers Glenn"
           autoCapitalize="words"
           editable={!readOnlyRoster}
         />

@@ -30,6 +30,7 @@ import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataS
 import { loadCoachWeekLabels, loadWeekStartSetting, type CoachWeekLabels } from "../../lib/settings";
 import { getWeekLabelTone, getWeekLabelToneColors } from "../../lib/weekLabelStyle";
 import { SegmentedViewToggle } from "../../components/shared/SegmentedViewToggle";
+import { splitDisplayNameForEdit } from "../../lib/athleteName";
 
 const SELECTED_KEY = "training_app_selected_athlete_v1";
 
@@ -89,9 +90,9 @@ function formatGroupMateNamesCompact(names: string[]): string {
     .map((raw) => {
       const text = String(raw ?? "").trim();
       if (!text) return null;
-      const parts = text.split(/\s+/).filter(Boolean);
-      const first = String(parts[0] ?? "").trim();
-      const last = String(parts[parts.length - 1] ?? "").trim() || text;
+      const parsed = splitDisplayNameForEdit(text);
+      const first = parsed.firstName;
+      const last = parsed.lastName || text;
       return { first, last, original: text };
     })
     .filter((entry): entry is { first: string; last: string; original: string } => Boolean(entry));
