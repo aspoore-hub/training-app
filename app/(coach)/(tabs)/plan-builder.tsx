@@ -15,13 +15,15 @@ import {
 import {
   buildTeamWorkoutInsertRows,
   createTeamWorkoutBatch,
+  deleteTeamWorkoutsByIds,
   listAthleteWorkoutsInRange,
+  listTeamWorkoutsInRange,
   listTeamWorkoutsByBatch,
   updateTeamWorkoutById,
   type TeamWorkoutRow,
 } from "../../../lib/teamWorkoutsCloud";
-import { resolveAthleteSeasonWindowWithTenure } from "../../../lib/teamRoster";
-import { teamDataStore } from "../../../lib/teamDataStore";
+import { isAthleteEligibleForPlanningDate, resolveAthleteSeasonWindowWithTenure } from "../../../lib/teamRoster";
+import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../../lib/teamDataStore";
 import { getAthleteDisplayName, getAthleteFirstName, getAthleteLastName } from "../../../lib/athleteName";
 import type { WorkoutCategory } from "../../../lib/types";
 import {
@@ -50,6 +52,13 @@ type ExistingPlanCell = {
     row: TeamWorkoutRow;
     snapshot: PlanBuilderSnapshot;
   };
+  sources?: Array<{
+    athleteId: string;
+    row: TeamWorkoutRow;
+    snapshot: PlanBuilderSnapshot;
+  }>;
+  missingAthleteIds?: string[];
+  mixedFields?: PlanBuilderEditingField[];
   conflictReason?: string;
 };
 
@@ -63,6 +72,7 @@ type PlanBuilderCellState =
 
 type PlanBuilderEditingField = "title" | "details";
 type PlanBuilderRangeMode = "season" | "custom";
+type PlanBuilderTargetType = "athlete" | "trainingGroup";
 
 type ApplyPreviewScope = "entire" | "range";
 
@@ -84,6 +94,7 @@ type ApplySummary = {
   title: string;
   created: number;
   updated: number;
+  deleted?: number;
   skipped: number;
   conflicts: number;
   errors: string[];
@@ -100,6 +111,12 @@ type UpdateSafeExistingRowsResult = {
   staleSkipped: number;
   unsafeSkipped: number;
   headerNoteFailureCount: number;
+};
+
+type DeleteSafeClearedRowsResult = {
+  deletedKeys: string[];
+  deletedRows: number;
+  unsafeSkipped: number;
 };
 
 function addDaysISO(dateISO: string, days: number): string {
@@ -143,6 +160,14 @@ function formatDayShort(dateISO: string): string {
 
 function makeDraftId(athleteId: string) {
   return `wpb_${String(athleteId ?? "").trim()}_${Date.now()}`;
+}
+
+function groupDraftTargetId(groupId: string) {
+  return `group:${String(groupId ?? "").trim()}`;
+}
+
+function planTargetLabel(type: PlanBuilderTargetType) {
+  return type === "trainingGroup" ? "Training Group" : "Athlete";
 }
 
 function createBatchId(dateISO: string): string {
@@ -243,6 +268,37 @@ function snapshotsEqual(a: PlanBuilderSnapshot | null | undefined, b: PlanBuilde
     normalizeStringList(left.preRoutineIds).join("\u0001") === normalizeStringList(right.preRoutineIds).join("\u0001") &&
     normalizeStringList(left.postRoutineIds).join("\u0001") === normalizeStringList(right.postRoutineIds).join("\u0001")
   );
+}
+
+function snapshotFieldEqual(
+  field: keyof PlanBuilderSnapshot,
+  a: PlanBuilderSnapshot | null | undefined,
+  b: PlanBuilderSnapshot | null | undefined
+): boolean {
+  if (field === "categoryIds" || field === "preRoutineIds" || field === "postRoutineIds") {
+    return normalizeStringList(a?.[field]).join("\u0001") === normalizeStringList(b?.[field]).join("\u0001");
+  }
+  return String(a?.[field] ?? "").trim() === String(b?.[field] ?? "").trim();
+}
+
+function changedSnapshotPatch(
+  draftSnapshot: PlanBuilderSnapshot,
+  originalSnapshot: PlanBuilderSnapshot | null | undefined
+): Partial<TeamWorkoutRow> {
+  const patch: Partial<TeamWorkoutRow> = {};
+  if (!originalSnapshot || !snapshotFieldEqual("title", draftSnapshot, originalSnapshot)) {
+    patch.title = String(draftSnapshot.title ?? "").trim() || "Workout";
+  }
+  if (!originalSnapshot || !snapshotFieldEqual("details", draftSnapshot, originalSnapshot)) {
+    patch.details = String(draftSnapshot.details ?? "").trim() || null;
+  }
+  if (!originalSnapshot || !snapshotFieldEqual("timeText", draftSnapshot, originalSnapshot)) {
+    patch.time_text = String(draftSnapshot.timeText ?? "").trim() || null;
+  }
+  if (!originalSnapshot || !snapshotFieldEqual("location", draftSnapshot, originalSnapshot)) {
+    patch.location = String(draftSnapshot.location ?? "").trim() || null;
+  }
+  return patch;
 }
 
 function snapshotFromDraftCell(cell: WorkoutPlanBuilderCell | null | undefined): PlanBuilderSnapshot {
@@ -551,6 +607,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const [activeGridId, setActiveGridId] = useState<string | null>(null);
   const [focusedEditorKey, setFocusedEditorKey] = useState<string | null>(null);
   const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
+  const [targetType, setTargetType] = useState<PlanBuilderTargetType>("athlete");
+  const [selectedTrainingGroupId, setSelectedTrainingGroupId] = useState("");
+  const [trainingGroupPickerOpen, setTrainingGroupPickerOpen] = useState(false);
   const readOnlyPlanBuilder = !canApplyPlanBuilder(currentTeamRole);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveGenerationRef = useRef(0);
@@ -560,6 +619,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const focusedEditorKeyRef = useRef<string | null>(null);
   const existingCellsRef = useRef<Record<string, ExistingPlanCell>>({});
   const selectedAthleteIdRef = useRef("");
+  const selectedPlanTargetIdRef = useRef("");
+  const targetTypeRef = useRef<PlanBuilderTargetType>("athlete");
   const commitEditingFieldsRef = useRef<((keys?: string[]) => Promise<WorkoutPlanBuilderDraft | null>) | null>(null);
   const existingLoadSeqRef = useRef(0);
   const planBuilderClipboardRef = useRef("");
@@ -604,10 +665,57 @@ export default function WorkoutPlanBuilderDraftScreen() {
     [roster, selectedAthleteId]
   );
 
+  const trainingGroups = useMemo(
+    () => (Array.isArray(store.trainingGroups) ? store.trainingGroups : []).filter((group) => !group?.archived_at),
+    [store.trainingGroups]
+  );
+
+  const selectedTrainingGroup = useMemo(
+    () => trainingGroups.find((group) => String(group.id ?? "").trim() === selectedTrainingGroupId) ?? null,
+    [selectedTrainingGroupId, trainingGroups]
+  );
+
+  const activeTrainingGroupAthleteIds = useMemo(() => {
+    const groupId = String(selectedTrainingGroupId ?? "").trim();
+    if (!groupId) return [];
+    const rosterIds = new Set(roster.map((athlete) => String(athlete.id ?? "").trim()).filter(Boolean));
+    return Array.from(new Set(
+      (Array.isArray(store.trainingGroupMemberships) ? store.trainingGroupMemberships : [])
+        .filter((membership) => isActiveTrainingGroupMembership(membership))
+        .filter((membership) => String(membership?.group_id ?? "").trim() === groupId)
+        .map((membership) => String(membership?.athlete_profile_id ?? "").trim())
+        .filter((athleteId) => athleteId && rosterIds.has(athleteId))
+    )).sort((a, b) => {
+      const left = roster.find((athlete) => String(athlete.id ?? "").trim() === a);
+      const right = roster.find((athlete) => String(athlete.id ?? "").trim() === b);
+      return rosterRowSortName(left ?? { id: a }).localeCompare(rosterRowSortName(right ?? { id: b }));
+    });
+  }, [roster, selectedTrainingGroupId, store.trainingGroupMemberships]);
+
+  const selectedPlanTargetId = useMemo(() => {
+    if (targetType === "trainingGroup") return groupDraftTargetId(selectedTrainingGroupId);
+    return String(selectedAthleteId ?? "").trim();
+  }, [selectedAthleteId, selectedTrainingGroupId, targetType]);
+
+  const selectedTargetAthleteIds = useMemo(() => {
+    if (targetType === "trainingGroup") return activeTrainingGroupAthleteIds;
+    return selectedAthleteId ? [selectedAthleteId] : [];
+  }, [activeTrainingGroupAthleteIds, selectedAthleteId, targetType]);
+
   const selectedSeason = useMemo(
     () => seasons.find((season) => String(season?.id ?? "").trim() === String(selectedSeasonId ?? "").trim()) ?? null,
     [seasons, selectedSeasonId]
   );
+
+  const athleteSeasonOverridesBySeasonAndAthlete = useMemo(() => {
+    const map = new Map<string, (typeof store.athleteSeasonOverrides)[number]>();
+    (Array.isArray(store.athleteSeasonOverrides) ? store.athleteSeasonOverrides : []).forEach((override) => {
+      const seasonId = String(override?.season_id ?? "").trim();
+      const athleteId = String(override?.athlete_profile_id ?? "").trim();
+      if (seasonId && athleteId) map.set(`${seasonId}:${athleteId}`, override);
+    });
+    return map;
+  }, [store.athleteSeasonOverrides]);
 
   const categoryById = useMemo(() => {
     const map = new Map<string, WorkoutCategory>();
@@ -730,12 +838,12 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
   const patchActiveDraft = useCallback(
     (patch: Partial<WorkoutPlanBuilderDraft>) => {
-      if (!selectedAthleteId) return;
+      if (!selectedPlanTargetId) return;
       setActiveDraft((prev) => {
         const base =
           prev ??
           createEmptyDraft({
-            athleteId: selectedAthleteId,
+            athleteId: selectedPlanTargetId,
             seasonId: selectedSeasonId,
             rangeMode: selectedSeasonId ? "season" : "custom",
             firstWeekStartISO,
@@ -744,7 +852,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
         const next: WorkoutPlanBuilderDraft = {
           ...base,
           ...patch,
-          athleteId: selectedAthleteId,
+          athleteId: selectedPlanTargetId,
           updatedAt: Date.now(),
         };
         activeDraftRef.current = next;
@@ -752,12 +860,25 @@ export default function WorkoutPlanBuilderDraftScreen() {
         return next;
       });
     },
-    [firstWeekStartISO, scheduleSave, selectedAthleteId, selectedSeasonId, weekCount]
+    [firstWeekStartISO, scheduleSave, selectedPlanTargetId, selectedSeasonId, weekCount]
   );
 
   const getResolvedSeasonWeekRange = useCallback(
     (athlete: typeof selectedAthlete, season: typeof selectedSeason) => {
-      if (!athlete || !season) return null;
+      if (!season) return null;
+      if (!athlete && targetType === "trainingGroup") {
+        const start = String(season.start_date ?? "").trim();
+        const end = String(season.end_date ?? "").trim();
+        if (!isDateISO(start) || !isDateISO(end) || end < start) return null;
+        const first = getWeekStartISO(start, weekStartsOn);
+        const last = getWeekStartISO(end, weekStartsOn);
+        const weeks = Math.min(
+          MAX_PLAN_BUILDER_WEEKS,
+          Math.max(1, Math.floor((parseISODate(last).getTime() - parseISODate(first).getTime()) / (7 * 24 * 60 * 60 * 1000)) + 1)
+        );
+        return { firstWeekStartISO: first, numberOfWeeks: weeks };
+      }
+      if (!athlete) return null;
       const resolved = resolveAthleteSeasonWindowWithTenure(athlete, season, null);
       const start = String(resolved.start_date ?? season.start_date ?? "").trim();
       const end = String(resolved.end_date ?? season.end_date ?? "").trim();
@@ -770,7 +891,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       );
       return { firstWeekStartISO: first, numberOfWeeks: weeks };
     },
-    [weekStartsOn]
+    [targetType, weekStartsOn]
   );
 
   useEffect(() => {
@@ -784,6 +905,14 @@ export default function WorkoutPlanBuilderDraftScreen() {
   useEffect(() => {
     selectedAthleteIdRef.current = selectedAthleteId;
   }, [selectedAthleteId]);
+
+  useEffect(() => {
+    selectedPlanTargetIdRef.current = selectedPlanTargetId;
+  }, [selectedPlanTargetId]);
+
+  useEffect(() => {
+    targetTypeRef.current = targetType;
+  }, [targetType]);
 
   useEffect(() => {
     focusedEditorKeyRef.current = focusedEditorKey;
@@ -831,7 +960,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
     })();
     void teamDataStore.actions.ensureSessionAndTeam().catch(() => {});
     void teamDataStore.actions.refreshRoster({ force: false }).catch(() => {});
+    void teamDataStore.actions.loadTrainingGroups(false).catch(() => {});
     void teamDataStore.actions.loadTeamSeasons(false).catch(() => {});
+    void teamDataStore.actions.loadAthleteSeasonOverrides(false).catch(() => {});
     void teamDataStore.actions.loadSharedCoachFilters(false).catch(() => {});
     void refreshPlanBuilderCategories();
     void loadAuxiliaryRoutines()
@@ -860,6 +991,11 @@ export default function WorkoutPlanBuilderDraftScreen() {
   }, [roster, selectedAthleteId]);
 
   useEffect(() => {
+    if (selectedTrainingGroupId || trainingGroups.length === 0) return;
+    setSelectedTrainingGroupId(String(trainingGroups[0]?.id ?? "").trim());
+  }, [selectedTrainingGroupId, trainingGroups]);
+
+  useEffect(() => {
     if (selectedSeasonId !== null) return;
     const shared = String(store.sharedSelectedSeasonId ?? "").trim();
     if (shared) setSelectedSeasonId(shared);
@@ -867,14 +1003,14 @@ export default function WorkoutPlanBuilderDraftScreen() {
   }, [seasons, selectedSeasonId, store.sharedSelectedSeasonId]);
 
   useEffect(() => {
-    if (!selectedAthleteId) {
+    if (!selectedPlanTargetId) {
       setActiveDraft(null);
       return;
     }
-    const existing = drafts.find((draft) => draft.athleteId === selectedAthleteId) ?? null;
+    const existing = drafts.find((draft) => draft.athleteId === selectedPlanTargetId) ?? null;
     const current = activeDraftRef.current;
     const currentIsNewerForAthlete =
-      current?.athleteId === selectedAthleteId &&
+      current?.athleteId === selectedPlanTargetId &&
       (!existing || Number(current.updatedAt ?? 0) >= Number(existing.updatedAt ?? 0));
     if (currentIsNewerForAthlete) {
       setActiveDraft(current);
@@ -885,7 +1021,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
     }
     const seasonRange = !existing ? getResolvedSeasonWeekRange(selectedAthlete, selectedSeason) : null;
     const fallback = createEmptyDraft({
-      athleteId: selectedAthleteId,
+      athleteId: selectedPlanTargetId,
       seasonId: selectedSeasonId,
       rangeMode: selectedSeasonId && seasonRange ? "season" : "custom",
       firstWeekStartISO: seasonRange?.firstWeekStartISO ?? firstWeekStartISO,
@@ -904,10 +1040,10 @@ export default function WorkoutPlanBuilderDraftScreen() {
     setSelectedSeasonId(next.seasonId ?? null);
     setFirstWeekInput(next.firstWeekStartISO);
     setWeekCountInput(String(next.numberOfWeeks));
-  }, [drafts, selectedAthleteId]);
+  }, [drafts, selectedAthlete, selectedPlanTargetId, selectedSeason]);
 
   const applySeasonRange = useCallback(() => {
-    if (!selectedAthlete || !selectedSeason) return;
+    if ((!selectedAthlete && targetType !== "trainingGroup") || !selectedSeason) return;
     void commitEditingFieldsRef.current?.();
     const range = getResolvedSeasonWeekRange(selectedAthlete, selectedSeason);
     if (!range) return;
@@ -919,10 +1055,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
       firstWeekStartISO: range.firstWeekStartISO,
       numberOfWeeks: range.numberOfWeeks,
     });
-  }, [getResolvedSeasonWeekRange, patchActiveDraft, selectedAthlete, selectedSeason, selectedSeasonId]);
+  }, [getResolvedSeasonWeekRange, patchActiveDraft, selectedAthlete, selectedSeason, selectedSeasonId, targetType]);
 
-  const buildExistingCellIndex = useCallback(
-    (rows: TeamWorkoutRow[], headerRows: TeamWorkoutBatchHeaderRow[]): Record<string, ExistingPlanCell> => {
+  const buildHeaderNoteLookups = useCallback((headerRows: TeamWorkoutBatchHeaderRow[]) => {
       const headerByExact = new Map<string, string>();
       const headerByBase = new Map<string, string>();
       const headerByBatch = new Map<string, string>();
@@ -940,6 +1075,41 @@ export default function WorkoutPlanBuilderDraftScreen() {
         const prevBatch = String(headerByBatch.get(batchId) ?? "").trim();
         if (!prevBatch || notes.length > prevBatch.length) headerByBatch.set(batchId, notes);
       });
+      return { headerByExact, headerByBase, headerByBatch };
+    },
+    []
+  );
+
+  const snapshotFromWorkoutRow = useCallback(
+    (
+      row: TeamWorkoutRow,
+      lookups: ReturnType<typeof buildHeaderNoteLookups>
+    ): PlanBuilderSnapshot => {
+      const dateISO = String(row.date_iso ?? "").trim();
+      const batchId = String(row.batch_id ?? "").trim();
+      const exactNotes = batchId ? cleanNotes(lookups.headerByExact.get(headerNotesExactKey(dateISO, batchId, row.session))) : "";
+      const baseNotes = batchId ? cleanNotes(lookups.headerByBase.get(headerNotesBaseKey(dateISO, batchId))) : "";
+      const batchNotes = batchId ? cleanNotes(lookups.headerByBatch.get(batchId)) : "";
+      const rowNotes = cleanNotes(row.details);
+      const details = exactNotes || baseNotes || batchNotes || rowNotes;
+      const rowCategoryNames = normalizePrimaryAndCategories(row.categories, row.primary_category);
+      const categoryIds = rowCategoryNames.map((name) => categoryIdByName.get(name.toLowerCase()) ?? name);
+      return {
+        title: String(row.title ?? "").trim(),
+        details,
+        timeText: String(row.time_text ?? "").trim() || undefined,
+        location: String(row.location ?? "").trim() || undefined,
+        categoryIds,
+        preRoutineIds: normalizeStringList(row.pre_routine_ids),
+        postRoutineIds: normalizeStringList(row.post_routine_ids),
+      };
+    },
+    [buildHeaderNoteLookups, categoryIdByName]
+  );
+
+  const buildExistingCellIndex = useCallback(
+    (rows: TeamWorkoutRow[], headerRows: TeamWorkoutBatchHeaderRow[]): Record<string, ExistingPlanCell> => {
+      const headerLookups = buildHeaderNoteLookups(headerRows);
 
       const grouped = new Map<string, TeamWorkoutRow[]>();
       (Array.isArray(rows) ? rows : []).forEach((row) => {
@@ -970,23 +1140,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
         }
 
         const row = cellRows[0];
-        const batchId = String(row.batch_id ?? "").trim();
-        const exactNotes = batchId ? cleanNotes(headerByExact.get(headerNotesExactKey(dateISO, batchId, row.session))) : "";
-        const baseNotes = batchId ? cleanNotes(headerByBase.get(headerNotesBaseKey(dateISO, batchId))) : "";
-        const batchNotes = batchId ? cleanNotes(headerByBatch.get(batchId)) : "";
-        const rowNotes = cleanNotes(row.details);
-        const details = exactNotes || baseNotes || batchNotes || rowNotes;
-        const rowCategoryNames = normalizePrimaryAndCategories(row.categories, row.primary_category);
-        const categoryIds = rowCategoryNames.map((name) => categoryIdByName.get(name.toLowerCase()) ?? name);
-        const snapshot: PlanBuilderSnapshot = {
-          title: String(row.title ?? "").trim(),
-          details,
-          timeText: String(row.time_text ?? "").trim() || undefined,
-          location: String(row.location ?? "").trim() || undefined,
-          categoryIds,
-          preRoutineIds: normalizeStringList(row.pre_routine_ids),
-          postRoutineIds: normalizeStringList(row.post_routine_ids),
-        };
+        const snapshot = snapshotFromWorkoutRow(row, headerLookups);
         out[key] = {
           dateISO,
           session,
@@ -996,16 +1150,106 @@ export default function WorkoutPlanBuilderDraftScreen() {
       });
       return out;
     },
-    [categoryIdByName]
+    [buildHeaderNoteLookups, snapshotFromWorkoutRow]
+  );
+
+  const buildGroupExistingCellIndex = useCallback(
+    (
+      rows: TeamWorkoutRow[],
+      headerRows: TeamWorkoutBatchHeaderRow[],
+      targetAthleteIds: string[]
+    ): Record<string, ExistingPlanCell> => {
+      const targetIds = Array.from(new Set(targetAthleteIds.map((id) => String(id ?? "").trim()).filter(Boolean)));
+      const targetSet = new Set(targetIds);
+      if (targetIds.length === 0) return {};
+      const headerLookups = buildHeaderNoteLookups(headerRows);
+      const grouped = new Map<string, TeamWorkoutRow[]>();
+      (Array.isArray(rows) ? rows : []).forEach((row) => {
+        const athleteId = String(row.athlete_profile_id ?? "").trim();
+        const dateISO = String(row.date_iso ?? "").trim();
+        if (!athleteId || !targetSet.has(athleteId) || !dateISO) return;
+        const key = cellKey(dateISO, normalizeSession(row.session));
+        const list = grouped.get(key) ?? [];
+        list.push(row);
+        grouped.set(key, list);
+      });
+
+      const out: Record<string, ExistingPlanCell> = {};
+      grouped.forEach((cellRows, key) => {
+        const [dateISO, sessionRaw] = key.split("__");
+        const session = normalizeSession(sessionRaw);
+        const rowsByAthlete = new Map<string, TeamWorkoutRow[]>();
+        cellRows.forEach((row) => {
+          const athleteId = String(row.athlete_profile_id ?? "").trim();
+          if (!athleteId) return;
+          const list = rowsByAthlete.get(athleteId) ?? [];
+          list.push(row);
+          rowsByAthlete.set(athleteId, list);
+        });
+
+        const sources: ExistingPlanCell["sources"] = [];
+        let hasPerAthleteConflict = false;
+        targetIds.forEach((athleteId) => {
+          const athleteRows = rowsByAthlete.get(athleteId) ?? [];
+          if (athleteRows.length > 1) {
+            hasPerAthleteConflict = true;
+            return;
+          }
+          const row = athleteRows[0];
+          if (!row) return;
+          sources.push({
+            athleteId,
+            row,
+            snapshot: snapshotFromWorkoutRow(row, headerLookups),
+          });
+        });
+
+        const missingAthleteIds = targetIds.filter((athleteId) => !rowsByAthlete.has(athleteId));
+        const firstSource = sources[0] ?? null;
+        const mixedFields: PlanBuilderEditingField[] = [];
+        if (sources.length > 1) {
+          if (sources.some((source) => !snapshotFieldEqual("title", source.snapshot, firstSource?.snapshot))) mixedFields.push("title");
+          if (sources.some((source) => !snapshotFieldEqual("details", source.snapshot, firstSource?.snapshot))) mixedFields.push("details");
+        }
+        const commonSnapshot: PlanBuilderSnapshot = {
+          title: mixedFields.includes("title") ? "" : String(firstSource?.snapshot.title ?? "").trim(),
+          details: mixedFields.includes("details") ? "" : String(firstSource?.snapshot.details ?? "").trim(),
+          timeText: sources.every((source) => snapshotFieldEqual("timeText", source.snapshot, firstSource?.snapshot)) ? firstSource?.snapshot.timeText : undefined,
+          location: sources.every((source) => snapshotFieldEqual("location", source.snapshot, firstSource?.snapshot)) ? firstSource?.snapshot.location : undefined,
+          categoryIds: sources.every((source) => snapshotFieldEqual("categoryIds", source.snapshot, firstSource?.snapshot)) ? normalizeStringList(firstSource?.snapshot.categoryIds) : [],
+          preRoutineIds: sources.every((source) => snapshotFieldEqual("preRoutineIds", source.snapshot, firstSource?.snapshot)) ? normalizeStringList(firstSource?.snapshot.preRoutineIds) : [],
+          postRoutineIds: sources.every((source) => snapshotFieldEqual("postRoutineIds", source.snapshot, firstSource?.snapshot)) ? normalizeStringList(firstSource?.snapshot.postRoutineIds) : [],
+        };
+
+        out[key] = {
+          dateISO,
+          session,
+          rows: cellRows,
+          source: firstSource
+            ? {
+                row: firstSource.row,
+                snapshot: commonSnapshot,
+              }
+            : undefined,
+          sources,
+          missingAthleteIds,
+          mixedFields,
+          conflictReason: hasPerAthleteConflict ? "At least one group athlete has multiple workouts in this slot. Edit in Daily Workouts." : undefined,
+        };
+      });
+      return out;
+    },
+    [buildHeaderNoteLookups, snapshotFromWorkoutRow]
   );
 
   useEffect(() => {
     const startISO = dateRows[0];
     const endISO = dateRows[dateRows.length - 1];
     const athleteId = String(selectedAthleteId ?? "").trim();
+    const targetAthleteIds = selectedTargetAthleteIds;
     const seq = existingLoadSeqRef.current + 1;
     existingLoadSeqRef.current = seq;
-    if (!athleteId || !isDateISO(startISO) || !isDateISO(endISO)) {
+    if ((targetType === "athlete" ? !athleteId : targetAthleteIds.length === 0) || !isDateISO(startISO) || !isDateISO(endISO)) {
       setExistingCellsByKey({});
       setExistingWorkoutsError(null);
       setExistingWorkoutsLoading(false);
@@ -1018,11 +1262,15 @@ export default function WorkoutPlanBuilderDraftScreen() {
     (async () => {
       try {
         const [workoutRows, headerRows] = await Promise.all([
-          listAthleteWorkoutsInRange(athleteId, startISO, endISO),
+          targetType === "trainingGroup" ? listTeamWorkoutsInRange(startISO, endISO) : listAthleteWorkoutsInRange(athleteId, startISO, endISO),
           listTeamWorkoutBatchHeadersInRange(startISO, endISO),
         ]);
         if (cancelled || existingLoadSeqRef.current !== seq) return;
-        setExistingCellsByKey(buildExistingCellIndex(workoutRows, headerRows));
+        setExistingCellsByKey(
+          targetType === "trainingGroup"
+            ? buildGroupExistingCellIndex(workoutRows, headerRows, targetAthleteIds)
+            : buildExistingCellIndex(workoutRows, headerRows)
+        );
       } catch (error: any) {
         if (cancelled || existingLoadSeqRef.current !== seq) return;
         setExistingCellsByKey({});
@@ -1035,13 +1283,13 @@ export default function WorkoutPlanBuilderDraftScreen() {
     return () => {
       cancelled = true;
     };
-  }, [buildExistingCellIndex, dateRows, selectedAthleteId]);
+  }, [buildExistingCellIndex, buildGroupExistingCellIndex, dateRows, selectedAthleteId, selectedTargetAthleteIds, targetType]);
 
   const setEditingFieldValue = useCallback(
     (dateISO: string, session: "AM" | "PM", field: PlanBuilderEditingField, value: string) => {
-      const athleteId = String(selectedAthleteIdRef.current ?? "").trim();
-      if (!athleteId) return;
-      const key = editingFieldKey(athleteId, dateISO, session, field);
+      const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
+      if (!targetId) return;
+      const key = editingFieldKey(targetId, dateISO, session, field);
       editingFieldsRef.current = {
         ...editingFieldsRef.current,
         [key]: value,
@@ -1060,8 +1308,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
       );
       if (keysToCommit.length === 0) return activeDraftRef.current;
 
-      const athleteId = String(selectedAthleteIdRef.current ?? "").trim();
-      if (!athleteId) return activeDraftRef.current;
+      const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
+      if (!targetId) return activeDraftRef.current;
 
       const capturedValues = keysToCommit.reduce<Record<string, string>>((out, key) => {
         out[key] = pending[key];
@@ -1070,7 +1318,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       let next =
         activeDraftRef.current ??
         createEmptyDraft({
-          athleteId,
+          athleteId: targetId,
           seasonId: selectedSeasonId,
           rangeMode: selectedSeasonId ? "season" : "custom",
           firstWeekStartISO,
@@ -1079,8 +1327,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
       keysToCommit.forEach((key) => {
         const parsed = parseEditingFieldKey(key);
-        if (!parsed || parsed.athleteId !== athleteId) return;
-        const previous = getDraftCell(next, athleteId, parsed.dateISO, parsed.session);
+        if (!parsed || parsed.athleteId !== targetId) return;
+        const previous = getDraftCell(next, targetId, parsed.dateISO, parsed.session);
         const existing = existingCellsRef.current[cellKey(parsed.dateISO, parsed.session)] ?? null;
         const patch: Partial<WorkoutPlanBuilderCell> = {
           [parsed.field]: capturedValues[key],
@@ -1099,7 +1347,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
             : !previous
               ? { sourceType: "manual" as const, ...patch }
               : patch;
-        next = patchDraftCell(next, athleteId, parsed.dateISO, parsed.session, nextPatch);
+        next = patchDraftCell(next, targetId, parsed.dateISO, parsed.session, nextPatch);
       });
 
       setActiveDraft(next);
@@ -1148,22 +1396,22 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const setGridValue = useCallback(
     (dateISO: string, colKey: string, value: string) => {
       const base = activeDraftRef.current;
-      if (!base || !selectedAthleteId) return;
+      if (!base || !selectedPlanTargetId) return;
       const session = normalizePlanBuilderSession(colKey);
       const existing = existingCellsByKey[cellKey(dateISO, session)] ?? null;
-      const next = setDraftCellCombinedValue(base, selectedAthleteId, dateISO, session, value, existing);
+      const next = setDraftCellCombinedValue(base, selectedPlanTargetId, dateISO, session, value, existing);
       setActiveDraft(next);
       activeDraftRef.current = next;
       scheduleSave(next);
     },
-    [existingCellsByKey, scheduleSave, selectedAthleteId]
+    [existingCellsByKey, scheduleSave, selectedPlanTargetId]
   );
 
   const patchSessionCell = useCallback(
     (dateISO: string, session: "AM" | "PM", patch: Partial<WorkoutPlanBuilderCell>) => {
       const base = activeDraftRef.current;
-      if (!base || !selectedAthleteId) return;
-      const previous = getDraftCell(base, selectedAthleteId, dateISO, session);
+      if (!base || !selectedPlanTargetId) return;
+      const previous = getDraftCell(base, selectedPlanTargetId, dateISO, session);
       const existing = existingCellsByKey[cellKey(dateISO, session)] ?? null;
       const nextPatch =
         !previous && existing?.source
@@ -1179,12 +1427,12 @@ export default function WorkoutPlanBuilderDraftScreen() {
           : !previous
             ? { sourceType: "manual" as const, ...patch }
             : patch;
-      const next = patchDraftCell(base, selectedAthleteId, dateISO, session, nextPatch);
+      const next = patchDraftCell(base, selectedPlanTargetId, dateISO, session, nextPatch);
       setActiveDraft(next);
       activeDraftRef.current = next;
       scheduleSave(next);
     },
-    [existingCellsByKey, scheduleSave, selectedAthleteId]
+    [existingCellsByKey, scheduleSave, selectedPlanTargetId]
   );
 
   const setSessionTitle = useCallback(
@@ -1203,9 +1451,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
   const commitSessionField = useCallback(
     (dateISO: string, session: "AM" | "PM", field: PlanBuilderEditingField) => {
-      const athleteId = String(selectedAthleteIdRef.current ?? "").trim();
-      if (!athleteId) return;
-      void commitEditingFields([editingFieldKey(athleteId, dateISO, session, field)]);
+      const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
+      if (!targetId) return;
+      void commitEditingFields([editingFieldKey(targetId, dateISO, session, field)]);
     },
     [commitEditingFields]
   );
@@ -1218,13 +1466,13 @@ export default function WorkoutPlanBuilderDraftScreen() {
     onActivate: () => setActiveGridId(PLAN_BUILDER_GRID_ID),
     getValue: (dateISO, colKey) => {
       const session = normalizePlanBuilderSession(colKey);
-      const athleteId = String(selectedAthleteIdRef.current ?? selectedAthleteId ?? "").trim();
-      const titleEditKey = athleteId ? editingFieldKey(athleteId, dateISO, session, "title") : "";
-      const detailsEditKey = athleteId ? editingFieldKey(athleteId, dateISO, session, "details") : "";
-      const draftValue = getDraftCellValue(activeDraftRef.current, selectedAthleteId, dateISO, colKey);
+      const targetId = String(selectedPlanTargetIdRef.current ?? selectedPlanTargetId ?? "").trim();
+      const titleEditKey = targetId ? editingFieldKey(targetId, dateISO, session, "title") : "";
+      const detailsEditKey = targetId ? editingFieldKey(targetId, dateISO, session, "details") : "";
+      const draftValue = getDraftCellValue(activeDraftRef.current, targetId, dateISO, colKey);
       const existing = existingCellsRef.current[cellKey(dateISO, session)];
       const baseCell = draftValue
-        ? getDraftCell(activeDraftRef.current, selectedAthleteId, dateISO, session)
+        ? getDraftCell(activeDraftRef.current, targetId, dateISO, session)
         : existing?.source
           ? ({ ...existing.source.snapshot, dateISO, session } as WorkoutPlanBuilderCell)
           : null;
@@ -1242,9 +1490,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
       });
     },
     setValuesBatch: (changes) => {
-      const athleteId = String(selectedAthleteIdRef.current ?? "").trim();
+      const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
       let next = activeDraftRef.current;
-      if (!next || !athleteId) return;
+      if (!next || !targetId) return;
       const beforeCellCount = Object.keys(next.cellsByKey ?? {}).length;
       const targets = changes.map((change) => ({
         dateISO: String(change.rowId ?? "").trim(),
@@ -1253,7 +1501,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       changes.forEach((change) => {
         const session = normalizePlanBuilderSession(change.colKey);
         const existing = existingCellsRef.current[cellKey(change.rowId, session)] ?? null;
-        next = next ? setDraftCellCombinedValue(next, athleteId, change.rowId, session, change.value, existing) : next;
+        next = next ? setDraftCellCombinedValue(next, targetId, change.rowId, session, change.value, existing) : next;
       });
       if (!next) return;
       setActiveDraft(next);
@@ -1351,7 +1599,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       if (changes.length === 0) return;
       const normalizedChanges = changes.map((change) => ({
         ...change,
-        prev: getDraftCellValue(activeDraftRef.current, selectedAthleteIdRef.current, change.rowId, change.colKey),
+        prev: getDraftCellValue(activeDraftRef.current, selectedPlanTargetIdRef.current, change.rowId, change.colKey),
       }));
       pendingPasteDebugRef.current = {
         rowCount: matrix.length,
@@ -1472,9 +1720,10 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
   const getDisplayCell = useCallback(
     (dateISO: string, session: "AM" | "PM"): WorkoutPlanBuilderCell | null => {
-      const draftCell = getDraftCell(activeDraft, selectedAthleteId, dateISO, session);
-      const titleEditKey = selectedAthleteId ? editingFieldKey(selectedAthleteId, dateISO, session, "title") : "";
-      const detailsEditKey = selectedAthleteId ? editingFieldKey(selectedAthleteId, dateISO, session, "details") : "";
+      const targetId = String(selectedPlanTargetId ?? "").trim();
+      const draftCell = getDraftCell(activeDraft, targetId, dateISO, session);
+      const titleEditKey = targetId ? editingFieldKey(targetId, dateISO, session, "title") : "";
+      const detailsEditKey = targetId ? editingFieldKey(targetId, dateISO, session, "details") : "";
       const hasTitleEdit = titleEditKey
         ? Object.prototype.hasOwnProperty.call(editingFieldsByKey, titleEditKey)
         : false;
@@ -1504,7 +1753,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
         ...sourceFieldsForExisting(existing ?? null),
       };
     },
-    [activeDraft, editingFieldsByKey, existingCellsByKey, selectedAthleteId]
+    [activeDraft, editingFieldsByKey, existingCellsByKey, selectedPlanTargetId]
   );
 
   const buildRowMetadataSummary = useCallback(
@@ -1526,7 +1775,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       field: "categoryIds" | "preRoutineIds" | "postRoutineIds",
       id: string
     ) => {
-      const current = getDraftCell(activeDraftRef.current, selectedAthleteId, dateISO, session);
+      const current = getDraftCell(activeDraftRef.current, selectedPlanTargetId, dateISO, session);
       const existing = normalizeStringList(current?.[field]);
       const cleanId = String(id ?? "").trim();
       if (!cleanId) return;
@@ -1535,22 +1784,57 @@ export default function WorkoutPlanBuilderDraftScreen() {
         : [...existing, cleanId];
       patchSessionCell(dateISO, session, { [field]: nextValues } as Partial<WorkoutPlanBuilderCell>);
     },
-    [patchSessionCell, selectedAthleteId]
+    [patchSessionCell, selectedPlanTargetId]
+  );
+
+  const getEligibleTargetAthleteIdsForDate = useCallback(
+    (dateISO: string): string[] => {
+      const ids = targetType === "trainingGroup" ? activeTrainingGroupAthleteIds : selectedAthleteId ? [selectedAthleteId] : [];
+      if (!selectedSeason) return ids;
+      return ids.filter((athleteId) => {
+        const athlete = roster.find((row) => String(row.id ?? "").trim() === athleteId) ?? null;
+        const override = athleteSeasonOverridesBySeasonAndAthlete.get(`${String(selectedSeason.id ?? "").trim()}:${athleteId}`) ?? null;
+        return isAthleteEligibleForPlanningDate({
+          athlete,
+          dateISO,
+          selectedSeason,
+          athleteSeasonOverride: override,
+          selectedTrainingGroupIds: targetType === "trainingGroup" ? [selectedTrainingGroupId] : [],
+          trainingGroupMemberships: store.trainingGroupMemberships,
+          isAthleteExcludedFromSeason: (candidateAthleteId, seasonId) =>
+            isAthleteExcludedFromSeason(candidateAthleteId, seasonId, store.athleteSeasonOverrides ?? []),
+        });
+      });
+    },
+    [
+      activeTrainingGroupAthleteIds,
+      athleteSeasonOverridesBySeasonAndAthlete,
+      roster,
+      selectedAthleteId,
+      selectedSeason,
+      selectedTrainingGroupId,
+      store.athleteSeasonOverrides,
+      store.trainingGroupMemberships,
+      targetType,
+    ]
   );
 
   const buildFreshApplyPreviewRows = useCallback(
     async (input: {
-      athleteId: string;
+      targetId: string;
+      targetAthleteIds: string[];
       startISO: string;
       endISO: string;
       draft: WorkoutPlanBuilderDraft | null;
     }): Promise<ApplyPreviewRow[]> => {
-      const { athleteId, startISO, endISO, draft } = input;
+      const { targetId, targetAthleteIds, startISO, endISO, draft } = input;
       const [freshRows, freshHeaderRows] = await Promise.all([
-        listAthleteWorkoutsInRange(athleteId, startISO, endISO),
+        targetType === "trainingGroup" ? listTeamWorkoutsInRange(startISO, endISO) : listAthleteWorkoutsInRange(targetAthleteIds[0] ?? "", startISO, endISO),
         listTeamWorkoutBatchHeadersInRange(startISO, endISO),
       ]);
-      const freshExistingByKey = buildExistingCellIndex(freshRows, freshHeaderRows);
+      const freshExistingByKey = targetType === "trainingGroup"
+        ? buildGroupExistingCellIndex(freshRows, freshHeaderRows, targetAthleteIds)
+        : buildExistingCellIndex(freshRows, freshHeaderRows);
       const freshRowsById = new Map(
         (Array.isArray(freshRows) ? freshRows : []).map((row) => [String(row.id ?? "").trim(), row] as const)
       );
@@ -1564,7 +1848,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
         .map((key) => {
           const [dateISO, sessionRaw] = key.split("__");
           const session = normalizeSession(sessionRaw);
-          const draftCell = getDraftCell(draft, athleteId, dateISO, session);
+          const draftCell = getDraftCell(draft, targetId, dateISO, session);
           const existingCell = freshExistingByKey[key] ?? null;
           const draftSnapshot = snapshotFromDraftCell(draftCell);
           const existingSnapshot = existingCell?.source?.snapshot ?? null;
@@ -1573,9 +1857,18 @@ export default function WorkoutPlanBuilderDraftScreen() {
           let status: ApplyPreviewStatus = "unchanged";
           let reason = "No draft changes.";
 
-          if (existingCell?.conflictReason) {
+          const eligibleCount = getEligibleTargetAthleteIdsForDate(dateISO).length;
+          if (eligibleCount === 0) {
+            status = "conflict";
+            reason = "No eligible target athletes for this date.";
+          } else if (existingCell?.conflictReason) {
             status = "conflict";
             reason = existingCell.conflictReason;
+          } else if (targetType === "trainingGroup" && draftCell && draftHasContent && existingCell?.source) {
+            status = snapshotsEqual(draftSnapshot, existingSnapshot) ? "unchanged" : "update";
+            reason = status === "update"
+              ? `Draft will apply to ${eligibleCount} eligible group member${eligibleCount === 1 ? "" : "s"}.`
+              : "Draft matches the current group values.";
           } else if (draftCell?.sourceType === "existing" || draftCell?.originalSnapshot) {
             if (!draftHasContent) {
               status = "cleared";
@@ -1601,15 +1894,24 @@ export default function WorkoutPlanBuilderDraftScreen() {
             }
           } else if (draftCell && draftHasContent) {
             if (existingCell?.source) {
-              status = "conflict";
-              reason = "Draft would create into a slot that now has an existing workout.";
+              if (targetType === "trainingGroup") {
+                status = "update";
+                reason = `Draft will apply to ${eligibleCount} eligible group member${eligibleCount === 1 ? "" : "s"}.`;
+              } else {
+                status = "conflict";
+                reason = "Draft would create into a slot that now has an existing workout.";
+              }
             } else {
               status = "new";
-              reason = "Draft content in an empty real slot.";
+              reason = targetType === "trainingGroup"
+                ? `Draft content in an empty real slot for ${eligibleCount} eligible group member${eligibleCount === 1 ? "" : "s"}.`
+                : "Draft content in an empty real slot.";
             }
           } else if (existingCell?.source) {
             status = "unchanged";
-            reason = "Existing workout has no draft override.";
+            reason = targetType === "trainingGroup" && (existingCell.mixedFields?.length ?? 0) > 0
+              ? `Existing group values are mixed: ${existingCell.mixedFields?.join(", ")}.`
+              : "Existing workout has no draft override.";
           }
 
           return {
@@ -1625,7 +1927,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
         })
         .sort((a, b) => compareDateISO(a.dateISO, b.dateISO) || a.session.localeCompare(b.session));
     },
-    [buildExistingCellIndex]
+    [buildExistingCellIndex, buildGroupExistingCellIndex, getEligibleTargetAthleteIdsForDate, targetType]
   );
 
   const getApplyScopeRange = useCallback(() => {
@@ -1640,10 +1942,11 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const generateApplyPreview = useCallback(async () => {
     await commitEditingFields();
     const { startISO, endISO } = getApplyScopeRange();
-    const athleteId = String(selectedAthleteId ?? "").trim();
+    const targetId = String(selectedPlanTargetId ?? "").trim();
+    const targetAthleteIds = selectedTargetAthleteIds;
 
-    if (!athleteId) {
-      setApplyPreviewError("Select an athlete before generating a preview.");
+    if (!targetId || targetAthleteIds.length === 0) {
+      setApplyPreviewError(`Select a ${planTargetLabel(targetType).toLowerCase()} with at least one eligible athlete before generating a preview.`);
       return;
     }
     if (!isDateISO(startISO) || !isDateISO(endISO) || endISO < startISO) {
@@ -1659,7 +1962,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
     setApplyPreviewRows([]);
     try {
       const rows = await buildFreshApplyPreviewRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
         startISO,
         endISO,
         draft: draftForPreview,
@@ -1675,7 +1979,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
     buildFreshApplyPreviewRows,
     commitEditingFields,
     getApplyScopeRange,
-    selectedAthleteId,
+    selectedPlanTargetId,
+    selectedTargetAthleteIds,
+    targetType,
   ]);
 
   const visibleRangeLabel = dateRows.length > 0
@@ -1744,10 +2050,10 @@ export default function WorkoutPlanBuilderDraftScreen() {
     });
   }, []);
 
-  const confirmApplySafeChanges = useCallback((newCount: number, updateCount: number): Promise<boolean> => {
-    const total = newCount + updateCount;
+  const confirmApplySafeChanges = useCallback((newCount: number, updateCount: number, deleteCount = 0): Promise<boolean> => {
+    const total = newCount + updateCount + deleteCount;
     const title = `Apply ${total} safe change${total === 1 ? "" : "s"}?`;
-    const message = `Apply ${newCount} new workout${newCount === 1 ? "" : "s"} and ${updateCount} safe update${updateCount === 1 ? "" : "s"}?\n\nConflicts, shared batches, and deletes will be skipped.`;
+    const message = `Apply ${newCount} new workout${newCount === 1 ? "" : "s"}, ${updateCount} safe update${updateCount === 1 ? "" : "s"}, and ${deleteCount} cleared row${deleteCount === 1 ? "" : "s"}?\n\nConflicts and unsafe shared batch edits will be skipped.`;
     if (Platform.OS === "web" && typeof window !== "undefined" && typeof window.confirm === "function") {
       return Promise.resolve(window.confirm(`${title}\n\n${message}`));
     }
@@ -1764,41 +2070,52 @@ export default function WorkoutPlanBuilderDraftScreen() {
       const rangeStart = startISO ?? dateRows[0];
       const rangeEnd = endISO ?? dateRows[dateRows.length - 1];
       const athleteId = String(selectedAthleteIdRef.current ?? "").trim();
-      if (!athleteId || !isDateISO(rangeStart) || !isDateISO(rangeEnd)) return;
+      const targetAthleteIds = targetTypeRef.current === "trainingGroup" ? selectedTargetAthleteIds : athleteId ? [athleteId] : [];
+      if (targetAthleteIds.length === 0 || !isDateISO(rangeStart) || !isDateISO(rangeEnd)) return;
       const [workoutRows, headerRows] = await Promise.all([
-        listAthleteWorkoutsInRange(athleteId, rangeStart, rangeEnd),
+        targetTypeRef.current === "trainingGroup" ? listTeamWorkoutsInRange(rangeStart, rangeEnd) : listAthleteWorkoutsInRange(athleteId, rangeStart, rangeEnd),
         listTeamWorkoutBatchHeadersInRange(rangeStart, rangeEnd),
       ]);
-      setExistingCellsByKey(buildExistingCellIndex(workoutRows, headerRows));
+      setExistingCellsByKey(
+        targetTypeRef.current === "trainingGroup"
+          ? buildGroupExistingCellIndex(workoutRows, headerRows, targetAthleteIds)
+          : buildExistingCellIndex(workoutRows, headerRows)
+      );
     },
-    [buildExistingCellIndex, dateRows]
+    [buildExistingCellIndex, buildGroupExistingCellIndex, dateRows, selectedTargetAthleteIds]
   );
 
   const loadFreshExistingCellIndex = useCallback(
-    async (athleteId: string, startISO: string, endISO: string) => {
+    async (targetAthleteIds: string[], startISO: string, endISO: string) => {
+      const cleanTargetAthleteIds = Array.from(new Set(targetAthleteIds.map((id) => String(id ?? "").trim()).filter(Boolean)));
+      const athleteId = cleanTargetAthleteIds[0] ?? "";
       const [freshRows, freshHeaderRows] = await Promise.all([
-        listAthleteWorkoutsInRange(athleteId, startISO, endISO),
+        targetType === "trainingGroup" ? listTeamWorkoutsInRange(startISO, endISO) : listAthleteWorkoutsInRange(athleteId, startISO, endISO),
         listTeamWorkoutBatchHeadersInRange(startISO, endISO),
       ]);
-      return buildExistingCellIndex(freshRows, freshHeaderRows);
+      return targetType === "trainingGroup"
+        ? buildGroupExistingCellIndex(freshRows, freshHeaderRows, cleanTargetAthleteIds)
+        : buildExistingCellIndex(freshRows, freshHeaderRows);
     },
-    [buildExistingCellIndex]
+    [buildExistingCellIndex, buildGroupExistingCellIndex, targetType]
   );
 
   const createSafeNewDraftRows = useCallback(
     async (input: {
-      athleteId: string;
+      targetId: string;
       teamId: string;
       draft: WorkoutPlanBuilderDraft | null;
       rows: ApplyPreviewRow[];
     }): Promise<CreateSafeNewRowsResult> => {
-      const { athleteId, teamId, draft, rows } = input;
+      const { targetId, teamId, draft, rows } = input;
       const createdKeys: string[] = [];
       let headerNoteFailureCount = 0;
 
       for (const row of rows) {
-        const draftCell = getDraftCell(draft, athleteId, row.dateISO, row.session);
+        const draftCell = getDraftCell(draft, targetId, row.dateISO, row.session);
         if (!draftCell || !hasDraftCellContent(draftCell)) continue;
+        const eligibleAthleteIds = getEligibleTargetAthleteIdsForDate(row.dateISO);
+        if (eligibleAthleteIds.length === 0) continue;
 
         const categoryNames = normalizeStringList(draftCell.categoryIds)
           .map((id) => {
@@ -1809,7 +2126,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
         const details = String(draftCell.details ?? "").trim();
         const newBatchId = createBatchId(row.dateISO);
         const payload = buildTeamWorkoutInsertRows({
-          selectedAthleteIds: [athleteId],
+          selectedAthleteIds: eligibleAthleteIds,
           date_iso: row.dateISO,
           session: row.session,
           location: String(draftCell.location ?? "").trim() || null,
@@ -1829,7 +2146,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
         if (payload.length === 0) continue;
 
         await createTeamWorkoutBatch(payload);
-        createdKeys.push(workoutPlanBuilderCellKey(athleteId, row.dateISO, row.session));
+        createdKeys.push(workoutPlanBuilderCellKey(targetId, row.dateISO, row.session));
         if (details) {
           try {
             await saveTeamWorkoutBatchHeaderNotes({
@@ -1846,22 +2163,154 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
       return { createdKeys, headerNoteFailureCount };
     },
-    [categoryById]
+    [categoryById, getEligibleTargetAthleteIdsForDate]
   );
 
   const updateSafeExistingDraftRows = useCallback(
     async (input: {
-      athleteId: string;
+      targetId: string;
+      targetAthleteIds: string[];
+      teamId?: string;
       draft: WorkoutPlanBuilderDraft | null;
       rows: ApplyPreviewRow[];
       freshExistingByKey: Record<string, ExistingPlanCell>;
     }): Promise<UpdateSafeExistingRowsResult> => {
-      const { athleteId, draft, rows, freshExistingByKey } = input;
+      const { targetId, targetAthleteIds, teamId, draft, rows, freshExistingByKey } = input;
       const updatedKeys: string[] = [];
       let sharedSkipped = 0;
       let staleSkipped = 0;
       let unsafeSkipped = 0;
       let headerNoteFailureCount = 0;
+      const targetSet = new Set(targetAthleteIds.map((id) => String(id ?? "").trim()).filter(Boolean));
+      const batchScopeCache = new Map<string, boolean>();
+
+      const canWriteHeaderForBatch = async (batchId: string): Promise<boolean> => {
+        const cleanBatchId = String(batchId ?? "").trim();
+        if (!cleanBatchId) return false;
+        if (batchScopeCache.has(cleanBatchId)) return batchScopeCache.get(cleanBatchId) === true;
+        const batchRows = await listTeamWorkoutsByBatch(cleanBatchId);
+        const batchAthleteIds = Array.from(new Set(
+          (Array.isArray(batchRows) ? batchRows : []).map((batchRow) => String(batchRow.athlete_profile_id ?? "").trim()).filter(Boolean)
+        ));
+        const inScope = batchAthleteIds.length > 0 && batchAthleteIds.every((athleteId) => targetSet.has(athleteId));
+        batchScopeCache.set(cleanBatchId, inScope);
+        return inScope;
+      };
+
+      if (targetType === "trainingGroup") {
+        for (const row of rows) {
+          const draftCell = getDraftCell(draft, targetId, row.dateISO, row.session);
+          const existingCell = freshExistingByKey[cellKey(row.dateISO, row.session)] ?? null;
+          if (!draftCell || !hasDraftCellContent(draftCell)) {
+            unsafeSkipped += 1;
+            continue;
+          }
+          if (existingCell?.conflictReason) {
+            unsafeSkipped += 1;
+            continue;
+          }
+          const eligibleAthleteIds = getEligibleTargetAthleteIdsForDate(row.dateISO);
+          if (eligibleAthleteIds.length === 0) {
+            unsafeSkipped += 1;
+            continue;
+          }
+
+          const categoryNames = normalizeStringList(draftCell.categoryIds)
+            .map((id) => {
+              const match = categoryById.get(id);
+              return match ? categoryDisplayName(match) : id;
+            })
+            .filter(Boolean);
+          const draftSnapshot = snapshotFromDraftCell(draftCell);
+          const basePatch = changedSnapshotPatch(draftSnapshot, draftCell.originalSnapshot);
+          if (!draftCell.originalSnapshot || !snapshotFieldEqual("categoryIds", draftSnapshot, draftCell.originalSnapshot)) {
+            basePatch.primary_category = categoryNames[0] ?? null;
+            basePatch.categories = categoryNames;
+          }
+          if (!draftCell.originalSnapshot || !snapshotFieldEqual("preRoutineIds", draftSnapshot, draftCell.originalSnapshot)) {
+            basePatch.pre_routine_ids = normalizeStringList(draftCell.preRoutineIds).length > 0 ? normalizeStringList(draftCell.preRoutineIds) : null;
+          }
+          if (!draftCell.originalSnapshot || !snapshotFieldEqual("postRoutineIds", draftSnapshot, draftCell.originalSnapshot)) {
+            basePatch.post_routine_ids = normalizeStringList(draftCell.postRoutineIds).length > 0 ? normalizeStringList(draftCell.postRoutineIds) : null;
+          }
+
+          const sourcesByAthlete = new Map(
+            (existingCell?.sources ?? []).map((source) => [source.athleteId, source] as const)
+          );
+          let touched = 0;
+          for (const athleteId of eligibleAthleteIds) {
+            const source = sourcesByAthlete.get(athleteId);
+            if (!source) continue;
+            if (Object.keys(basePatch).length === 0) {
+              touched += 1;
+              continue;
+            }
+            await updateTeamWorkoutById(String(source.row.id), basePatch);
+            const batchId = String(source.row.batch_id ?? "").trim();
+            if (Object.prototype.hasOwnProperty.call(basePatch, "details") && batchId) {
+              if (await canWriteHeaderForBatch(batchId)) {
+                try {
+                  await saveTeamWorkoutBatchHeaderNotes({
+                    batch_id: batchId,
+                    date_iso: row.dateISO,
+                    session: row.session,
+                    header_notes: String(draftCell.details ?? "").trim() || null,
+                  });
+                } catch {
+                  headerNoteFailureCount += 1;
+                }
+              } else {
+                sharedSkipped += 1;
+              }
+            }
+            touched += 1;
+          }
+
+          const missingAthleteIds = eligibleAthleteIds.filter((athleteId) => !sourcesByAthlete.has(athleteId));
+          if (missingAthleteIds.length > 0 && teamId) {
+            const details = String(draftCell.details ?? "").trim();
+            const newBatchId = createBatchId(row.dateISO);
+            const payload = buildTeamWorkoutInsertRows({
+              selectedAthleteIds: missingAthleteIds,
+              date_iso: row.dateISO,
+              session: row.session,
+              location: String(draftCell.location ?? "").trim() || null,
+              time_text: String(draftCell.timeText ?? "").trim() || "",
+              title: String(draftCell.title ?? "").trim() || "Workout",
+              details: details || null,
+              primary_category: categoryNames[0] ?? null,
+              categories: categoryNames,
+              plannedDistanceUnit: null,
+              batch_id: newBatchId,
+              group_id: "1",
+              team_id: teamId,
+              created_by: null,
+              pre_routine_ids: normalizeStringList(draftCell.preRoutineIds).length > 0 ? normalizeStringList(draftCell.preRoutineIds) : null,
+              post_routine_ids: normalizeStringList(draftCell.postRoutineIds).length > 0 ? normalizeStringList(draftCell.postRoutineIds) : null,
+            });
+            await createTeamWorkoutBatch(payload);
+            if (details) {
+              try {
+                await saveTeamWorkoutBatchHeaderNotes({
+                  batch_id: newBatchId,
+                  date_iso: row.dateISO,
+                  session: row.session,
+                  header_notes: details,
+                });
+              } catch {
+                headerNoteFailureCount += 1;
+              }
+            }
+            touched += missingAthleteIds.length;
+          }
+
+          if (touched > 0) updatedKeys.push(workoutPlanBuilderCellKey(targetId, row.dateISO, row.session));
+        }
+
+        return { updatedKeys, sharedSkipped, staleSkipped, unsafeSkipped, headerNoteFailureCount };
+      }
+
+      const athleteId = targetAthleteIds[0] ?? targetId;
 
       for (const row of rows) {
         const draftCell = getDraftCell(draft, athleteId, row.dateISO, row.session);
@@ -1936,7 +2385,56 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
       return { updatedKeys, sharedSkipped, staleSkipped, unsafeSkipped, headerNoteFailureCount };
     },
-    [categoryById]
+    [categoryById, getEligibleTargetAthleteIdsForDate, targetType]
+  );
+
+  const deleteSafeClearedDraftRows = useCallback(
+    async (input: {
+      targetId: string;
+      targetAthleteIds: string[];
+      draft: WorkoutPlanBuilderDraft | null;
+      rows: ApplyPreviewRow[];
+      freshExistingByKey: Record<string, ExistingPlanCell>;
+    }): Promise<DeleteSafeClearedRowsResult> => {
+      const { targetId, targetAthleteIds, draft, rows, freshExistingByKey } = input;
+      const deletedKeys: string[] = [];
+      let deletedRows = 0;
+      let unsafeSkipped = 0;
+      const targetSet = new Set(targetAthleteIds.map((id) => String(id ?? "").trim()).filter(Boolean));
+
+      for (const row of rows) {
+        const draftCell = getDraftCell(draft, targetId, row.dateISO, row.session);
+        const existingCell = freshExistingByKey[cellKey(row.dateISO, row.session)] ?? null;
+        if (!draftCell || hasDraftCellContent(draftCell) || existingCell?.conflictReason) {
+          unsafeSkipped += 1;
+          continue;
+        }
+
+        const idsToDelete = targetType === "trainingGroup"
+          ? (existingCell?.sources ?? [])
+              .filter((source) => targetSet.has(source.athleteId))
+              .map((source) => String(source.row.id ?? "").trim())
+              .filter(Boolean)
+          : String(draftCell.sourceWorkoutId ?? "").trim()
+            ? [String(draftCell.sourceWorkoutId ?? "").trim()]
+            : existingCell?.source?.row?.id
+              ? [String(existingCell.source.row.id)]
+              : [];
+
+        if (idsToDelete.length === 0) {
+          unsafeSkipped += 1;
+          continue;
+        }
+        const count = await deleteTeamWorkoutsByIds(idsToDelete);
+        if (count > 0) {
+          deletedRows += count;
+          deletedKeys.push(workoutPlanBuilderCellKey(targetId, row.dateISO, row.session));
+        }
+      }
+
+      return { deletedKeys, deletedRows, unsafeSkipped };
+    },
+    [targetType]
   );
 
   const clearAppliedDraftKeys = useCallback(
@@ -1961,10 +2459,11 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const applyNewDraftWorkouts = useCallback(async () => {
     await commitEditingFields();
     const { startISO, endISO } = getApplyScopeRange();
-    const athleteId = String(selectedAthleteIdRef.current ?? "").trim();
+    const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
+    const targetAthleteIds = selectedTargetAthleteIds;
     const teamId = String((store as any)?.teamId ?? "").trim();
-    if (!athleteId) {
-      setApplyPreviewError("Select an athlete before creating workouts.");
+    if (!targetId || targetAthleteIds.length === 0) {
+      setApplyPreviewError(`Select a ${planTargetLabel(targetType).toLowerCase()} with at least one eligible athlete before creating workouts.`);
       return;
     }
     if (!teamId) {
@@ -1981,7 +2480,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
     try {
       const draftBeforeConfirm = activeDraftRef.current;
       const firstFreshRows = await buildFreshApplyPreviewRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
         startISO,
         endISO,
         draft: draftBeforeConfirm,
@@ -1998,7 +2498,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
       const draftForApply = activeDraftRef.current;
       const finalFreshRows = await buildFreshApplyPreviewRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
         startISO,
         endISO,
         draft: draftForApply,
@@ -2011,7 +2512,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       }
 
       const createResult = await createSafeNewDraftRows({
-        athleteId,
+        targetId,
         teamId,
         draft: draftForApply,
         rows: rowsToCreate,
@@ -2020,7 +2521,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
       await refreshExistingWorkoutOverlay();
       const refreshedRows = await buildFreshApplyPreviewRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
         startISO,
         endISO,
         draft: activeDraftRef.current,
@@ -2052,15 +2554,19 @@ export default function WorkoutPlanBuilderDraftScreen() {
     createSafeNewDraftRows,
     getApplyScopeRange,
     refreshExistingWorkoutOverlay,
+    selectedTargetAthleteIds,
     store,
+    targetType,
   ]);
 
   const applySafeExistingUpdates = useCallback(async () => {
     await commitEditingFields();
     const { startISO, endISO } = getApplyScopeRange();
-    const athleteId = String(selectedAthleteIdRef.current ?? "").trim();
-    if (!athleteId) {
-      setApplyPreviewError("Select an athlete before updating workouts.");
+    const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
+    const targetAthleteIds = selectedTargetAthleteIds;
+    const teamId = String((store as any)?.teamId ?? "").trim();
+    if (!targetId || targetAthleteIds.length === 0) {
+      setApplyPreviewError(`Select a ${planTargetLabel(targetType).toLowerCase()} with at least one eligible athlete before updating workouts.`);
       return;
     }
     if (!isDateISO(startISO) || !isDateISO(endISO) || endISO < startISO) {
@@ -2073,7 +2579,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
     try {
       const draftBeforeConfirm = activeDraftRef.current;
       const firstFreshRows = await buildFreshApplyPreviewRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
         startISO,
         endISO,
         draft: draftBeforeConfirm,
@@ -2090,7 +2597,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
       const draftForApply = activeDraftRef.current;
       const finalFreshRows = await buildFreshApplyPreviewRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
         startISO,
         endISO,
         draft: draftForApply,
@@ -2102,9 +2610,11 @@ export default function WorkoutPlanBuilderDraftScreen() {
         return;
       }
 
-      const freshExistingByKey = await loadFreshExistingCellIndex(athleteId, startISO, endISO);
+      const freshExistingByKey = await loadFreshExistingCellIndex(targetAthleteIds, startISO, endISO);
       const updateResult = await updateSafeExistingDraftRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
+        teamId,
         draft: draftForApply,
         rows: rowsToUpdate,
         freshExistingByKey,
@@ -2113,7 +2623,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
       await refreshExistingWorkoutOverlay();
       const refreshedRows = await buildFreshApplyPreviewRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
         startISO,
         endISO,
         draft: activeDraftRef.current,
@@ -2147,16 +2658,20 @@ export default function WorkoutPlanBuilderDraftScreen() {
     getApplyScopeRange,
     loadFreshExistingCellIndex,
     refreshExistingWorkoutOverlay,
+    selectedTargetAthleteIds,
+    store,
+    targetType,
     updateSafeExistingDraftRows,
   ]);
 
   const applySafeChanges = useCallback(async () => {
     await commitEditingFields();
     const { startISO, endISO } = getApplyScopeRange();
-    const athleteId = String(selectedAthleteIdRef.current ?? "").trim();
+    const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
+    const targetAthleteIds = selectedTargetAthleteIds;
     const teamId = String((store as any)?.teamId ?? "").trim();
-    if (!athleteId) {
-      setApplyPreviewError("Select an athlete before applying safe changes.");
+    if (!targetId || targetAthleteIds.length === 0) {
+      setApplyPreviewError(`Select a ${planTargetLabel(targetType).toLowerCase()} with at least one eligible athlete before applying safe changes.`);
       return;
     }
     if (!teamId) {
@@ -2173,7 +2688,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
     try {
       const draftBeforeConfirm = activeDraftRef.current;
       const firstFreshRows = await buildFreshApplyPreviewRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
         startISO,
         endISO,
         draft: draftBeforeConfirm,
@@ -2181,17 +2697,19 @@ export default function WorkoutPlanBuilderDraftScreen() {
       setApplyPreviewRows(firstFreshRows);
       const firstNewRows = firstFreshRows.filter((row) => row.status === "new");
       const firstUpdateRows = firstFreshRows.filter((row) => row.status === "update");
-      if (firstNewRows.length + firstUpdateRows.length === 0) {
-        setApplyPreviewError("No safe new workouts or safe existing updates are available.");
+      const firstDeleteRows = firstFreshRows.filter((row) => row.status === "cleared");
+      if (firstNewRows.length + firstUpdateRows.length + firstDeleteRows.length === 0) {
+        setApplyPreviewError("No safe new workouts, updates, or cleared rows are available.");
         return;
       }
 
-      const confirmed = await confirmApplySafeChanges(firstNewRows.length, firstUpdateRows.length);
+      const confirmed = await confirmApplySafeChanges(firstNewRows.length, firstUpdateRows.length, firstDeleteRows.length);
       if (!confirmed) return;
 
       const draftForApply = activeDraftRef.current;
       const finalFreshRows = await buildFreshApplyPreviewRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
         startISO,
         endISO,
         draft: draftForApply,
@@ -2199,25 +2717,30 @@ export default function WorkoutPlanBuilderDraftScreen() {
       setApplyPreviewRows(finalFreshRows);
       const rowsToCreate = finalFreshRows.filter((row) => row.status === "new");
       const rowsToUpdate = finalFreshRows.filter((row) => row.status === "update");
-      if (rowsToCreate.length + rowsToUpdate.length === 0) {
+      const rowsToDelete = finalFreshRows.filter((row) => row.status === "cleared");
+      if (rowsToCreate.length + rowsToUpdate.length + rowsToDelete.length === 0) {
         setApplyPreviewError("No safe changes remain after the fresh conflict check.");
         return;
       }
 
-      const freshExistingByKey = await loadFreshExistingCellIndex(athleteId, startISO, endISO);
+      const freshExistingByKey = await loadFreshExistingCellIndex(targetAthleteIds, startISO, endISO);
       const createResult = rowsToCreate.length > 0
-        ? await createSafeNewDraftRows({ athleteId, teamId, draft: draftForApply, rows: rowsToCreate })
+        ? await createSafeNewDraftRows({ targetId, teamId, draft: draftForApply, rows: rowsToCreate })
         : { createdKeys: [], headerNoteFailureCount: 0 };
       const updateResult = rowsToUpdate.length > 0
-        ? await updateSafeExistingDraftRows({ athleteId, draft: draftForApply, rows: rowsToUpdate, freshExistingByKey })
+        ? await updateSafeExistingDraftRows({ targetId, targetAthleteIds, teamId, draft: draftForApply, rows: rowsToUpdate, freshExistingByKey })
         : { updatedKeys: [], sharedSkipped: 0, staleSkipped: 0, unsafeSkipped: 0, headerNoteFailureCount: 0 };
+      const deleteResult = rowsToDelete.length > 0
+        ? await deleteSafeClearedDraftRows({ targetId, targetAthleteIds, draft: draftForApply, rows: rowsToDelete, freshExistingByKey })
+        : { deletedKeys: [], deletedRows: 0, unsafeSkipped: 0 };
 
-      const appliedKeys = Array.from(new Set([...createResult.createdKeys, ...updateResult.updatedKeys]));
+      const appliedKeys = Array.from(new Set([...createResult.createdKeys, ...updateResult.updatedKeys, ...deleteResult.deletedKeys]));
       await clearAppliedDraftKeys(appliedKeys, draftForApply);
 
       await refreshExistingWorkoutOverlay();
       const refreshedRows = await buildFreshApplyPreviewRows({
-        athleteId,
+        targetId,
+        targetAthleteIds,
         startISO,
         endISO,
         draft: activeDraftRef.current,
@@ -2227,7 +2750,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
         0,
         finalFreshRows.filter((row) => row.status !== "new" && row.status !== "update").length +
           rowsToCreate.length - createResult.createdKeys.length +
-          rowsToUpdate.length - updateResult.updatedKeys.length
+          rowsToUpdate.length - updateResult.updatedKeys.length +
+          rowsToDelete.length - deleteResult.deletedKeys.length
       );
       const errors: string[] = [];
       if (createResult.headerNoteFailureCount > 0) errors.push(`${createResult.headerNoteFailureCount} header note save${createResult.headerNoteFailureCount === 1 ? "" : "s"} failed, but row details were created.`);
@@ -2235,10 +2759,12 @@ export default function WorkoutPlanBuilderDraftScreen() {
       if (updateResult.staleSkipped > 0) errors.push(`${updateResult.staleSkipped} stale/source-changed row${updateResult.staleSkipped === 1 ? "" : "s"} skipped.`);
       if (updateResult.unsafeSkipped > 0) errors.push(`${updateResult.unsafeSkipped} unsafe row${updateResult.unsafeSkipped === 1 ? "" : "s"} skipped.`);
       if (updateResult.headerNoteFailureCount > 0) errors.push(`${updateResult.headerNoteFailureCount} updated header note save${updateResult.headerNoteFailureCount === 1 ? "" : "s"} failed, but workout rows were updated.`);
+      if (deleteResult.unsafeSkipped > 0) errors.push(`${deleteResult.unsafeSkipped} cleared row${deleteResult.unsafeSkipped === 1 ? "" : "s"} skipped.`);
       setLastApplySummary({
         title: "Apply Safe Changes",
         created: createResult.createdKeys.length,
         updated: updateResult.updatedKeys.length,
+        deleted: deleteResult.deletedRows,
         skipped,
         conflicts: finalFreshRows.filter((row) => row.status === "conflict").length + updateResult.sharedSkipped + updateResult.staleSkipped + updateResult.unsafeSkipped,
         errors,
@@ -2255,10 +2781,13 @@ export default function WorkoutPlanBuilderDraftScreen() {
     commitEditingFields,
     confirmApplySafeChanges,
     createSafeNewDraftRows,
+    deleteSafeClearedDraftRows,
     getApplyScopeRange,
     loadFreshExistingCellIndex,
     refreshExistingWorkoutOverlay,
+    selectedTargetAthleteIds,
     store,
+    targetType,
     updateSafeExistingDraftRows,
   ]);
 
@@ -2341,9 +2870,48 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
         <View style={{ flexDirection: "row", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
           <View style={{ minWidth: 220 }}>
-            <Text style={{ fontSize: 12, fontWeight: "900", color: "#475569", marginBottom: 6 }}>Athlete</Text>
-            <Pressable onPress={() => setAthletePickerOpen(true)} style={controlStyle}>
-              <Text style={controlTextStyle}>{selectedAthlete ? rosterRowDisplayName(selectedAthlete) : "Select athlete"}</Text>
+            <Text style={{ fontSize: 12, fontWeight: "900", color: "#475569", marginBottom: 6 }}>Target</Text>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              {(["athlete", "trainingGroup"] as PlanBuilderTargetType[]).map((type) => {
+                const selected = targetType === type;
+                return (
+                  <Pressable
+                    key={type}
+                    onPress={async () => {
+                      await commitEditingFields();
+                      setTargetType(type);
+                      setApplyPreviewRows([]);
+                      setLastApplySummary(null);
+                      setApplyPreviewError(null);
+                    }}
+                    style={[scopeButtonStyle, selected && scopeButtonActiveStyle]}
+                  >
+                    <Text style={[scopeButtonTextStyle, selected && scopeButtonTextActiveStyle]}>
+                      {type === "athlete" ? "Athlete" : "Training Group"}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+          <View style={{ minWidth: 220 }}>
+            <Text style={{ fontSize: 12, fontWeight: "900", color: "#475569", marginBottom: 6 }}>
+              {targetType === "trainingGroup" ? "Training Group" : "Athlete"}
+            </Text>
+            <Pressable
+              onPress={() => targetType === "trainingGroup" ? setTrainingGroupPickerOpen(true) : setAthletePickerOpen(true)}
+              style={controlStyle}
+            >
+              <Text style={controlTextStyle}>
+                {targetType === "trainingGroup"
+                  ? selectedTrainingGroup?.name || "Select training group"
+                  : selectedAthlete ? rosterRowDisplayName(selectedAthlete) : "Select athlete"}
+              </Text>
+              {targetType === "trainingGroup" ? (
+                <Text style={{ marginTop: 2, color: "#64748b", fontSize: 11, fontWeight: "700" }}>
+                  {activeTrainingGroupAthleteIds.length} active member{activeTrainingGroupAthleteIds.length === 1 ? "" : "s"}
+                </Text>
+              ) : null}
             </Pressable>
           </View>
           <View style={{ minWidth: 220 }}>
@@ -2373,15 +2941,15 @@ export default function WorkoutPlanBuilderDraftScreen() {
           </View>
           <Pressable
             onPress={applySeasonRange}
-            disabled={!selectedAthlete || !selectedSeason}
-            style={[secondaryButtonStyle, (!selectedAthlete || !selectedSeason) && { opacity: 0.45 }]}
+            disabled={targetType === "athlete" ? (!selectedAthlete || !selectedSeason) : !selectedSeason}
+            style={[secondaryButtonStyle, (targetType === "athlete" ? (!selectedAthlete || !selectedSeason) : !selectedSeason) && { opacity: 0.45 }]}
           >
             <Text style={secondaryButtonTextStyle}>Use Season Range</Text>
           </Pressable>
           <Pressable
             onPress={() => void openApplyPreview()}
-            disabled={!selectedAthleteId}
-            style={[primaryButtonStyle, !selectedAthleteId && { opacity: 0.45 }]}
+            disabled={!selectedPlanTargetId || selectedTargetAthleteIds.length === 0}
+            style={[primaryButtonStyle, (!selectedPlanTargetId || selectedTargetAthleteIds.length === 0) && { opacity: 0.45 }]}
           >
             <Text style={primaryButtonTextStyle}>Preview Apply...</Text>
           </Pressable>
@@ -2478,7 +3046,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
               {colKeys.map((colKey) => {
                 const selected = grid.isCellSelected(dateISO, colKey);
                 const active = grid.isCellActive(dateISO, colKey);
-                const draftCell = getDraftCell(activeDraft, selectedAthleteId, dateISO, colKey);
+                const draftCell = getDraftCell(activeDraft, selectedPlanTargetId, dateISO, colKey);
                 const existingCell = existingCellsByKey[cellKey(dateISO, colKey)] ?? null;
                 const cell = getDisplayCell(dateISO, colKey);
                 const cellState = resolveCellState({ draftCell, existingCell });
@@ -2532,6 +3100,13 @@ export default function WorkoutPlanBuilderDraftScreen() {
                         <Text style={[statusPillTextStyle, statusPillTextStyleByState[cellState] ?? null]}>{statusLabel}</Text>
                       </View>
                     ) : null}
+                    {targetType === "trainingGroup" && (existingCell?.mixedFields?.length ?? 0) > 0 && cellState !== "conflict" ? (
+                      <View style={[statusPillStyle, { backgroundColor: "#fef3c7", borderColor: "#f59e0b" }]}>
+                        <Text style={[statusPillTextStyle, { color: "#92400e" }]}>
+                          Mixed {existingCell?.mixedFields?.join(", ")}
+                        </Text>
+                      </View>
+                    ) : null}
                     {isConflict ? (
                       <View style={conflictMessageStyle}>
                         <Text style={{ fontSize: 12, fontWeight: "900", color: "#92400e" }}>
@@ -2547,13 +3122,13 @@ export default function WorkoutPlanBuilderDraftScreen() {
                           value={String(cell?.title ?? "")}
                           onChangeText={(value) => setSessionTitle(dateISO, colKey, value)}
                           onBlur={() => {
-                            setFocusedEditorKey((current) => (current === editingFieldKey(selectedAthleteId, dateISO, colKey, "title") ? null : current));
+                            setFocusedEditorKey((current) => (current === editingFieldKey(selectedPlanTargetId, dateISO, colKey, "title") ? null : current));
                             commitSessionField(dateISO, colKey, "title");
                           }}
                           onSubmitEditing={() => commitSessionField(dateISO, colKey, "title")}
                           onFocus={() => {
                             setActiveGridId(PLAN_BUILDER_GRID_ID);
-                            setFocusedEditorKey(editingFieldKey(selectedAthleteId, dateISO, colKey, "title"));
+                            setFocusedEditorKey(editingFieldKey(selectedPlanTargetId, dateISO, colKey, "title"));
                           }}
                           {...(Platform.OS === "web" ? ({ onKeyDown: (event: any) => handleEditorKeyDown(event, "title") } as any) : null)}
                           {...(Platform.OS === "web" ? ({ onMouseDown: (event: any) => event.stopPropagation?.() } as any) : null)}
@@ -2566,12 +3141,12 @@ export default function WorkoutPlanBuilderDraftScreen() {
                           value={String(cell?.details ?? "")}
                           onChangeText={(value) => setSessionDetails(dateISO, colKey, value)}
                           onBlur={() => {
-                            setFocusedEditorKey((current) => (current === editingFieldKey(selectedAthleteId, dateISO, colKey, "details") ? null : current));
+                            setFocusedEditorKey((current) => (current === editingFieldKey(selectedPlanTargetId, dateISO, colKey, "details") ? null : current));
                             commitSessionField(dateISO, colKey, "details");
                           }}
                           onFocus={() => {
                             setActiveGridId(PLAN_BUILDER_GRID_ID);
-                            setFocusedEditorKey(editingFieldKey(selectedAthleteId, dateISO, colKey, "details"));
+                            setFocusedEditorKey(editingFieldKey(selectedPlanTargetId, dateISO, colKey, "details"));
                           }}
                           {...(Platform.OS === "web" ? ({ onKeyDown: (event: any) => handleEditorKeyDown(event, "details") } as any) : null)}
                           {...(Platform.OS === "web" ? ({ onMouseDown: (event: any) => event.stopPropagation?.() } as any) : null)}
@@ -2628,6 +3203,46 @@ export default function WorkoutPlanBuilderDraftScreen() {
                   <Text style={{ fontWeight: "900", color: "#1f2933" }}>{selectedAthleteId === athlete.id ? "✓ " : ""}{rosterRowDisplayName(athlete)}</Text>
                 </Pressable>
               ))}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal visible={trainingGroupPickerOpen} transparent animationType="fade" onRequestClose={() => setTrainingGroupPickerOpen(false)}>
+        <Pressable style={modalBackdropStyle} onPress={() => setTrainingGroupPickerOpen(false)}>
+          <Pressable style={modalCardStyle} onPress={(event) => event.stopPropagation()}>
+            <Text style={modalTitleStyle}>Select Training Group</Text>
+            <ScrollView style={{ maxHeight: 420 }}>
+              {trainingGroups.map((group) => {
+                const groupId = String(group.id ?? "").trim();
+                const memberCount = (Array.isArray(store.trainingGroupMemberships) ? store.trainingGroupMemberships : []).filter(
+                  (membership) =>
+                    isActiveTrainingGroupMembership(membership) &&
+                    String(membership?.group_id ?? "").trim() === groupId &&
+                    roster.some((athlete) => String(athlete.id ?? "").trim() === String(membership?.athlete_profile_id ?? "").trim())
+                ).length;
+                return (
+                  <Pressable
+                    key={groupId}
+                    onPress={async () => {
+                      await commitEditingFields();
+                      setSelectedTrainingGroupId(groupId);
+                      setTrainingGroupPickerOpen(false);
+                    }}
+                    style={[pickerRowStyle, selectedTrainingGroupId === groupId && { backgroundColor: "#eff6ff" }]}
+                  >
+                    <Text style={{ fontWeight: "900", color: "#1f2933" }}>
+                      {selectedTrainingGroupId === groupId ? "✓ " : ""}{group.name}
+                    </Text>
+                    <Text style={{ marginTop: 3, color: "#64748b", fontWeight: "700" }}>
+                      {memberCount} active member{memberCount === 1 ? "" : "s"}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+              {trainingGroups.length === 0 ? (
+                <Text style={{ color: "#64748b", fontWeight: "800" }}>No training groups configured yet.</Text>
+              ) : null}
             </ScrollView>
           </Pressable>
         </Pressable>
@@ -2776,7 +3391,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
               {metadataEditorDateISO
                 ? colKeys.map((session) => {
                     const existingCell = existingCellsByKey[cellKey(metadataEditorDateISO, session)] ?? null;
-                    const draftCell = getDraftCell(activeDraft, selectedAthleteId, metadataEditorDateISO, session);
+                    const draftCell = getDraftCell(activeDraft, selectedPlanTargetId, metadataEditorDateISO, session);
                     const state = resolveCellState({ draftCell, existingCell });
                     const cell = getDisplayCell(metadataEditorDateISO, session);
                     const selectedCategoryIds = normalizeStringList(cell?.categoryIds);
@@ -2959,6 +3574,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
                 <View style={applySummaryCountsStyle}>
                   <Text style={applySummaryCountTextStyle}>Created: {lastApplySummary.created}</Text>
                   <Text style={applySummaryCountTextStyle}>Updated: {lastApplySummary.updated}</Text>
+                  {typeof lastApplySummary.deleted === "number" ? (
+                    <Text style={applySummaryCountTextStyle}>Deleted: {lastApplySummary.deleted}</Text>
+                  ) : null}
                   <Text style={applySummaryCountTextStyle}>Skipped: {lastApplySummary.skipped}</Text>
                   <Text style={applySummaryCountTextStyle}>Conflicts: {lastApplySummary.conflicts}</Text>
                 </View>
