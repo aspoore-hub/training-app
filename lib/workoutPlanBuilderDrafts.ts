@@ -29,6 +29,7 @@ export type WorkoutPlanBuilderCell = {
   };
   sourceRowCount?: number;
   conflictReason?: string;
+  editedFields?: string[];
 };
 
 export type WorkoutPlanBuilderDraft = {
@@ -105,6 +106,7 @@ function normalizeCell(raw: any): WorkoutPlanBuilderCell | null {
     originalSnapshot: normalizeSnapshot(raw.originalSnapshot),
     sourceRowCount: Number.isFinite(Number(raw.sourceRowCount)) ? Math.max(0, Math.round(Number(raw.sourceRowCount))) : undefined,
     conflictReason: String(raw.conflictReason ?? "").trim() || undefined,
+    editedFields: normalizeStringArray(raw.editedFields),
   };
 }
 

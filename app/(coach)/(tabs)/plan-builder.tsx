@@ -73,6 +73,7 @@ type PlanBuilderCellState =
 type PlanBuilderEditingField = "title" | "details";
 type PlanBuilderRangeMode = "season" | "custom";
 type PlanBuilderTargetType = "athlete" | "trainingGroup";
+type PlanBuilderDraftField = "title" | "details" | "timeText" | "location" | "categoryIds" | "preRoutineIds" | "postRoutineIds";
 
 type ApplyPreviewScope = "entire" | "range";
 
@@ -205,6 +206,15 @@ function normalizeStringList(raw: unknown): string[] {
   return Array.from(new Set(list.map((item) => String(item ?? "").trim()).filter(Boolean)));
 }
 
+function normalizeEditedFields(raw: unknown): PlanBuilderDraftField[] {
+  const allowed = new Set<PlanBuilderDraftField>(["title", "details", "timeText", "location", "categoryIds", "preRoutineIds", "postRoutineIds"]);
+  return normalizeStringList(raw).filter((item): item is PlanBuilderDraftField => allowed.has(item as PlanBuilderDraftField));
+}
+
+function mergeEditedFields(existing: unknown, additions: PlanBuilderDraftField[]): PlanBuilderDraftField[] {
+  return Array.from(new Set([...normalizeEditedFields(existing), ...additions]));
+}
+
 function normalizeSession(value: unknown): "AM" | "PM" {
   return String(value ?? "").trim().toUpperCase() === "AM" ? "AM" : "PM";
 }
@@ -310,6 +320,36 @@ function snapshotFromDraftCell(cell: WorkoutPlanBuilderCell | null | undefined):
     categoryIds: normalizeStringList(cell?.categoryIds),
     preRoutineIds: normalizeStringList(cell?.preRoutineIds),
     postRoutineIds: normalizeStringList(cell?.postRoutineIds),
+  };
+}
+
+function existingSnapshotPatch(existing: ExistingPlanCell | null | undefined): Partial<WorkoutPlanBuilderCell> {
+  if (!existing?.source) return {};
+  return {
+    title: String(existing.source.snapshot.title ?? "").trim(),
+    details: String(existing.source.snapshot.details ?? "").trim(),
+    timeText: existing.source.snapshot.timeText,
+    location: existing.source.snapshot.location,
+    categoryIds: normalizeStringList(existing.source.snapshot.categoryIds),
+    preRoutineIds: normalizeStringList(existing.source.snapshot.preRoutineIds),
+    postRoutineIds: normalizeStringList(existing.source.snapshot.postRoutineIds),
+    ...sourceFieldsForExisting(existing),
+    editedFields: [],
+  };
+}
+
+function mergeDraftCellWithCommittedBase(cell: WorkoutPlanBuilderCell): WorkoutPlanBuilderCell {
+  const editedFields = normalizeEditedFields(cell.editedFields);
+  if (editedFields.length === 0 || !cell.originalSnapshot) return cell;
+  return {
+    ...cell,
+    title: editedFields.includes("title") ? cell.title : String(cell.originalSnapshot.title ?? "").trim(),
+    details: editedFields.includes("details") ? cell.details : String(cell.originalSnapshot.details ?? "").trim(),
+    timeText: editedFields.includes("timeText") ? cell.timeText : cell.originalSnapshot.timeText,
+    location: editedFields.includes("location") ? cell.location : cell.originalSnapshot.location,
+    categoryIds: editedFields.includes("categoryIds") ? normalizeStringList(cell.categoryIds) : normalizeStringList(cell.originalSnapshot.categoryIds),
+    preRoutineIds: editedFields.includes("preRoutineIds") ? normalizeStringList(cell.preRoutineIds) : normalizeStringList(cell.originalSnapshot.preRoutineIds),
+    postRoutineIds: editedFields.includes("postRoutineIds") ? normalizeStringList(cell.postRoutineIds) : normalizeStringList(cell.originalSnapshot.postRoutineIds),
   };
 }
 
@@ -490,6 +530,7 @@ function setDraftCellValue(
     originalSnapshot: previous?.originalSnapshot,
     sourceRowCount: previous?.sourceRowCount,
     conflictReason: previous?.conflictReason,
+    editedFields: mergeEditedFields(previous?.editedFields, ["title", "details"]),
   };
   const keepExistingSource = previous?.sourceType === "existing" || !!previous?.originalSnapshot;
   const nextCells = { ...draft.cellsByKey };
@@ -531,6 +572,7 @@ function patchDraftCell(
     originalSnapshot: patch.originalSnapshot ?? previous?.originalSnapshot,
     sourceRowCount: patch.sourceRowCount ?? previous?.sourceRowCount,
     conflictReason: patch.conflictReason ?? previous?.conflictReason,
+    editedFields: patch.editedFields !== undefined ? normalizeEditedFields(patch.editedFields) : normalizeEditedFields(previous?.editedFields),
   };
   const keepExistingSource = nextCell.sourceType === "existing" || !!nextCell.originalSnapshot;
   const nextCells = { ...draft.cellsByKey };
@@ -556,14 +598,10 @@ function setDraftCellCombinedValue(
   const parsed = combinedTextToTitleDetails(value);
   if (!previous && existing?.source) {
     return patchDraftCell(draft, athleteId, dateISO, session, {
+      ...existingSnapshotPatch(existing),
       title: parsed.title,
       details: parsed.details,
-      timeText: existing.source.snapshot.timeText,
-      location: existing.source.snapshot.location,
-      categoryIds: existing.source.snapshot.categoryIds,
-      preRoutineIds: existing.source.snapshot.preRoutineIds,
-      postRoutineIds: existing.source.snapshot.postRoutineIds,
-      ...sourceFieldsForExisting(existing),
+      editedFields: ["title", "details"],
     });
   }
   return setDraftCellValue(draft, athleteId, dateISO, session, value);
@@ -1336,17 +1374,16 @@ export default function WorkoutPlanBuilderDraftScreen() {
         const nextPatch =
           !previous && existing?.source
             ? {
-                timeText: existing.source.snapshot.timeText,
-                location: existing.source.snapshot.location,
-                categoryIds: existing.source.snapshot.categoryIds,
-                preRoutineIds: existing.source.snapshot.preRoutineIds,
-                postRoutineIds: existing.source.snapshot.postRoutineIds,
-                ...sourceFieldsForExisting(existing),
+                ...existingSnapshotPatch(existing),
                 ...patch,
+                editedFields: [parsed.field],
               }
             : !previous
-              ? { sourceType: "manual" as const, ...patch }
-              : patch;
+              ? { sourceType: "manual" as const, ...patch, editedFields: [parsed.field] }
+              : {
+                  ...patch,
+                  editedFields: mergeEditedFields(previous.editedFields, [parsed.field]),
+                };
         next = patchDraftCell(next, targetId, parsed.dateISO, parsed.session, nextPatch);
       });
 
@@ -1416,17 +1453,16 @@ export default function WorkoutPlanBuilderDraftScreen() {
       const nextPatch =
         !previous && existing?.source
           ? {
-              timeText: existing.source.snapshot.timeText,
-              location: existing.source.snapshot.location,
-              categoryIds: existing.source.snapshot.categoryIds,
-              preRoutineIds: existing.source.snapshot.preRoutineIds,
-              postRoutineIds: existing.source.snapshot.postRoutineIds,
-              ...sourceFieldsForExisting(existing),
+              ...existingSnapshotPatch(existing),
               ...patch,
+              editedFields: mergeEditedFields([], Object.keys(patch) as PlanBuilderDraftField[]),
             }
           : !previous
-            ? { sourceType: "manual" as const, ...patch }
-            : patch;
+            ? { sourceType: "manual" as const, ...patch, editedFields: mergeEditedFields([], Object.keys(patch) as PlanBuilderDraftField[]) }
+            : {
+                ...patch,
+                editedFields: mergeEditedFields(previous.editedFields, Object.keys(patch) as PlanBuilderDraftField[]),
+              };
       const next = patchDraftCell(base, selectedPlanTargetId, dateISO, session, nextPatch);
       setActiveDraft(next);
       activeDraftRef.current = next;
@@ -1472,7 +1508,10 @@ export default function WorkoutPlanBuilderDraftScreen() {
       const draftValue = getDraftCellValue(activeDraftRef.current, targetId, dateISO, colKey);
       const existing = existingCellsRef.current[cellKey(dateISO, session)];
       const baseCell = draftValue
-        ? getDraftCell(activeDraftRef.current, targetId, dateISO, session)
+        ? (() => {
+            const draftCell = getDraftCell(activeDraftRef.current, targetId, dateISO, session);
+            return draftCell ? mergeDraftCellWithCommittedBase(draftCell) : null;
+          })()
         : existing?.source
           ? ({ ...existing.source.snapshot, dateISO, session } as WorkoutPlanBuilderCell)
           : null;
@@ -1731,10 +1770,11 @@ export default function WorkoutPlanBuilderDraftScreen() {
         ? Object.prototype.hasOwnProperty.call(editingFieldsByKey, detailsEditKey)
         : false;
       if (draftCell) {
+        const mergedCell = mergeDraftCellWithCommittedBase(draftCell);
         return {
-          ...draftCell,
-          title: hasTitleEdit ? editingFieldsByKey[titleEditKey] : draftCell.title,
-          details: hasDetailsEdit ? editingFieldsByKey[detailsEditKey] : draftCell.details,
+          ...mergedCell,
+          title: hasTitleEdit ? editingFieldsByKey[titleEditKey] : mergedCell.title,
+          details: hasDetailsEdit ? editingFieldsByKey[detailsEditKey] : mergedCell.details,
         };
       }
       const existing = existingCellsByKey[cellKey(dateISO, session)];
