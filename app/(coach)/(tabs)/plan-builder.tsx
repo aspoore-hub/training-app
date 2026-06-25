@@ -5,6 +5,7 @@ import type { WeekStartDay } from "../../../lib/types";
 import { useGridEngine } from "../../../components/grid/useGridEngine";
 import { parseTsv } from "../../../lib/grid/tsv";
 import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
+import { loadRoutineFolders, type RoutineFolder } from "../../../lib/drillLibrary";
 import { getWeekStartISO, parseISODate, toISODate } from "../../../lib/mileagePlan";
 import { getCachedCoachCategories, loadCoachCategoriesFromTeamKV, loadWeekStartSetting } from "../../../lib/settings";
 import {
@@ -34,6 +35,7 @@ import {
   type WorkoutPlanBuilderDraft,
 } from "../../../lib/workoutPlanBuilderDrafts";
 import { canApplyPlanBuilder, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
+import { compareNames, sortByFolderThenName, sortCategoriesForDisplay, sortFoldersForDisplay } from "../../../lib/sortHelpers";
 
 const MAX_PLAN_BUILDER_WEEKS = 52;
 const DEFAULT_PLAN_BUILDER_WEEKS = 6;
@@ -74,6 +76,7 @@ type PlanBuilderEditingField = "title" | "details";
 type PlanBuilderRangeMode = "season" | "custom";
 type PlanBuilderTargetType = "athlete" | "trainingGroup";
 type PlanBuilderDraftField = "title" | "details" | "timeText" | "location" | "categoryIds" | "preRoutineIds" | "postRoutineIds";
+type MetadataPickerField = "categoryIds" | "preRoutineIds" | "postRoutineIds";
 
 type ApplyPreviewScope = "entire" | "range";
 
@@ -618,6 +621,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const [existingWorkoutsError, setExistingWorkoutsError] = useState<string | null>(null);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [auxiliaryRoutines, setAuxiliaryRoutines] = useState<AuxiliaryRoutine[]>([]);
+  const [routineFolders, setRoutineFolders] = useState<RoutineFolder[]>([]);
   const [selectedAthleteId, setSelectedAthleteId] = useState("");
   const [selectedSeasonId, setSelectedSeasonId] = useState<string | null>(null);
   const [firstWeekInput, setFirstWeekInput] = useState(() => getWeekStartISO(toISODate(new Date()), 1));
@@ -625,6 +629,12 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const [athletePickerOpen, setAthletePickerOpen] = useState(false);
   const [seasonPickerOpen, setSeasonPickerOpen] = useState(false);
   const [firstWeekPickerOpen, setFirstWeekPickerOpen] = useState(false);
+  const [metadataPicker, setMetadataPicker] = useState<{
+    dateISO: string;
+    session: "AM" | "PM";
+    field: MetadataPickerField;
+  } | null>(null);
+  const [metadataPickerSearch, setMetadataPickerSearch] = useState("");
   const [firstWeekPickerDraftDate, setFirstWeekPickerDraftDate] = useState("");
   const [firstWeekPickerError, setFirstWeekPickerError] = useState<string | null>(null);
   const [metadataEditorDateISO, setMetadataEditorDateISO] = useState<string | null>(null);
@@ -1006,6 +1016,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
     void loadAuxiliaryRoutines()
       .then((routines) => setAuxiliaryRoutines(Array.isArray(routines) ? routines : []))
       .catch(() => setAuxiliaryRoutines([]));
+    void loadRoutineFolders()
+      .then((folders) => setRoutineFolders(sortFoldersForDisplay(Array.isArray(folders) ? folders : [])))
+      .catch(() => setRoutineFolders([]));
     return () => {
       cancelled = true;
     };
@@ -1808,23 +1821,84 @@ export default function WorkoutPlanBuilderDraftScreen() {
     [buildCellMetadataSummary, getDisplayCell]
   );
 
+  const sortedCategories = useMemo(() => sortCategoriesForDisplay(categories), [categories]);
+
+  const sortedAuxiliaryRoutines = useMemo(
+    () => sortByFolderThenName(auxiliaryRoutines, routineFolders),
+    [auxiliaryRoutines, routineFolders]
+  );
+
+  const routineFolderName = useCallback(
+    (folderId?: string | null) => {
+      const id = String(folderId ?? "").trim();
+      if (!id) return "Uncategorized";
+      return routineFolders.find((folder) => String(folder.id ?? "").trim() === id)?.name ?? "Uncategorized";
+    },
+    [routineFolders]
+  );
+
+  const setSessionMetadataListValue = useCallback(
+    (
+      dateISO: string,
+      session: "AM" | "PM",
+      field: MetadataPickerField,
+      values: string[]
+    ) => {
+      patchSessionCell(dateISO, session, {
+        [field]: normalizeStringList(values),
+      } as Partial<WorkoutPlanBuilderCell>);
+    },
+    [patchSessionCell]
+  );
+
   const toggleSessionListValue = useCallback(
     (
       dateISO: string,
       session: "AM" | "PM",
-      field: "categoryIds" | "preRoutineIds" | "postRoutineIds",
+      field: MetadataPickerField,
       id: string
     ) => {
-      const current = getDraftCell(activeDraftRef.current, selectedPlanTargetId, dateISO, session);
+      const current = getDisplayCell(dateISO, session);
       const existing = normalizeStringList(current?.[field]);
       const cleanId = String(id ?? "").trim();
       if (!cleanId) return;
       const nextValues = existing.includes(cleanId)
         ? existing.filter((item) => item !== cleanId)
         : [...existing, cleanId];
-      patchSessionCell(dateISO, session, { [field]: nextValues } as Partial<WorkoutPlanBuilderCell>);
+      setSessionMetadataListValue(dateISO, session, field, nextValues);
     },
-    [patchSessionCell, selectedPlanTargetId]
+    [getDisplayCell, setSessionMetadataListValue]
+  );
+
+  const clearSessionMetadata = useCallback(
+    (dateISO: string, session: "AM" | "PM") => {
+      patchSessionCell(dateISO, session, {
+        categoryIds: [],
+        preRoutineIds: [],
+        postRoutineIds: [],
+      });
+    },
+    [patchSessionCell]
+  );
+
+  const copySessionMetadata = useCallback(
+    (dateISO: string, fromSession: "AM" | "PM", toSession: "AM" | "PM") => {
+      const source = getDisplayCell(dateISO, fromSession);
+      patchSessionCell(dateISO, toSession, {
+        categoryIds: normalizeStringList(source?.categoryIds),
+        preRoutineIds: normalizeStringList(source?.preRoutineIds),
+        postRoutineIds: normalizeStringList(source?.postRoutineIds),
+      });
+    },
+    [getDisplayCell, patchSessionCell]
+  );
+
+  const openMetadataPicker = useCallback(
+    (dateISO: string, session: "AM" | "PM", field: MetadataPickerField) => {
+      setMetadataPicker({ dateISO, session, field });
+      setMetadataPickerSearch("");
+    },
+    []
   );
 
   const getEligibleTargetAthleteIdsForDate = useCallback(
@@ -2847,6 +2921,33 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
   const applyActionBusy = applyNewLoading || applyUpdateLoading || applySafeLoading || applyPreviewLoading;
 
+  const renderSelectedMetadataChips = useCallback(
+    (ids: string[], kind: MetadataPickerField) => {
+      const cleanIds = normalizeStringList(ids);
+      if (cleanIds.length === 0) {
+        return <Text style={metadataEmptyTextStyle}>None selected</Text>;
+      }
+      return (
+        <View style={metadataSelectedChipWrapStyle}>
+          {cleanIds.map((id) => {
+            const category = kind === "categoryIds" ? categoryById.get(id) : null;
+            const label = kind === "categoryIds"
+              ? category ? categoryDisplayName(category) : id
+              : routineById.get(id)?.title ?? id;
+            const color = String(category?.color ?? "").trim();
+            return (
+              <View key={`${kind}-selected-${id}`} style={metadataSelectedChipStyle}>
+                {color ? <View style={[metadataColorSwatchStyle, { backgroundColor: color }]} /> : null}
+                <Text style={metadataChipTextStyle}>{label}</Text>
+              </View>
+            );
+          })}
+        </View>
+      );
+    },
+    [categoryById, routineById]
+  );
+
   if (readOnlyPlanBuilder) {
     return (
       <View style={{ flex: 1, backgroundColor: "#f3f0e8" }}>
@@ -3452,74 +3553,68 @@ export default function WorkoutPlanBuilderDraftScreen() {
                         ) : (
                           <>
 
-                        <Text style={metadataSectionLabelStyle}>Categories</Text>
-                        {categories.length ? (
-                          <View style={metadataChipWrapStyle}>
-                            {categories.map((category) => {
-                              const id = String(category.id ?? "").trim();
-                              const selected = selectedCategoryIds.includes(id);
-                              return (
-                                <Pressable
-                                  key={`${session}-category-${id}`}
-                                  onPress={() => toggleSessionListValue(metadataEditorDateISO, session, "categoryIds", id)}
-                                  style={[metadataChipStyle, selected && metadataChipSelectedStyle]}
-                                >
-                                  <Text style={[metadataChipTextStyle, selected && metadataChipSelectedTextStyle]}>
-                                    {selected ? "✓ " : ""}{categoryDisplayName(category)}
-                                  </Text>
-                                </Pressable>
-                              );
-                            })}
+                        <View style={metadataSectionRowStyle}>
+                          <View style={{ flex: 1, minWidth: 0 }}>
+                            <Text style={metadataSectionLabelStyle}>Categories</Text>
+                            {renderSelectedMetadataChips(selectedCategoryIds, "categoryIds")}
                           </View>
-                        ) : (
-                          <Text style={metadataEmptyTextStyle}>No categories configured yet.</Text>
-                        )}
+                          <Pressable
+                            onPress={() => openMetadataPicker(metadataEditorDateISO, session, "categoryIds")}
+                            style={metadataEditButtonStyle}
+                          >
+                            <Text style={metadataEditButtonTextStyle}>Add/edit categories</Text>
+                          </Pressable>
+                        </View>
 
-                        <Text style={metadataSectionLabelStyle}>Pre-routines</Text>
-                        {auxiliaryRoutines.length ? (
-                          <View style={metadataChipWrapStyle}>
-                            {auxiliaryRoutines.map((routine) => {
-                              const id = String(routine.id ?? "").trim();
-                              const selected = selectedPreRoutineIds.includes(id);
-                              return (
-                                <Pressable
-                                  key={`${session}-pre-${id}`}
-                                  onPress={() => toggleSessionListValue(metadataEditorDateISO, session, "preRoutineIds", id)}
-                                  style={[metadataChipStyle, selected && metadataChipSelectedStyle]}
-                                >
-                                  <Text style={[metadataChipTextStyle, selected && metadataChipSelectedTextStyle]}>
-                                    {selected ? "✓ " : ""}{routine.title}
-                                  </Text>
-                                </Pressable>
-                              );
-                            })}
+                        <View style={metadataSectionRowStyle}>
+                          <View style={{ flex: 1, minWidth: 0 }}>
+                            <Text style={metadataSectionLabelStyle}>Pre-routines</Text>
+                            {renderSelectedMetadataChips(selectedPreRoutineIds, "preRoutineIds")}
                           </View>
-                        ) : (
-                          <Text style={metadataEmptyTextStyle}>No routines configured yet.</Text>
-                        )}
+                          <Pressable
+                            onPress={() => openMetadataPicker(metadataEditorDateISO, session, "preRoutineIds")}
+                            style={metadataEditButtonStyle}
+                          >
+                            <Text style={metadataEditButtonTextStyle}>Add/edit pre-routines</Text>
+                          </Pressable>
+                        </View>
 
-                        <Text style={metadataSectionLabelStyle}>Post-routines</Text>
-                        {auxiliaryRoutines.length ? (
-                          <View style={metadataChipWrapStyle}>
-                            {auxiliaryRoutines.map((routine) => {
-                              const id = String(routine.id ?? "").trim();
-                              const selected = selectedPostRoutineIds.includes(id);
-                              return (
-                                <Pressable
-                                  key={`${session}-post-${id}`}
-                                  onPress={() => toggleSessionListValue(metadataEditorDateISO, session, "postRoutineIds", id)}
-                                  style={[metadataChipStyle, selected && metadataChipSelectedStyle]}
-                                >
-                                  <Text style={[metadataChipTextStyle, selected && metadataChipSelectedTextStyle]}>
-                                    {selected ? "✓ " : ""}{routine.title}
-                                  </Text>
-                                </Pressable>
-                              );
-                            })}
+                        <View style={metadataSectionRowStyle}>
+                          <View style={{ flex: 1, minWidth: 0 }}>
+                            <Text style={metadataSectionLabelStyle}>Post-routines</Text>
+                            {renderSelectedMetadataChips(selectedPostRoutineIds, "postRoutineIds")}
                           </View>
-                        ) : (
-                          <Text style={metadataEmptyTextStyle}>No routines configured yet.</Text>
-                        )}
+                          <Pressable
+                            onPress={() => openMetadataPicker(metadataEditorDateISO, session, "postRoutineIds")}
+                            style={metadataEditButtonStyle}
+                          >
+                            <Text style={metadataEditButtonTextStyle}>Add/edit post-routines</Text>
+                          </Pressable>
+                        </View>
+
+                        <Text style={metadataSectionLabelStyle}>Quick actions</Text>
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                          <Pressable disabled style={[metadataEditButtonStyle, { opacity: 0.45 }]}>
+                            <Text style={metadataEditButtonTextStyle}>Use category defaults</Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => copySessionMetadata(metadataEditorDateISO, session, session === "AM" ? "PM" : "AM")}
+                            style={metadataEditButtonStyle}
+                          >
+                            <Text style={metadataEditButtonTextStyle}>
+                              Copy {session} to {session === "AM" ? "PM" : "AM"}
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => clearSessionMetadata(metadataEditorDateISO, session)}
+                            style={[metadataEditButtonStyle, { borderColor: "#fecaca", backgroundColor: "#fff1f2" }]}
+                          >
+                            <Text style={[metadataEditButtonTextStyle, { color: "#b91c1c" }]}>Clear all</Text>
+                          </Pressable>
+                        </View>
+                        <Text style={{ marginTop: 6, color: "#94a3b8", fontSize: 11, fontWeight: "700" }}>
+                          Category defaults are not configured for Plan Builder yet.
+                        </Text>
                           </>
                         )}
                       </View>
@@ -3530,6 +3625,138 @@ export default function WorkoutPlanBuilderDraftScreen() {
             <Pressable onPress={() => setMetadataEditorDateISO(null)} style={[secondaryButtonStyle, { alignSelf: "flex-end", marginTop: 12 }]}>
               <Text style={secondaryButtonTextStyle}>Done</Text>
             </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={!!metadataPicker}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMetadataPicker(null)}
+      >
+        <Pressable style={modalBackdropStyle} onPress={() => setMetadataPicker(null)}>
+          <Pressable style={[modalCardStyle, { maxWidth: 720 }]} onPress={(event) => event.stopPropagation()}>
+            {metadataPicker ? (() => {
+              const field = metadataPicker.field;
+              const selectedCell = getDisplayCell(metadataPicker.dateISO, metadataPicker.session);
+              const selectedIds = normalizeStringList(selectedCell?.[field]);
+              const query = metadataPickerSearch.trim().toLowerCase();
+              const title = field === "categoryIds"
+                ? "Add/edit categories"
+                : field === "preRoutineIds"
+                  ? "Add/edit pre-routines"
+                  : "Add/edit post-routines";
+              const searchPlaceholder = field === "categoryIds" ? "Search categories" : "Search routines or folders";
+              const visibleCategories = sortedCategories.filter((category) => {
+                if (!query) return true;
+                return categoryDisplayName(category).toLowerCase().includes(query);
+              });
+              const visibleRoutines = sortedAuxiliaryRoutines.filter((routine) => {
+                if (!query) return true;
+                return [
+                  routine.title,
+                  routine.description,
+                  routineFolderName(routine.folderId),
+                ].some((value) => String(value ?? "").toLowerCase().includes(query));
+              });
+              const routineSections = new Map<string, AuxiliaryRoutine[]>();
+              visibleRoutines.forEach((routine) => {
+                const name = routineFolderName(routine.folderId);
+                const list = routineSections.get(name) ?? [];
+                list.push(routine);
+                routineSections.set(name, list);
+              });
+              const sortedSectionNames = Array.from(routineSections.keys()).sort((a, b) => {
+                const aUncat = a === "Uncategorized";
+                const bUncat = b === "Uncategorized";
+                if (aUncat !== bUncat) return aUncat ? 1 : -1;
+                return compareNames({ name: a }, { name: b });
+              });
+
+              return (
+                <>
+                  <Text style={modalTitleStyle}>
+                    {title} • {metadataPicker.session} {formatDateShort(metadataPicker.dateISO)}
+                  </Text>
+                  <TextInput
+                    value={metadataPickerSearch}
+                    onChangeText={setMetadataPickerSearch}
+                    placeholder={searchPlaceholder}
+                    placeholderTextColor="#94a3b8"
+                    style={[inputStyle, { marginBottom: 12 }]}
+                  />
+                  <ScrollView style={{ maxHeight: 520 }} keyboardShouldPersistTaps="handled">
+                    {field === "categoryIds" ? (
+                      visibleCategories.length > 0 ? (
+                        <View style={{ gap: 6 }}>
+                          {visibleCategories.map((category) => {
+                            const id = String(category.id ?? "").trim();
+                            const selected = selectedIds.includes(id);
+                            const color = String(category.color ?? "").trim();
+                            return (
+                              <Pressable
+                                key={`category-picker-${id}`}
+                                onPress={() => toggleSessionListValue(metadataPicker.dateISO, metadataPicker.session, field, id)}
+                                style={[metadataPickerRowStyle, selected && metadataPickerRowSelectedStyle]}
+                              >
+                                <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
+                                  <View style={[metadataColorSwatchStyle, { backgroundColor: color || "#cbd5e1" }]} />
+                                  <Text style={metadataPickerRowTextStyle}>{categoryDisplayName(category)}</Text>
+                                </View>
+                                <Text style={[metadataPickerCheckTextStyle, selected && { color: "#0f766e" }]}>
+                                  {selected ? "✓" : ""}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : (
+                        <Text style={metadataEmptyTextStyle}>No categories match that search.</Text>
+                      )
+                    ) : sortedSectionNames.length > 0 ? (
+                      <View style={{ gap: 12 }}>
+                        {sortedSectionNames.map((sectionName) => (
+                          <View key={`routine-section-${sectionName}`}>
+                            <Text style={metadataPickerSectionTitleStyle}>{sectionName}</Text>
+                            <View style={{ gap: 6 }}>
+                              {(routineSections.get(sectionName) ?? []).map((routine) => {
+                                const id = String(routine.id ?? "").trim();
+                                const selected = selectedIds.includes(id);
+                                return (
+                                  <Pressable
+                                    key={`${field}-picker-${id}`}
+                                    onPress={() => toggleSessionListValue(metadataPicker.dateISO, metadataPicker.session, field, id)}
+                                    style={[metadataPickerRowStyle, selected && metadataPickerRowSelectedStyle]}
+                                  >
+                                    <View style={{ flex: 1, minWidth: 0 }}>
+                                      <Text style={metadataPickerRowTextStyle}>{routine.title}</Text>
+                                      {routine.description ? (
+                                        <Text numberOfLines={1} style={metadataPickerRowMetaTextStyle}>{routine.description}</Text>
+                                      ) : null}
+                                    </View>
+                                    <Text style={[metadataPickerCheckTextStyle, selected && { color: "#0f766e" }]}>
+                                      {selected ? "✓" : ""}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+                          </View>
+                        ))}
+                      </View>
+                    ) : (
+                      <Text style={metadataEmptyTextStyle}>No routines match that search.</Text>
+                    )}
+                  </ScrollView>
+                  <View style={{ flexDirection: "row", justifyContent: "flex-end", marginTop: 14 }}>
+                    <Pressable onPress={() => setMetadataPicker(null)} style={primaryButtonStyle}>
+                      <Text style={primaryButtonTextStyle}>Done</Text>
+                    </Pressable>
+                  </View>
+                </>
+              );
+            })() : null}
           </Pressable>
         </Pressable>
       </Modal>
@@ -4026,6 +4253,12 @@ const metadataChipWrapStyle = {
   gap: 7,
 };
 
+const metadataSelectedChipWrapStyle = {
+  flexDirection: "row" as const,
+  flexWrap: "wrap" as const,
+  gap: 6,
+};
+
 const metadataChipStyle = {
   borderWidth: 1,
   borderColor: "#d8d2c4",
@@ -4054,6 +4287,100 @@ const metadataEmptyTextStyle = {
   color: "#94a3b8",
   fontSize: 12,
   fontWeight: "800" as const,
+};
+
+const metadataSectionRowStyle = {
+  borderTopWidth: 1,
+  borderTopColor: "#ede4d2",
+  paddingTop: 10,
+  marginTop: 8,
+  flexDirection: "row" as const,
+  alignItems: "flex-start" as const,
+  justifyContent: "space-between" as const,
+  gap: 12,
+  flexWrap: "wrap" as const,
+};
+
+const metadataSelectedChipStyle = {
+  borderWidth: 1,
+  borderColor: "#d8d2c4",
+  backgroundColor: "#fffdf7",
+  borderRadius: 999,
+  paddingHorizontal: 9,
+  paddingVertical: 5,
+  flexDirection: "row" as const,
+  alignItems: "center" as const,
+  gap: 6,
+};
+
+const metadataColorSwatchStyle = {
+  width: 10,
+  height: 10,
+  borderRadius: 999,
+  borderWidth: 1,
+  borderColor: "rgba(15, 23, 42, 0.16)",
+};
+
+const metadataEditButtonStyle = {
+  borderWidth: 1,
+  borderColor: "#0f766e",
+  backgroundColor: "#ecfdf5",
+  borderRadius: 10,
+  paddingHorizontal: 10,
+  paddingVertical: 7,
+};
+
+const metadataEditButtonTextStyle = {
+  color: "#0f766e",
+  fontSize: 12,
+  fontWeight: "900" as const,
+};
+
+const metadataPickerRowStyle = {
+  minHeight: 44,
+  borderWidth: 1,
+  borderColor: "#e2ddcf",
+  backgroundColor: "#fffdf7",
+  borderRadius: 10,
+  paddingHorizontal: 10,
+  paddingVertical: 8,
+  flexDirection: "row" as const,
+  alignItems: "center" as const,
+  justifyContent: "space-between" as const,
+  gap: 12,
+};
+
+const metadataPickerRowSelectedStyle = {
+  borderColor: "#0f766e",
+  backgroundColor: "#ecfdf5",
+};
+
+const metadataPickerRowTextStyle = {
+  color: "#1f2933",
+  fontSize: 13,
+  fontWeight: "900" as const,
+};
+
+const metadataPickerRowMetaTextStyle = {
+  marginTop: 2,
+  color: "#64748b",
+  fontSize: 11,
+  fontWeight: "700" as const,
+};
+
+const metadataPickerCheckTextStyle = {
+  minWidth: 18,
+  color: "#94a3b8",
+  fontSize: 16,
+  fontWeight: "900" as const,
+  textAlign: "center" as const,
+};
+
+const metadataPickerSectionTitleStyle = {
+  marginBottom: 6,
+  color: "#475569",
+  fontSize: 12,
+  fontWeight: "900" as const,
 };
 
 const previewWarningStyle = {
