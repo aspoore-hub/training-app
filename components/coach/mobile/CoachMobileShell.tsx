@@ -4,9 +4,29 @@ import { useEffect, useMemo, useState, type ComponentProps, type ReactNode } fro
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { AccountContextSelector } from "../../account/AccountContextSelector";
 import { listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../../lib/teamWorkoutsCloud";
+import { listTeamWorkoutBatchHeadersInRange, type TeamWorkoutBatchHeaderRow } from "../../../lib/teamWorkoutBatchHeadersCloud";
 import { teamDataStore } from "../../../lib/teamDataStore";
 import { parseISODate, toISODate } from "../../../lib/mileagePlan";
 import { getAthleteDisplayName } from "../../../lib/athleteName";
+import {
+  loadAuxiliaryRoutineDefinitionsWithStatus,
+  type AuxiliaryRoutine,
+} from "../../../lib/auxiliaryRoutines";
+import {
+  loadDrillLibraryDefinitionsWithStatus,
+  type DrillLibraryItem,
+} from "../../../lib/drillLibrary";
+import { CATEGORIES_KEY, normalizeCategories } from "../../../lib/categories";
+import { loadJSON } from "../../../lib/storage";
+import type { WorkoutCategory } from "../../../lib/types";
+import {
+  buildBatchNotesByWorkoutId,
+  cleanDisplayText,
+  formatPlannedDistanceLabel,
+  getRoutineTitles,
+} from "../../../lib/athleteWorkoutDisplay";
+import { CoachMobileWorkoutCard, type CoachMobileWorkoutGroup } from "./CoachMobileWorkoutCard";
+import { CoachMobileWorkoutDetail } from "./CoachMobileWorkoutDetail";
 
 type MobileSection = "home" | "calendar" | "logs" | "roster" | "more";
 
@@ -76,10 +96,6 @@ function getWorkoutTitle(rows: TeamWorkoutRow[]) {
   return rows.find((row) => String(row.title ?? "").trim())?.title?.trim() || "Untitled workout";
 }
 
-function getWorkoutNotes(rows: TeamWorkoutRow[]) {
-  return rows.find((row) => String(row.details ?? "").trim())?.details?.trim() || "";
-}
-
 function getWorkoutCategories(rows: TeamWorkoutRow[]) {
   const values = new Set<string>();
   rows.forEach((row) => {
@@ -93,7 +109,27 @@ function getWorkoutCategories(rows: TeamWorkoutRow[]) {
   return Array.from(values);
 }
 
-function groupWorkouts(rows: TeamWorkoutRow[]) {
+function normalizeRoutineIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((id) => cleanDisplayText(id)).filter(Boolean);
+}
+
+function firstCleanValue(rows: TeamWorkoutRow[], key: "time_text" | "location") {
+  return rows.map((row) => cleanDisplayText(row[key])).find(Boolean) ?? "";
+}
+
+function uniqueClean(values: string[]) {
+  return Array.from(new Set(values.map((value) => cleanDisplayText(value)).filter(Boolean)));
+}
+
+function groupWorkouts(
+  rows: TeamWorkoutRow[],
+  options: {
+    batchNotesByWorkoutId: Map<string, string>;
+    routineById: Map<string, AuxiliaryRoutine>;
+    rosterById: Map<string, ReturnType<typeof teamDataStore.use>["roster"][number]>;
+  }
+): CoachMobileWorkoutGroup[] {
   const map = new Map<string, TeamWorkoutRow[]>();
   rows.forEach((row) => {
     const key = `${row.date_iso}|${row.session}|${row.batch_id || row.id}`;
@@ -102,19 +138,59 @@ function groupWorkouts(rows: TeamWorkoutRow[]) {
   return Array.from(map.entries())
     .map(([key, groupedRows]) => {
       const [dateISO, session] = key.split("|");
-      const athleteIds = new Set(groupedRows.map((row) => row.athlete_profile_id).filter(Boolean));
+      const resolvedSession: "AM" | "PM" = session === "AM" ? "AM" : "PM";
+      const athleteIds = Array.from(new Set(groupedRows.map((row) => cleanDisplayText(row.athlete_profile_id)).filter(Boolean)));
       const visibleCount = groupedRows.filter((row) => row.athlete_visible).length;
+      const firstRow = groupedRows[0];
+      const firstWorkoutId = cleanDisplayText(firstRow?.id);
+      const batchDetails =
+        groupedRows
+          .map((row) => options.batchNotesByWorkoutId.get(cleanDisplayText(row.id)) ?? "")
+          .map(cleanDisplayText)
+          .find(Boolean) ?? "";
+      const individualDetails = groupedRows
+        .map((row) => {
+          const details = cleanDisplayText(row.details);
+          if (!details || details === batchDetails) return null;
+          const athlete = options.rosterById.get(cleanDisplayText(row.athlete_profile_id));
+          return {
+            workoutId: cleanDisplayText(row.id),
+            athleteName: athlete ? getAthleteDisplayName(athlete) : `Athlete (${cleanDisplayText(row.athlete_profile_id).slice(-6)})`,
+            details,
+          };
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+      const athleteNames = athleteIds
+        .map((id) => {
+          const athlete = options.rosterById.get(id);
+          return athlete ? getAthleteDisplayName(athlete) : `Athlete (${id.slice(-6)})`;
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b));
+      const preRoutineIds = normalizeRoutineIds(firstRow?.pre_routine_ids);
+      const postRoutineIds = normalizeRoutineIds(firstRow?.post_routine_ids);
       return {
         key,
-        dateISO,
-        session,
+        dateISO: dateISO ?? cleanDisplayText(firstRow?.date_iso),
+        session: resolvedSession,
         rows: groupedRows,
         title: getWorkoutTitle(groupedRows),
-        notes: getWorkoutNotes(groupedRows),
+        batchDetails,
+        individualDetails,
         categories: getWorkoutCategories(groupedRows),
-        athleteCount: athleteIds.size,
+        athleteNames,
+        athleteCount: athleteIds.length,
         visibleCount,
         hiddenCount: Math.max(0, groupedRows.length - visibleCount),
+        time: firstCleanValue(groupedRows, "time_text"),
+        location: firstCleanValue(groupedRows, "location"),
+        plannedDistanceLabels: uniqueClean(
+          groupedRows.map((row) => formatPlannedDistanceLabel(row.planned_distance, row.planned_distance_unit))
+        ),
+        preRoutineIds,
+        postRoutineIds,
+        preRoutineTitles: firstWorkoutId ? getRoutineTitles(preRoutineIds, options.routineById) : [],
+        postRoutineTitles: firstWorkoutId ? getRoutineTitles(postRoutineIds, options.routineById) : [],
       };
     })
     .sort((a, b) => `${a.dateISO}-${a.session}`.localeCompare(`${b.dateISO}-${b.session}`));
@@ -169,25 +245,6 @@ function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }
   );
 }
 
-function WorkoutCard({ item }: { item: ReturnType<typeof groupWorkouts>[number] }) {
-  return (
-    <Card>
-      <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 10 }}>
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>{formatDateLabel(item.dateISO)} · {item.session}</Text>
-          <Text style={{ marginTop: 3, fontSize: 16, fontWeight: "900", color: "#172033" }}>{item.title}</Text>
-        </View>
-        <Pill tone={item.hiddenCount > 0 ? "warning" : "success"}>{item.hiddenCount > 0 ? "Mixed" : "Published"}</Pill>
-      </View>
-      {item.notes ? <Text numberOfLines={3} style={{ color: "#334155", fontSize: 13, lineHeight: 18 }}>{item.notes}</Text> : null}
-      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
-        <Pill>{`${item.athleteCount} athlete${item.athleteCount === 1 ? "" : "s"}`}</Pill>
-        {item.categories.slice(0, 3).map((category) => <Pill key={`${item.key}-${category}`}>{category}</Pill>)}
-      </View>
-    </Card>
-  );
-}
-
 function DesktopOnlyCard({ title, body }: { title: string; body: string }) {
   return (
     <Card>
@@ -205,9 +262,15 @@ export function CoachMobileShell() {
   const section = resolveSection(pathname);
   const selectedDateISO = getDateParam(params.date) ?? todayISO();
   const [workouts, setWorkouts] = useState<TeamWorkoutRow[]>([]);
+  const [batchHeaders, setBatchHeaders] = useState<TeamWorkoutBatchHeaderRow[]>([]);
+  const [routineById, setRoutineById] = useState<Map<string, AuxiliaryRoutine>>(new Map());
+  const [drillById, setDrillById] = useState<Map<string, DrillLibraryItem>>(new Map());
+  const [categories, setCategories] = useState<WorkoutCategory[]>([]);
+  const [routineDataError, setRoutineDataError] = useState<string | null>(null);
   const [loadingWorkouts, setLoadingWorkouts] = useState(false);
   const [workoutError, setWorkoutError] = useState<string | null>(null);
   const [rosterQuery, setRosterQuery] = useState("");
+  const [selectedWorkout, setSelectedWorkout] = useState<CoachMobileWorkoutGroup | null>(null);
 
   useEffect(() => {
     void teamDataStore.actions.refreshRoster().catch(() => {});
@@ -219,9 +282,26 @@ export function CoachMobileShell() {
     const endISO = section === "home" ? addDaysISO(todayISO(), 7) : section === "logs" ? todayISO() : addDaysISO(selectedDateISO, 6);
     setLoadingWorkouts(true);
     setWorkoutError(null);
-    listTeamWorkoutsInRange(startISO, endISO)
-      .then((rows) => {
-        if (!cancelled) setWorkouts(rows);
+    setRoutineDataError(null);
+    Promise.all([
+      listTeamWorkoutsInRange(startISO, endISO),
+      listTeamWorkoutBatchHeadersInRange(startISO, endISO),
+      loadAuxiliaryRoutineDefinitionsWithStatus(),
+      loadDrillLibraryDefinitionsWithStatus(),
+      loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
+    ])
+      .then(([rows, headers, routineResult, drillResult, storedCategories]) => {
+        if (cancelled) return;
+        setWorkouts(rows);
+        setBatchHeaders(headers);
+        setRoutineById(new Map(routineResult.items.map((routine) => [routine.id, routine] as const)));
+        setDrillById(new Map(drillResult.items.map((drill) => [drill.id, drill] as const)));
+        setCategories(normalizeCategories(storedCategories));
+        const readErrors = [
+          !routineResult.loadedFromCloud ? `routines: ${routineResult.cloudError ?? "cloud read failed"}` : "",
+          !drillResult.loadedFromCloud ? `drill library: ${drillResult.cloudError ?? "cloud read failed"}` : "",
+        ].filter(Boolean);
+        setRoutineDataError(readErrors.length ? `Could not load latest drill routine details. ${readErrors.join("; ")}` : null);
       })
       .catch((error) => {
         if (!cancelled) setWorkoutError(error instanceof Error ? error.message : "Could not load workouts.");
@@ -234,7 +314,15 @@ export function CoachMobileShell() {
     };
   }, [section, selectedDateISO]);
 
-  const groupedWorkouts = useMemo(() => groupWorkouts(workouts), [workouts]);
+  const batchNotesByWorkoutId = useMemo(() => buildBatchNotesByWorkoutId(workouts, batchHeaders), [batchHeaders, workouts]);
+  const rosterById = useMemo(
+    () => new Map(teamStore.roster.map((athlete) => [cleanDisplayText(athlete.id), athlete] as const)),
+    [teamStore.roster]
+  );
+  const groupedWorkouts = useMemo(
+    () => groupWorkouts(workouts, { batchNotesByWorkoutId, routineById, rosterById }),
+    [batchNotesByWorkoutId, rosterById, routineById, workouts]
+  );
   const todayWorkouts = useMemo(() => groupedWorkouts.filter((item) => item.dateISO === todayISO()), [groupedWorkouts]);
   const upcomingWorkouts = useMemo(() => groupedWorkouts.filter((item) => item.dateISO >= todayISO()).slice(0, 8), [groupedWorkouts]);
   const roster = useMemo(
@@ -271,7 +359,14 @@ export function CoachMobileShell() {
           {workoutError ? <Text style={{ color: "#b91c1c", fontWeight: "800" }}>{workoutError}</Text> : null}
           <View style={{ gap: 8 }}>
             <Text style={{ fontSize: 13, fontWeight: "900", color: "#475569" }}>Today</Text>
-            {(todayWorkouts.length ? todayWorkouts : upcomingWorkouts.slice(0, 3)).map((item) => <WorkoutCard key={item.key} item={item} />)}
+            {(todayWorkouts.length ? todayWorkouts : upcomingWorkouts.slice(0, 3)).map((item) => (
+              <CoachMobileWorkoutCard
+                key={item.key}
+                item={item}
+                categoriesSource={categories}
+                onPress={() => setSelectedWorkout(item)}
+              />
+            ))}
             {!todayWorkouts.length && !upcomingWorkouts.length && !loadingWorkouts ? (
               <DesktopOnlyCard title="No workouts found" body="No workouts are scheduled in the next week." />
             ) : null}
@@ -305,7 +400,14 @@ export function CoachMobileShell() {
               <Text style={dateButtonTextStyle}>Next</Text>
             </Pressable>
           </View>
-          {groupedWorkouts.map((item) => <WorkoutCard key={item.key} item={item} />)}
+          {groupedWorkouts.map((item) => (
+            <CoachMobileWorkoutCard
+              key={item.key}
+              item={item}
+              categoriesSource={categories}
+              onPress={() => setSelectedWorkout(item)}
+            />
+          ))}
           {!groupedWorkouts.length && !loadingWorkouts ? (
             <DesktopOnlyCard title="No workouts in this range" body="Use desktop for full workout creation, duplication, bulk editing, and weekly copy actions." />
           ) : null}
@@ -420,6 +522,15 @@ export function CoachMobileShell() {
       <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, paddingBottom: 92, gap: 12 }}>
         {renderContent()}
       </ScrollView>
+
+      <CoachMobileWorkoutDetail
+        item={selectedWorkout}
+        categoriesSource={categories}
+        routineById={routineById}
+        drillById={drillById}
+        routineDataError={routineDataError}
+        onClose={() => setSelectedWorkout(null)}
+      />
 
       <View
         style={{
