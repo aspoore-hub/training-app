@@ -775,8 +775,8 @@ export default function CoachSettingsTab() {
         const copyableUrl = emailResult.invite_url || inviteUrl;
         await Clipboard.setStringAsync(copyableUrl);
         setLastCoachInviteUrl(copyableUrl);
-        setStaffStatus(`Invite email sent to ${cleanEmail}. Invite link copied as backup.`);
-        Alert.alert("Invite email sent", "Invite email sent. The invite link was copied as a manual backup.");
+        setStaffStatus(`Invite sent to ${cleanEmail}. Invite link copied as backup.`);
+        Alert.alert("Invite sent", "Invite sent. The invite link was copied as a manual backup.");
       } catch (emailError: any) {
         setStaffStatus(`Invite link created, but email failed to send. Copy and send manually: ${inviteUrl}`);
         Alert.alert(

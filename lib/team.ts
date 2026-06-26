@@ -289,6 +289,9 @@ export async function sendAthleteInviteEmail(inviteId: string): Promise<SendAthl
   if (error) throw error;
 
   const result = (data ?? {}) as Record<string, unknown>;
+  if (result.ok !== true) {
+    throw new Error(String(result.error ?? result.message ?? "Invite email failed to send."));
+  }
   return {
     ok: result.ok === true,
     invite_url: result.invite_url == null ? undefined : String(result.invite_url),
@@ -503,6 +506,9 @@ export async function sendCoachInviteEmail(inviteId: string): Promise<SendCoachI
   if (error) throw error;
 
   const result = (data ?? {}) as Record<string, unknown>;
+  if (result.ok !== true) {
+    throw new Error(String(result.error ?? result.message ?? "Invite email failed to send."));
+  }
   return {
     ok: result.ok === true,
     invite_url: result.invite_url == null ? undefined : String(result.invite_url),
