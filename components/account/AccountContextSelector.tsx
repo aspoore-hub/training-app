@@ -9,6 +9,7 @@ import {
 } from "../../lib/accountContexts";
 import { switchAccountContext } from "../../lib/accountContextSwitch";
 import { loadTeamBranding, type TeamBranding } from "../../lib/teamBranding";
+import { useIsCoachMobileView } from "../../lib/useCoachMobileView";
 
 function roleLabel(context: Pick<AccountContext, "role" | "kind">) {
   if (context.kind === "athlete") return "Athlete";
@@ -34,6 +35,7 @@ type AccountContextSelectorProps = {
 
 export function AccountContextSelector({ compact = false }: AccountContextSelectorProps) {
   const router = useRouter();
+  const isCoachMobileView = useIsCoachMobileView();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
@@ -100,7 +102,9 @@ export function AccountContextSelector({ compact = false }: AccountContextSelect
   async function choose(context: AccountContext) {
     setSwitchingId(context.id);
     try {
-      const route = await switchAccountContext(context);
+      const route = await switchAccountContext(context, {
+        coachDefault: isCoachMobileView ? "home" : "calendar",
+      });
       setActiveId(context.id);
       setOpen(false);
       router.replace(route);

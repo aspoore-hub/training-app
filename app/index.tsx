@@ -3,6 +3,7 @@ import { Redirect } from "expo-router";
 import { useEffect, useState } from "react";
 import { resolveStartupAccountContext, routeForAccountContext } from "../lib/accountContexts";
 import { supabase } from "../lib/supabase";
+import { useIsCoachMobileView } from "../lib/useCoachMobileView";
 
 const PENDING_INVITE_TOKEN_KEY = "training_app_pending_invite_token_v1";
 
@@ -10,10 +11,12 @@ type IndexTarget =
   | "/(auth)/login"
   | "/(auth)/choose-account"
   | "/(coach)/(tabs)/calendar?view=monthly"
+  | "/(coach)/(tabs)/dashboard"
   | "/(athlete)/dashboard"
   | string;
 
 export default function Index() {
+  const isCoachMobileView = useIsCoachMobileView();
   const [target, setTarget] = useState<IndexTarget | null>(null);
 
   useEffect(() => {
@@ -37,7 +40,13 @@ export default function Index() {
 
         const resolution = await resolveStartupAccountContext();
         if (resolution.status === "ready") {
-          if (!cancelled) setTarget(routeForAccountContext(resolution.context));
+          if (!cancelled) {
+            setTarget(
+              routeForAccountContext(resolution.context, {
+                coachDefault: isCoachMobileView ? "home" : "calendar",
+              })
+            );
+          }
           return;
         }
 
@@ -52,7 +61,7 @@ export default function Index() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isCoachMobileView]);
 
   if (!target) return null;
   return <Redirect href={target} />;

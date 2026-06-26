@@ -377,7 +377,9 @@ export async function resolveStartupAccountContext(): Promise<StartupAccountReso
 }
 
 export function routeForAccountContext(
-  context: Pick<AccountContext, "kind">
-): "/(coach)/(tabs)/calendar?view=monthly" | "/(athlete)/dashboard" {
-  return context.kind === "coach" ? "/(coach)/(tabs)/calendar?view=monthly" : "/(athlete)/dashboard";
+  context: Pick<AccountContext, "kind">,
+  options?: { coachDefault?: "calendar" | "home" }
+): "/(coach)/(tabs)/calendar?view=monthly" | "/(coach)/(tabs)/dashboard" | "/(athlete)/dashboard" {
+  if (context.kind !== "coach") return "/(athlete)/dashboard";
+  return options?.coachDefault === "home" ? "/(coach)/(tabs)/dashboard" : "/(coach)/(tabs)/calendar?view=monthly";
 }

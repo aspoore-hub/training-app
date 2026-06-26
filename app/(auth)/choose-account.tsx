@@ -8,6 +8,7 @@ import {
 } from "../../lib/accountContexts";
 import { switchAccountContext } from "../../lib/accountContextSwitch";
 import { supabase } from "../../lib/supabase";
+import { useIsCoachMobileView } from "../../lib/useCoachMobileView";
 
 function roleLabel(context: AccountContext) {
   if (context.role === "owner") return "Owner";
@@ -27,6 +28,7 @@ function contextErrorMessage(error: unknown) {
 
 export default function ChooseAccountScreen() {
   const router = useRouter();
+  const isCoachMobileView = useIsCoachMobileView();
   const [contexts, setContexts] = useState<AccountContext[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyContextId, setBusyContextId] = useState<string | null>(null);
@@ -57,7 +59,9 @@ export default function ChooseAccountScreen() {
     setBusyContextId(context.id);
     setErrorMessage(null);
     try {
-      const route = await switchAccountContext(context);
+      const route = await switchAccountContext(context, {
+        coachDefault: isCoachMobileView ? "home" : "calendar",
+      });
       router.replace(route);
     } catch (error: any) {
       console.error("Account context selection failed", error);

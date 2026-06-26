@@ -1,10 +1,12 @@
 import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import { useIsCoachMobileView } from "../../../lib/useCoachMobileView";
 
 export default function CoachTabs() {
+  const isCoachMobileView = useIsCoachMobileView();
   return (
     <Tabs
-      initialRouteName="calendar"
+      initialRouteName={isCoachMobileView ? "dashboard" : "calendar"}
       screenOptions={{
         headerShown: false,
         tabBarStyle: { display: "none" },

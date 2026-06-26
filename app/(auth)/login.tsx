@@ -4,6 +4,7 @@ import { useRouter } from "expo-router";
 import { supabase } from "../../lib/supabase";
 import { bootstrapSyncOnce } from "../../lib/bootstrapSync";
 import { AccountContextLoadError, resolveStartupAccountContext, routeForAccountContext } from "../../lib/accountContexts";
+import { useIsCoachMobileView } from "../../lib/useCoachMobileView";
 
 const DEBUG_LOGIN_ROUTING = false;
 
@@ -22,6 +23,7 @@ function contextErrorMessage(error: unknown) {
 
 export default function Login() {
   const router = useRouter();
+  const isCoachMobileView = useIsCoachMobileView();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -58,7 +60,9 @@ export default function Login() {
     });
 
     if (resolution.status === "ready") {
-      const route = routeForAccountContext(resolution.context);
+      const route = routeForAccountContext(resolution.context, {
+        coachDefault: isCoachMobileView ? "home" : "calendar",
+      });
       debugLoginRouting("router.replace", route);
       router.replace(route);
       return;
