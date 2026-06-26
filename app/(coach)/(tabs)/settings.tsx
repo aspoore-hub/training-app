@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Image, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions } from "react-native";
+import { Alert, Image, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
 import { DateField } from "../../../components/ui/DateField";
 import { TeamLogoCropper } from "../../../components/branding/TeamLogoCropper";
@@ -130,7 +130,6 @@ function convertWorkoutDistances(rawWorkouts: any[], from: DistanceUnit, to: Dis
 
 export default function CoachSettingsTab() {
   const router = useRouter();
-  const { width } = useWindowDimensions();
   const isDesktopWeb = Platform.OS === "web";
   const [paceText, setPaceText] = useState("");
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
@@ -822,7 +821,7 @@ export default function CoachSettingsTab() {
       .join("") || "TC";
     return (
       <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}>
-        <Text style={styles.cardTitle}>Team Branding</Text>
+        <Text style={styles.cardTitle}>Team Identity</Text>
         <Text style={styles.cardHint}>
           Team-specific name and logo used inside the coach app and as the web tab icon.
         </Text>
@@ -884,7 +883,7 @@ export default function CoachSettingsTab() {
         <View style={styles.pageHeader}>
           <View style={styles.pageHeaderTextWrap}>
             <Text style={styles.title}>Settings</Text>
-            <Text style={styles.subtitle}>View team access and account details.</Text>
+            <Text style={styles.subtitle}>Manage team identity, staff access, and app preferences.</Text>
           </View>
           <Pressable onPress={() => router.push("/(auth)/choose-account")} style={styles.utilityBtn}>
             <Text style={styles.utilityBtnText}>Switch account/team</Text>
@@ -898,8 +897,10 @@ export default function CoachSettingsTab() {
           keyboardShouldPersistTaps="handled"
         >
           <View style={isDesktopWeb ? styles.desktopWorkspace : undefined}>
+            {renderTeamBrandingCard(true)}
+
             <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}>
-              <Text style={styles.cardTitle}>Coach Accounts</Text>
+              <Text style={styles.cardTitle}>Staff & Access</Text>
               <Text style={styles.cardHint}>Viewer access: editing is disabled.</Text>
 
               <View style={styles.staffRoleSummary}>
@@ -935,15 +936,6 @@ export default function CoachSettingsTab() {
               {staffStatus ? <Text style={styles.successText}>{staffStatus}</Text> : null}
             </View>
 
-            {renderTeamBrandingCard(true)}
-
-            <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
-              <Text style={styles.cardTitle}>Team Settings</Text>
-              <Text style={styles.cardHint}>
-                Team defaults, routines, and seasons are editable by Owners and Editors.
-              </Text>
-            </View>
-
             <View style={styles.signOutWrap}>
               <Pressable
                 onPress={signOut}
@@ -966,7 +958,7 @@ export default function CoachSettingsTab() {
       <View style={styles.pageHeader}>
         <View style={styles.pageHeaderTextWrap}>
           <Text style={styles.title}>Settings</Text>
-          <Text style={styles.subtitle}>Manage app preferences and coaching tools.</Text>
+          <Text style={styles.subtitle}>Manage team identity, staff access, and app preferences.</Text>
         </View>
         <Pressable onPress={() => router.push("/(auth)/choose-account")} style={styles.utilityBtn}>
           <Text style={styles.utilityBtnText}>Switch account/team</Text>
@@ -980,8 +972,10 @@ export default function CoachSettingsTab() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={isDesktopWeb ? styles.desktopWorkspace : undefined}>
+        {renderTeamBrandingCard(false)}
+
         <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}>
-          <Text style={styles.cardTitle}>General</Text>
+          <Text style={styles.cardTitle}>App Preferences</Text>
           <Text style={styles.cardHint}>Core planning preferences used across the app.</Text>
 
           <View style={styles.settingsRows}>
@@ -1230,10 +1224,8 @@ export default function CoachSettingsTab() {
           </View>
         </View>
 
-        {renderTeamBrandingCard(false)}
-
         <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}>
-          <Text style={styles.cardTitle}>Coach Accounts</Text>
+          <Text style={styles.cardTitle}>Staff & Access</Text>
           <Text style={styles.cardHint}>
             {canManageCoaches(currentTeamRole)
               ? "Invite staff and manage coach workspace permissions."
@@ -1440,19 +1432,6 @@ export default function CoachSettingsTab() {
         </View>
 
         <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
-          <Text style={styles.cardTitle}>Drill Routines</Text>
-          <Text style={styles.cardHint}>
-            Warmups, cooldowns, drills, mobility work, plyos, and strength routines now live in their own coach tab.
-          </Text>
-          <Pressable
-            onPress={() => router.push("/(coach)/(tabs)/auxiliary-routines")}
-            style={[styles.groupActionBtn, { alignSelf: "flex-start" }]}
-          >
-            <Text style={styles.groupActionBtnText}>Open Drill Routines</Text>
-          </Pressable>
-        </View>
-
-        <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
           <Pressable
             style={styles.sectionHeader}
             hitSlop={10}
@@ -1616,14 +1595,16 @@ const styles = StyleSheet.create({
   utilityBtnText: { fontWeight: "900", color: "#1d2433", fontSize: 12 },
   scrollContent: { paddingBottom: 22, paddingTop: 4 },
   desktopWorkspace: {
-    flexDirection: "row",
-    flexWrap: "wrap",
+    width: "100%",
+    maxWidth: 1040,
+    alignSelf: "center",
+    flexDirection: "column",
     alignItems: "flex-start",
     gap: 12,
   },
   desktopCard: {
-    flexBasis: "49%",
-    flexGrow: 1,
+    width: "100%",
+    flexGrow: 0,
     marginTop: 0,
   },
 
