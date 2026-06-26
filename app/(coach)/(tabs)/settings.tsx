@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions } from "react-native";
+import { Alert, Image, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
 import { DateField } from "../../../components/ui/DateField";
 import { supabase } from "../../../lib/supabase";
@@ -33,6 +33,13 @@ import {
   teamDataStore,
   type TeamSeason,
 } from "../../../lib/teamDataStore";
+import {
+  clearTeamLogo,
+  loadTeamBranding,
+  saveTeamBrandingName,
+  uploadTeamLogo,
+  type TeamBranding,
+} from "../../../lib/teamBranding";
 import {
   loadAthletePaceOverrides,
   saveAthletePaceOverrides,
@@ -139,6 +146,10 @@ export default function CoachSettingsTab() {
   const [staffBusy, setStaffBusy] = useState(false);
   const [staffStatus, setStaffStatus] = useState<string | null>(null);
   const [lastCoachInviteToken, setLastCoachInviteToken] = useState("");
+  const [teamBranding, setTeamBranding] = useState<TeamBranding | null>(null);
+  const [teamNameText, setTeamNameText] = useState("");
+  const [brandingBusy, setBrandingBusy] = useState(false);
+  const [brandingStatus, setBrandingStatus] = useState<string | null>(null);
 
   const [seasonsOpen, setSeasonsOpen] = useState(false);
   const [individualPaceOpen, setIndividualPaceOpen] = useState(false);
@@ -179,13 +190,14 @@ export default function CoachSettingsTab() {
   const loadSettingsScreenData = useCallback(
     async (isActive?: () => boolean) => {
       try {
-        const [paceSec, coreSettings, loadedRoster, loadedOverrides, weekStartResult, feedbackFlagSettings] = await Promise.all([
+        const [paceSec, coreSettings, loadedRoster, loadedOverrides, weekStartResult, feedbackFlagSettings, loadedBranding] = await Promise.all([
           loadPaceSecondsPerMile(),
           loadCoreCoachSettings(),
           getSortableRoster(),
           loadAthletePaceOverrides(),
           loadWeekStartSetting(),
           loadFeedbackFlagSettings(),
+          loadTeamBranding(),
         ]);
         await Promise.all([
           teamDataStore.actions.loadTeamSeasons(true),
@@ -214,6 +226,8 @@ export default function CoachSettingsTab() {
         setFeedbackFlagsEnabled(!!feedbackFlagSettings.enabled);
         setFeedbackWarningMode(feedbackFlagSettings.mode ?? "all");
         setFeedbackStartDateText(String(feedbackFlagSettings.startDateISO ?? ""));
+        setTeamBranding(loadedBranding);
+        setTeamNameText(loadedBranding.name);
         await loadStaffAccess();
         setTeamSeasons(Array.isArray(teamDataStore.getState().teamSeasons) ? teamDataStore.getState().teamSeasons : []);
         setAthletePaceOverrides(loadedOverrides);
@@ -423,6 +437,90 @@ export default function CoachSettingsTab() {
     setWeekStartSetting(next);
     console.log("[settings] week start save", { value: next });
     await saveWeekStartSetting(next);
+  }
+
+  function notifyTeamBrandingUpdated() {
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("training-app-team-branding-updated"));
+    }
+  }
+
+  async function saveTeamName() {
+    const cleanName = teamNameText.trim();
+    if (!cleanName) {
+      Alert.alert("Team name required", "Enter a team name.");
+      return;
+    }
+    setBrandingBusy(true);
+    setBrandingStatus(null);
+    try {
+      const next = await saveTeamBrandingName(cleanName);
+      setTeamBranding(next);
+      setTeamNameText(next.name);
+      setBrandingStatus("Team name saved.");
+      notifyTeamBrandingUpdated();
+      Alert.alert("Saved", "Team name updated.");
+    } catch (error: any) {
+      const message = getErrorMessage(error);
+      setBrandingStatus(message);
+      Alert.alert("Team branding save failed", message);
+    } finally {
+      setBrandingBusy(false);
+    }
+  }
+
+  function chooseTeamLogoFile() {
+    if (Platform.OS !== "web" || typeof document === "undefined") {
+      Alert.alert("Logo upload unavailable", "Logo upload is available from the web app.");
+      return;
+    }
+
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/webp";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      void uploadSelectedTeamLogo(file);
+    };
+    input.click();
+  }
+
+  async function uploadSelectedTeamLogo(file: File) {
+    setBrandingBusy(true);
+    setBrandingStatus(null);
+    try {
+      const next = await uploadTeamLogo(file);
+      setTeamBranding(next);
+      setTeamNameText(next.name);
+      setBrandingStatus("Logo uploaded.");
+      notifyTeamBrandingUpdated();
+      Alert.alert("Logo uploaded", "Team logo updated.");
+    } catch (error: any) {
+      const message = getErrorMessage(error);
+      setBrandingStatus(message);
+      Alert.alert("Logo upload failed", message);
+    } finally {
+      setBrandingBusy(false);
+    }
+  }
+
+  async function removeTeamLogo() {
+    setBrandingBusy(true);
+    setBrandingStatus(null);
+    try {
+      const next = await clearTeamLogo();
+      setTeamBranding(next);
+      setTeamNameText(next.name);
+      setBrandingStatus("Logo cleared.");
+      notifyTeamBrandingUpdated();
+    } catch (error: any) {
+      const message = getErrorMessage(error);
+      setBrandingStatus(message);
+      Alert.alert("Logo removal failed", message);
+    } finally {
+      setBrandingBusy(false);
+    }
   }
 
   async function toggleFeedbackFlags(enabled: boolean) {
@@ -692,6 +790,71 @@ export default function CoachSettingsTab() {
     router.replace("/(auth)/login");
   }
 
+  function renderTeamBrandingCard(readOnly: boolean) {
+    const initials = teamBranding?.name
+      ?.split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase())
+      .join("") || "TC";
+    return (
+      <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}>
+        <Text style={styles.cardTitle}>Team Branding</Text>
+        <Text style={styles.cardHint}>
+          Team-specific name and logo used inside the coach app and as the web tab icon.
+        </Text>
+
+        <View style={styles.brandingPreviewRow}>
+          {teamBranding?.logoUrl ? (
+            <Image source={{ uri: teamBranding.logoUrl }} style={styles.brandingLogoPreview} resizeMode="cover" />
+          ) : (
+            <View style={styles.brandingLogoFallback}>
+              <Text style={styles.brandingLogoFallbackText}>{initials}</Text>
+            </View>
+          )}
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.label}>Team name</Text>
+            <TextInput
+              value={teamNameText}
+              onChangeText={setTeamNameText}
+              editable={!readOnly && !brandingBusy}
+              placeholder="My Team"
+              style={[styles.input, (readOnly || brandingBusy) && styles.inputDisabled]}
+            />
+            {teamBranding?.logoPath ? (
+              <Text style={styles.groupMeta} numberOfLines={1}>
+                Logo: {teamBranding.logoPath}
+              </Text>
+            ) : (
+              <Text style={styles.groupMeta}>No team logo set. The app favicon is used as fallback.</Text>
+            )}
+          </View>
+        </View>
+
+        {readOnly ? (
+          <Text style={styles.cardHint}>Viewer access: branding editing is disabled.</Text>
+        ) : (
+          <View style={styles.brandingActions}>
+            <Pressable disabled={brandingBusy} onPress={saveTeamName} style={[styles.saveBtn, brandingBusy && styles.disabledBtn]}>
+              <Text style={styles.saveBtnText}>{brandingBusy ? "Saving..." : "Save Team Name"}</Text>
+            </Pressable>
+            <Pressable disabled={brandingBusy} onPress={chooseTeamLogoFile} style={[styles.groupActionBtn, brandingBusy && styles.disabledBtn]}>
+              <Text style={styles.groupActionBtnText}>Upload Logo</Text>
+            </Pressable>
+            {teamBranding?.logoPath ? (
+              <Pressable disabled={brandingBusy} onPress={removeTeamLogo} style={[styles.groupDeleteBtn, brandingBusy && styles.disabledBtn]}>
+                <Text style={styles.groupDeleteBtnText}>Remove Logo</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        )}
+
+        <Text style={styles.cardHint}>PNG, JPG, or WebP. Max 2 MB.</Text>
+        {brandingStatus ? <Text style={brandingStatus.includes("failed") || brandingStatus.includes("required") ? styles.errorText : styles.successText}>{brandingStatus}</Text> : null}
+      </View>
+    );
+  }
+
   if (settingsReadOnly) {
     return (
       <View style={styles.container}>
@@ -748,6 +911,8 @@ export default function CoachSettingsTab() {
 
               {staffStatus ? <Text style={styles.successText}>{staffStatus}</Text> : null}
             </View>
+
+            {renderTeamBrandingCard(true)}
 
             <View style={[styles.card, styles.sectionCard, styles.secondarySectionCard, isDesktopWeb && styles.desktopCard]}>
               <Text style={styles.cardTitle}>Team Settings</Text>
@@ -1041,6 +1206,8 @@ export default function CoachSettingsTab() {
             ) : null}
           </View>
         </View>
+
+        {renderTeamBrandingCard(false)}
 
         <View style={[styles.card, styles.sectionCard, styles.primarySectionCard, isDesktopWeb && styles.desktopCard]}>
           <Text style={styles.cardTitle}>Coach Accounts</Text>
@@ -1629,6 +1796,46 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     backgroundColor: "#fff",
     fontWeight: "800",
+  },
+  inputDisabled: {
+    backgroundColor: "#f3f6fb",
+    color: "#64748b",
+  },
+  brandingPreviewRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginTop: 8,
+  },
+  brandingLogoPreview: {
+    width: 64,
+    height: 64,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#dbe3ef",
+    backgroundColor: "#f8fafc",
+  },
+  brandingLogoFallback: {
+    width: 64,
+    height: 64,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#dbe3ef",
+    backgroundColor: "#eef4ff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  brandingLogoFallbackText: {
+    fontSize: 18,
+    fontWeight: "900",
+    color: "#1f3b6d",
+  },
+  brandingActions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 10,
   },
   saveBtn: {
     marginTop: 8,

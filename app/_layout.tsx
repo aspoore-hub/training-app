@@ -9,6 +9,7 @@ import { TEAM_KEYS, USER_KEYS } from "../lib/syncKeys";
 import { supabase } from "../lib/supabase";
 import { flushTeamDirtyKeys } from "../lib/teamCloudSync";
 import { AppRuntimeProvider } from "../lib/appState";
+import { TeamBrandingEffect } from "../components/branding/TeamBrandingEffect";
 import { DevDebugPanel } from "../components/dev/DevDebugPanel";
 
 export default function RootLayout() {
@@ -74,6 +75,7 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <AppRuntimeProvider>
+        <TeamBrandingEffect />
         <Stack screenOptions={{ headerShown: false }} />
         {__DEV__ ? <DevDebugPanel /> : null}
       </AppRuntimeProvider>

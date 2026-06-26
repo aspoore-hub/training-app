@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Modal, Platform, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Image, Modal, Platform, Pressable, ScrollView, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import {
   getActiveAccountContext,
@@ -8,6 +8,7 @@ import {
   type AccountContext,
 } from "../../lib/accountContexts";
 import { switchAccountContext } from "../../lib/accountContextSwitch";
+import { loadTeamBranding, type TeamBranding } from "../../lib/teamBranding";
 
 function roleLabel(context: Pick<AccountContext, "role" | "kind">) {
   if (context.kind === "athlete") return "Athlete";
@@ -38,6 +39,7 @@ export function AccountContextSelector({ compact = false }: AccountContextSelect
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [contexts, setContexts] = useState<AccountContext[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeBranding, setActiveBranding] = useState<TeamBranding | null>(null);
 
   const activeContext = useMemo(
     () => contexts.find((context) => context.id === activeId) ?? null,
@@ -64,6 +66,36 @@ export function AccountContextSelector({ compact = false }: AccountContextSelect
   useEffect(() => {
     void loadContexts();
   }, [loadContexts]);
+
+  const loadActiveBranding = useCallback(async () => {
+    const teamId = String(activeContext?.teamId ?? "").trim();
+    if (!teamId) {
+      setActiveBranding(null);
+      return;
+    }
+    try {
+      setActiveBranding(await loadTeamBranding(teamId));
+    } catch (error) {
+      console.warn("[account-selector] team branding load failed", error);
+      setActiveBranding(null);
+    }
+  }, [activeContext?.teamId]);
+
+  useEffect(() => {
+    void loadActiveBranding();
+  }, [loadActiveBranding]);
+
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof window === "undefined") return;
+    const refresh = () => {
+      void loadContexts();
+      void loadActiveBranding();
+    };
+    window.addEventListener("training-app-team-branding-updated", refresh);
+    return () => {
+      window.removeEventListener("training-app-team-branding-updated", refresh);
+    };
+  }, [loadActiveBranding, loadContexts]);
 
   async function choose(context: AccountContext) {
     setSwitchingId(context.id);
@@ -102,7 +134,15 @@ export function AccountContextSelector({ compact = false }: AccountContextSelect
           ...(Platform.OS === "web" ? ({ cursor: "pointer" } as any) : null),
         }}
       >
-        <Ionicons name="people-circle-outline" size={17} color="#334155" />
+        {activeBranding?.logoUrl ? (
+          <Image
+            source={{ uri: activeBranding.logoUrl }}
+            style={{ width: 18, height: 18, borderRadius: 5, borderWidth: 1, borderColor: "#dbe3ef", backgroundColor: "#fff" }}
+            resizeMode="cover"
+          />
+        ) : (
+          <Ionicons name="people-circle-outline" size={17} color="#334155" />
+        )}
         <View style={{ minWidth: 0, flex: 1 }}>
           <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "900", color: "#1f2a44" }}>
             {contextPrimaryLabel(activeContext)}
