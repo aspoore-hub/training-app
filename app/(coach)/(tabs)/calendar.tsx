@@ -17,14 +17,14 @@ import type { AthleteWorkout, WeekStartDay, WorkoutCategory } from "../../../lib
 import { categoryColorByName } from "../../../lib/categories";
 import {
   createTeamWorkoutBatch,
-  deleteTeamWorkout,
-  deleteWorkoutBatch,
+  deleteTeamWorkoutsByIds,
   listTeamWorkoutsInRange,
   updateTeamWorkoutById,
   updateTeamWorkoutsByBatchId,
   type TeamWorkoutRow,
 } from "../../../lib/teamWorkoutsCloud";
 import {
+  deleteTeamWorkoutBatchHeader,
   listTeamWorkoutBatchHeadersInRange,
   saveTeamWorkoutBatchHeaderNotes,
 } from "../../../lib/teamWorkoutBatchHeadersCloud";
@@ -100,6 +100,8 @@ type WeeklyWorkoutSection = {
   key: string;
   saveKey: string;
   dateISO: string;
+  rowIds: string[];
+  athleteIds: string[];
   title: string;
   session: string;
   time?: string;
@@ -902,6 +904,8 @@ function buildTrainingPlanMileageOnlySection(
     key: `mileage:${dateISO}:${session}`,
     saveKey: `mileage:${dateISO}:${session}`,
     dateISO,
+    rowIds: [],
+    athleteIds: [],
     title: "Suggested Mileage",
     session,
     categories: [],
@@ -1392,6 +1396,8 @@ export default function CoachCalendarMonth() {
   const [anchorWeekStart, setAnchorWeekStart] = useState(() => startOfWeek(new Date(), 1));
   const [showSavedBanner, setShowSavedBanner] = useState(false);
   const [expandedWeeklyWorkouts, setExpandedWeeklyWorkouts] = useState<Record<string, boolean>>({});
+  const [isSelectingWorkouts, setIsSelectingWorkouts] = useState(false);
+  const [selectedWorkoutCardKeys, setSelectedWorkoutCardKeys] = useState<string[]>([]);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [exportingTrainingPlanPdf, setExportingTrainingPlanPdf] = useState(false);
   const [trainingPlanExportOpen, setTrainingPlanExportOpen] = useState(false);
@@ -2453,6 +2459,8 @@ export default function CoachCalendarMonth() {
             key: entry.key,
             saveKey: entry.saveKey,
             dateISO,
+            rowIds: rows.map((row) => String(row.id ?? "").trim()).filter(Boolean),
+            athleteIds: Array.from(athleteIds),
             title: String(first.title ?? "").trim() || "Workout",
             session: String(first.session ?? ""),
             time: String(first.time ?? "").trim() || undefined,
@@ -2513,6 +2521,37 @@ export default function CoachCalendarMonth() {
       workouts: sortWeeklyDayWorkoutsForDisplay(day.workouts),
     }));
   }, [weeklyDaySections]);
+
+  const visibleWeeklyWorkoutCards = useMemo(
+    () => weeklyDaySectionsForDisplay.flatMap((day) => day.workouts.filter((workout) => !workout.suggestedMileageOnly)),
+    [weeklyDaySectionsForDisplay]
+  );
+
+  const selectedWorkoutCardKeySet = useMemo(() => new Set(selectedWorkoutCardKeys), [selectedWorkoutCardKeys]);
+
+  const selectedWorkoutCardCount = useMemo(
+    () => visibleWeeklyWorkoutCards.filter((card) => selectedWorkoutCardKeySet.has(card.key)).length,
+    [selectedWorkoutCardKeySet, visibleWeeklyWorkoutCards]
+  );
+
+  useEffect(() => {
+    if (!isSelectingWorkouts) return;
+    const visibleKeys = new Set(visibleWeeklyWorkoutCards.map((card) => card.key));
+    setSelectedWorkoutCardKeys((prev) => prev.filter((key) => visibleKeys.has(key)));
+  }, [isSelectingWorkouts, visibleWeeklyWorkoutCards]);
+
+  const toggleWorkoutCardSelection = useCallback((key: string) => {
+    const cleanKey = String(key ?? "").trim();
+    if (!cleanKey) return;
+    setSelectedWorkoutCardKeys((prev) =>
+      prev.includes(cleanKey) ? prev.filter((item) => item !== cleanKey) : [...prev, cleanKey]
+    );
+  }, []);
+
+  const cancelWorkoutSelection = useCallback(() => {
+    setIsSelectingWorkouts(false);
+    setSelectedWorkoutCardKeys([]);
+  }, []);
 
   useEffect(() => {
     weeklyBatchDraftsRef.current = weeklyBatchDrafts;
@@ -3501,94 +3540,147 @@ export default function CoachCalendarMonth() {
     }
   }, [currentWeekAnnotation, persistWeekLabelDraft, weekLabelDraft]);
 
-  const runCopyWeekFromSource = useCallback(async (sourceWeekStartISO: string) => {
-    if (copyingWeek || clearingWeek) return;
-    const normalizedSourceWeekStartISO = String(sourceWeekStartISO ?? "").trim();
-    if (!isValidISODate(normalizedSourceWeekStartISO)) {
-      Alert.alert("Copy Week", "Please choose a valid source week.");
-      return;
-    }
-    debugCalendar("[coach-calendar] runCopyWeekFromSource start");
-    setCopyingWeek(true);
-    try {
-      const currentWeekStartISO = toISODate(anchorWeekStart);
-      const sourceWeekEndISO = toISODate(addDays(parseISODate(normalizedSourceWeekStartISO), 6));
-      const sourceWeekRows = await listTeamWorkoutsInRange(normalizedSourceWeekStartISO, sourceWeekEndISO);
-      debugCalendar("[coach-calendar] copy week range", {
-        currentWeekStartISO,
-        sourceWeekStartISO: normalizedSourceWeekStartISO,
-        sourceWeekEndISO,
-      });
-
-      if (!Array.isArray(sourceWeekRows) || sourceWeekRows.length === 0) {
-        Alert.alert("Copy Week", "No workouts found in the selected source week.");
-        return;
+  const rawWorkoutPassesCurrentFilters = useCallback(
+    (row: TeamWorkoutRow) => {
+      const athleteId = String(row.athlete_profile_id ?? "").trim();
+      if (selectedAthleteIds.length > 0 && !selectedAthleteIds.includes(athleteId)) return false;
+      if (selectedTrainingGroupIds.length > 0 && !selectedTrainingGroupAthleteIds.has(athleteId)) return false;
+      if (selectedSeason) {
+        const override = athleteId
+          ? athleteSeasonOverridesBySeasonAndAthlete.get(`${String(selectedSeason.id ?? "").trim()}:${athleteId}`) ?? null
+          : null;
+        const resolvedWindow = teamDataStore.resolveAthleteSeasonWindow(selectedSeason, override);
+        const dateISO = String(row.date_iso ?? "").trim();
+        if (dateISO < String(resolvedWindow.start_date ?? "") || dateISO > String(resolvedWindow.end_date ?? "")) return false;
       }
+      return true;
+    },
+    [
+      athleteSeasonOverridesBySeasonAndAthlete,
+      selectedAthleteIds,
+      selectedSeason,
+      selectedTrainingGroupAthleteIds,
+      selectedTrainingGroupIds.length,
+    ]
+  );
 
-      const sourceHeaderRows = await listTeamWorkoutBatchHeadersInRange(
-        normalizedSourceWeekStartISO,
-        sourceWeekEndISO
+  const rawWorkoutCardKey = useCallback((row: TeamWorkoutRow) => {
+    return `${String(row.date_iso ?? "").trim()}::${getWorkoutBatchKey(toLegacyWorkout(row))}`;
+  }, []);
+
+  const cleanupEmptyBatchHeadersForRows = useCallback(async (rows: TeamWorkoutRow[]) => {
+    const headerKeys = new Map<string, { batchId: string; dateISO: string; session: "AM" | "PM" }>();
+    const dates: string[] = [];
+    (Array.isArray(rows) ? rows : []).forEach((row) => {
+      const batchId = String(row.batch_id ?? "").trim();
+      const dateISO = String(row.date_iso ?? "").trim();
+      if (!batchId || !dateISO) return;
+      const session = normalizeSession(String(row.session ?? ""));
+      headerKeys.set(`${batchId}::${dateISO}::${session}`, { batchId, dateISO, session });
+      dates.push(dateISO);
+    });
+    if (headerKeys.size === 0 || dates.length === 0) return;
+
+    const sortedDates = [...dates].sort();
+    const remainingRows = await listTeamWorkoutsInRange(sortedDates[0], sortedDates[sortedDates.length - 1]);
+    const remainingHeaderKeys = new Set(
+      (Array.isArray(remainingRows) ? remainingRows : [])
+        .map((row) => {
+          const batchId = String(row.batch_id ?? "").trim();
+          const dateISO = String(row.date_iso ?? "").trim();
+          if (!batchId || !dateISO) return "";
+          return `${batchId}::${dateISO}::${normalizeSession(String(row.session ?? ""))}`;
+        })
+        .filter(Boolean)
+    );
+    const emptyHeaders = Array.from(headerKeys.entries())
+      .filter(([key]) => !remainingHeaderKeys.has(key))
+      .map(([, value]) => value);
+    if (emptyHeaders.length === 0) return;
+    await Promise.all(
+      emptyHeaders.map((item) =>
+        deleteTeamWorkoutBatchHeader({
+          batch_id: item.batchId,
+          date_iso: item.dateISO,
+          session: item.session,
+        })
+      )
+    );
+  }, []);
+
+  const copyWorkoutRowsToWeek = useCallback(
+    async (input: {
+      rows: TeamWorkoutRow[];
+      sourceWeekStartISO: string;
+      targetWeekStartISO: string;
+      sourceHeaderRows?: Awaited<ReturnType<typeof listTeamWorkoutBatchHeadersInRange>>;
+    }) => {
+      const sourceRows = Array.isArray(input.rows) ? input.rows : [];
+      if (sourceRows.length === 0) return { insertedCount: 0 };
+      const sourceHeaderRows = input.sourceHeaderRows ?? await listTeamWorkoutBatchHeadersInRange(
+        input.sourceWeekStartISO,
+        shiftISODateByDays(input.sourceWeekStartISO, 6)
       ).catch(() => []);
+
       const sourceMainNotesByBatchId = new Map<string, string>();
       const sourceMainNotesByBatchAndDate = new Map<string, string>();
       sourceHeaderRows.forEach((headerRow) => {
-          const batchId = String(headerRow.batch_id ?? "").trim();
-          const dateISO = String(headerRow.date_iso ?? "").trim();
-          const notes = String(headerRow.header_notes ?? "").trim();
-          if (!batchId || !dateISO || !notes || notes.toLowerCase() === "no notes") return;
-          const byDateKey = `${batchId}::${dateISO}`;
-          const prevByDate = String(sourceMainNotesByBatchAndDate.get(byDateKey) ?? "").trim();
-          if (!prevByDate || notes.length > prevByDate.length) sourceMainNotesByBatchAndDate.set(byDateKey, notes);
-          const prevByBatch = String(sourceMainNotesByBatchId.get(batchId) ?? "").trim();
-          if (!prevByBatch || notes.length > prevByBatch.length) sourceMainNotesByBatchId.set(batchId, notes);
+        const batchId = String(headerRow.batch_id ?? "").trim();
+        const dateISO = String(headerRow.date_iso ?? "").trim();
+        const notes = String(headerRow.header_notes ?? "").trim();
+        if (!batchId || !dateISO || !notes || notes.toLowerCase() === "no notes") return;
+        const byDateKey = `${batchId}::${dateISO}`;
+        const prevByDate = String(sourceMainNotesByBatchAndDate.get(byDateKey) ?? "").trim();
+        if (!prevByDate || notes.length > prevByDate.length) sourceMainNotesByBatchAndDate.set(byDateKey, notes);
+        const prevByBatch = String(sourceMainNotesByBatchId.get(batchId) ?? "").trim();
+        if (!prevByBatch || notes.length > prevByBatch.length) sourceMainNotesByBatchId.set(batchId, notes);
       });
-      debugCalendar(
-        "[coach-calendar] copy week source dates",
-        sourceWeekRows.slice(0, 6).map((row) => String(row.date_iso ?? ""))
-      );
 
-      const copiedBatchIdBySourceBatchId = new Map<string, string>();
-      const copiedHeaderNotesByBatchDateKey = new Map<string, { batchId: string; dateISO: string; notes: string }>();
-      const mappedDateSamples: Array<{ source: string; dest: string; offsetDays: number }> = [];
-      const insertRows = sourceWeekRows.map((row) => {
+      const copiedBatchIdBySourceCardKey = new Map<string, string>();
+      const copiedHeaderNotesByBatchDateSessionKey = new Map<string, { batchId: string; dateISO: string; session: "AM" | "PM"; notes: string }>();
+      const insertRows = sourceRows.map((row) => {
         const sourceBatchId = String(row.batch_id ?? "").trim();
+        const sourceDateISO = String(row.date_iso ?? "");
+        const session = normalizeSession(String(row.session ?? ""));
+        const offsetDays = diffISODateDays(input.sourceWeekStartISO, sourceDateISO);
+        const nextDateISO = shiftISODateByDays(input.targetWeekStartISO, offsetDays);
+        const sourceCardKey = sourceBatchId
+          ? `${sourceBatchId}::${sourceDateISO}::${session}`
+          : `single:${String(row.id ?? "").trim()}`;
         let nextBatchId: string | null = null;
         if (sourceBatchId) {
-          let mapped = copiedBatchIdBySourceBatchId.get(sourceBatchId);
+          let mapped = copiedBatchIdBySourceCardKey.get(sourceCardKey);
           if (!mapped) {
             mapped = generateCopiedBatchId();
-            copiedBatchIdBySourceBatchId.set(sourceBatchId, mapped);
+            copiedBatchIdBySourceCardKey.set(sourceCardKey, mapped);
           }
           nextBatchId = mapped;
         }
-        const sourceDateISO = String(row.date_iso ?? "");
-        const offsetDays = diffISODateDays(normalizedSourceWeekStartISO, sourceDateISO);
-        const nextDateISO = shiftISODateByDays(currentWeekStartISO, offsetDays);
+
         if (sourceBatchId && nextBatchId) {
           const notesByDateKey = `${sourceBatchId}::${sourceDateISO}`;
-          const fromHeaderByDate = String(sourceMainNotesByBatchAndDate.get(notesByDateKey) ?? "").trim();
-          const fromHeaderByBatch = String(sourceMainNotesByBatchId.get(sourceBatchId) ?? "").trim();
-          const fromRowDetails = String(row.details ?? "").trim();
-          const sourceMainNotes = [fromHeaderByDate, fromHeaderByBatch, fromRowDetails]
+          const sourceMainNotes = [
+            sourceMainNotesByBatchAndDate.get(notesByDateKey),
+            sourceMainNotesByBatchId.get(sourceBatchId),
+            row.details,
+          ]
             .map((value) => String(value ?? "").trim())
             .find((value) => value.length > 0 && value.toLowerCase() !== "no notes");
           if (sourceMainNotes) {
-            copiedHeaderNotesByBatchDateKey.set(`${nextBatchId}::${nextDateISO}`, {
+            copiedHeaderNotesByBatchDateSessionKey.set(`${nextBatchId}::${nextDateISO}::${session}`, {
               batchId: nextBatchId,
               dateISO: nextDateISO,
+              session,
               notes: sourceMainNotes,
             });
           }
-        }
-        if (mappedDateSamples.length < 6) {
-          mappedDateSamples.push({ source: sourceDateISO, dest: nextDateISO, offsetDays });
         }
 
         return {
           athlete_profile_id: String(row.athlete_profile_id ?? ""),
           created_by: row.created_by ?? null,
           date_iso: nextDateISO,
-          session: String(row.session ?? "").toUpperCase() === "AM" ? ("AM" as const) : ("PM" as const),
+          session,
           location: row.location ?? null,
           time_text: row.time_text ?? null,
           title: String(row.title ?? "").trim() || "Workout",
@@ -3604,48 +3696,82 @@ export default function CoachCalendarMonth() {
             row.planned_distance_unit === "mi" || row.planned_distance_unit === "km" ? row.planned_distance_unit : null,
         };
       });
-      debugCalendar("[coach-calendar] copy week mapped dates", mappedDateSamples);
-      debugCalendar("[coach-calendar] copy week insert count", { count: insertRows.length });
-      debugCalendar("[coach-calendar] copy week notes save keys", {
-        count: copiedHeaderNotesByBatchDateKey.size,
-        sample: Array.from(copiedHeaderNotesByBatchDateKey.values())
-          .slice(0, 8)
-          .map((item) => ({ batchId: item.batchId, dateISO: item.dateISO, notes: item.notes })),
-      });
 
       await createTeamWorkoutBatch(insertRows);
-      const copiedBatchMainNotesWrites = Array.from(copiedHeaderNotesByBatchDateKey.values()).map((item) =>
-        Promise.all([
-          saveTeamWorkoutBatchHeaderNotes({
-            batch_id: item.batchId,
-            date_iso: item.dateISO,
-            session: "AM",
-            header_notes: item.notes,
-            propagate_to_rows: false,
-          }),
-          saveTeamWorkoutBatchHeaderNotes({
-            batch_id: item.batchId,
-            date_iso: item.dateISO,
-            session: "PM",
-            header_notes: item.notes,
-            propagate_to_rows: false,
-          }),
-        ])
+      const headerWrites = Array.from(copiedHeaderNotesByBatchDateSessionKey.values()).map((item) =>
+        saveTeamWorkoutBatchHeaderNotes({
+          batch_id: item.batchId,
+          date_iso: item.dateISO,
+          session: item.session,
+          header_notes: item.notes,
+          propagate_to_rows: false,
+        })
       );
-      if (copiedBatchMainNotesWrites.length > 0) {
-        await Promise.all(copiedBatchMainNotesWrites);
+      if (headerWrites.length > 0) await Promise.all(headerWrites);
+      return { insertedCount: insertRows.length };
+    },
+    []
+  );
+
+  const runCopyWeekFromSource = useCallback(async (sourceWeekStartISO: string) => {
+    if (copyingWeek || clearingWeek) return;
+    const normalizedSourceWeekStartISO = String(sourceWeekStartISO ?? "").trim();
+    if (!isValidISODate(normalizedSourceWeekStartISO)) {
+      Alert.alert("Copy Week", "Please choose a valid source week.");
+      return;
+    }
+    debugCalendar("[coach-calendar] runCopyWeekFromSource start");
+    setCopyingWeek(true);
+    try {
+      const currentWeekStartISO = toISODate(anchorWeekStart);
+      const sourceWeekEndISO = toISODate(addDays(parseISODate(normalizedSourceWeekStartISO), 6));
+      const sourceWeekRows = await listTeamWorkoutsInRange(normalizedSourceWeekStartISO, sourceWeekEndISO);
+      const visibleSourceWeekRows = (Array.isArray(sourceWeekRows) ? sourceWeekRows : []).filter(rawWorkoutPassesCurrentFilters);
+      debugCalendar("[coach-calendar] copy week range", {
+        currentWeekStartISO,
+        sourceWeekStartISO: normalizedSourceWeekStartISO,
+        sourceWeekEndISO,
+        fetchedRows: Array.isArray(sourceWeekRows) ? sourceWeekRows.length : 0,
+        visibleRows: visibleSourceWeekRows.length,
+      });
+
+      if (visibleSourceWeekRows.length === 0) {
+        Alert.alert("Copy Week", "No visible workouts found in the selected source week for the current filters.");
+        return;
       }
+
+      const sourceHeaderRows = await listTeamWorkoutBatchHeadersInRange(
+        normalizedSourceWeekStartISO,
+        sourceWeekEndISO
+      ).catch(() => []);
+      debugCalendar(
+        "[coach-calendar] copy week source dates",
+        visibleSourceWeekRows.slice(0, 6).map((row) => String(row.date_iso ?? ""))
+      );
+
+      const mappedDateSamples = visibleSourceWeekRows.slice(0, 6).map((row) => {
+        const source = String(row.date_iso ?? "");
+        const offsetDays = diffISODateDays(normalizedSourceWeekStartISO, source);
+        return { source, dest: shiftISODateByDays(currentWeekStartISO, offsetDays), offsetDays };
+      });
+      debugCalendar("[coach-calendar] copy week mapped dates", mappedDateSamples);
+      const copyResult = await copyWorkoutRowsToWeek({
+        rows: visibleSourceWeekRows,
+        sourceWeekStartISO: normalizedSourceWeekStartISO,
+        targetWeekStartISO: currentWeekStartISO,
+        sourceHeaderRows,
+      });
       await loadCalendarData({ force: true });
       Alert.alert(
         "Copy Week",
-        `Copied ${insertRows.length} workout${insertRows.length === 1 ? "" : "s"} into week of ${currentWeekStartISO}.`
+        `Copied ${copyResult.insertedCount} visible workout${copyResult.insertedCount === 1 ? "" : "s"} into week of ${currentWeekStartISO}.`
       );
     } catch (error: any) {
       Alert.alert("Copy failed", String(error?.message ?? "Could not copy week."));
     } finally {
       setCopyingWeek(false);
     }
-  }, [anchorWeekStart, clearingWeek, copyingWeek, loadCalendarData]);
+  }, [anchorWeekStart, clearingWeek, copyingWeek, copyWorkoutRowsToWeek, loadCalendarData, rawWorkoutPassesCurrentFilters]);
 
   const openCopyWeekModal = useCallback(() => {
     if (calendarMode !== "week" || copyingWeek || clearingWeek) return;
@@ -3674,7 +3800,7 @@ export default function CoachCalendarMonth() {
       return;
     }
     setCopyWeekError(null);
-    const message = `Copy all workouts from ${copySourceWeekLabel} into ${copyTargetWeekLabel}? This will add workouts to the target week. Existing workouts will not be removed.`;
+    const message = `Copy visible workouts from ${copySourceWeekLabel} into ${copyTargetWeekLabel}? Current athlete, group, and season filters will be honored. Existing workouts will not be removed.`;
     if (Platform.OS === "web") {
       const confirmed = window.confirm(message);
       if (confirmed) {
@@ -3695,6 +3821,98 @@ export default function CoachCalendarMonth() {
     ]);
   }, [copySourceWeekLabel, copySourceWeekStartISO, copyTargetWeekLabel, currentWeekStartISO, runCopyWeekFromSource]);
 
+  const fetchSelectedVisibleCurrentWeekRows = useCallback(async () => {
+    const selectedKeys = new Set(selectedWorkoutCardKeys);
+    if (selectedKeys.size === 0) return [];
+    const weekStartISO = toISODate(anchorWeekStart);
+    const weekEndISO = shiftISODateByDays(weekStartISO, 6);
+    const rows = await listTeamWorkoutsInRange(weekStartISO, weekEndISO);
+    return (Array.isArray(rows) ? rows : [])
+      .filter(rawWorkoutPassesCurrentFilters)
+      .filter((row) => selectedKeys.has(rawWorkoutCardKey(row)));
+  }, [anchorWeekStart, rawWorkoutCardKey, rawWorkoutPassesCurrentFilters, selectedWorkoutCardKeys]);
+
+  const copySelectedWorkoutsToNextWeek = useCallback(async () => {
+    if (copyingWeek || clearingWeek || selectedWorkoutCardCount === 0) return;
+    setCopyingWeek(true);
+    try {
+      const sourceWeekStartISO = toISODate(anchorWeekStart);
+      const targetWeekStartISO = shiftISODateByDays(sourceWeekStartISO, 7);
+      const selectedRows = await fetchSelectedVisibleCurrentWeekRows();
+      if (selectedRows.length === 0) {
+        Alert.alert("Copy selected", "No selected visible workout rows were found.");
+        return;
+      }
+      const sourceHeaderRows = await listTeamWorkoutBatchHeadersInRange(
+        sourceWeekStartISO,
+        shiftISODateByDays(sourceWeekStartISO, 6)
+      ).catch(() => []);
+      const result = await copyWorkoutRowsToWeek({
+        rows: selectedRows,
+        sourceWeekStartISO,
+        targetWeekStartISO,
+        sourceHeaderRows,
+      });
+      await loadCalendarData({ force: true });
+      setSelectedWorkoutCardKeys([]);
+      setIsSelectingWorkouts(false);
+      Alert.alert("Copy selected", `Copied ${result.insertedCount} selected workout row${result.insertedCount === 1 ? "" : "s"} to next week.`);
+    } catch (error: any) {
+      Alert.alert("Copy selected failed", String(error?.message ?? "Could not copy selected workouts."));
+    } finally {
+      setCopyingWeek(false);
+    }
+  }, [
+    anchorWeekStart,
+    clearingWeek,
+    copyingWeek,
+    copyWorkoutRowsToWeek,
+    fetchSelectedVisibleCurrentWeekRows,
+    loadCalendarData,
+    selectedWorkoutCardCount,
+  ]);
+
+  const deleteSelectedWorkouts = useCallback(async () => {
+    if (copyingWeek || clearingWeek || selectedWorkoutCardCount === 0) return;
+    const message = `Delete ${selectedWorkoutCardCount} selected workout card${selectedWorkoutCardCount === 1 ? "" : "s"} from the current visible view?`;
+    const confirmed = Platform.OS === "web"
+      ? window.confirm(message)
+      : await new Promise<boolean>((resolve) => {
+          Alert.alert("Delete selected workouts", message, [
+            { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
+            { text: "Delete selected", style: "destructive", onPress: () => resolve(true) },
+          ]);
+        });
+    if (!confirmed) return;
+
+    setClearingWeek(true);
+    try {
+      const selectedRows = await fetchSelectedVisibleCurrentWeekRows();
+      const rowIds = Array.from(new Set(selectedRows.map((row) => String(row.id ?? "").trim()).filter(Boolean)));
+      if (rowIds.length === 0) {
+        Alert.alert("Delete selected", "No selected visible workout rows were found.");
+        return;
+      }
+      const deletedCount = await deleteTeamWorkoutsByIds(rowIds);
+      await cleanupEmptyBatchHeadersForRows(selectedRows);
+      await loadCalendarData({ force: true });
+      setSelectedWorkoutCardKeys([]);
+      setIsSelectingWorkouts(false);
+      Alert.alert("Delete selected", `Deleted ${deletedCount} workout row${deletedCount === 1 ? "" : "s"} from the current visible view.`);
+    } catch (error: any) {
+      Alert.alert("Delete selected failed", String(error?.message ?? "Could not delete selected workouts."));
+    } finally {
+      setClearingWeek(false);
+    }
+  }, [
+    clearingWeek,
+    cleanupEmptyBatchHeadersForRows,
+    copyingWeek,
+    fetchSelectedVisibleCurrentWeekRows,
+    loadCalendarData,
+    selectedWorkoutCardCount,
+  ]);
+
   const runClearThisWeek = useCallback(async () => {
     if (copyingWeek || clearingWeek) return;
     debugCalendar("[coach-calendar] runClearThisWeek start");
@@ -3703,44 +3921,31 @@ export default function CoachCalendarMonth() {
       const currentWeekStartISO = toISODate(anchorWeekStart);
       const currentWeekEndISO = toISODate(addDays(anchorWeekStart, 6));
       const currentWeekRows = await listTeamWorkoutsInRange(currentWeekStartISO, currentWeekEndISO);
+      const visibleCurrentWeekRows = (Array.isArray(currentWeekRows) ? currentWeekRows : []).filter(rawWorkoutPassesCurrentFilters);
 
-      if (!Array.isArray(currentWeekRows) || currentWeekRows.length === 0) {
-        Alert.alert("Clear This Week", "No workouts found in this week.");
+      if (visibleCurrentWeekRows.length === 0) {
+        Alert.alert("Clear This Week", "No visible workouts found in this week for the current filters.");
         return;
       }
 
-      const batchIds = new Set<string>();
-      const singleRowIds: string[] = [];
-      currentWeekRows.forEach((row) => {
-        const batchId = String(row.batch_id ?? "").trim();
-        if (batchId) {
-          batchIds.add(batchId);
-        } else {
-          singleRowIds.push(String(row.id ?? ""));
-        }
-      });
-
-      for (const batchId of batchIds) {
-        await deleteWorkoutBatch(batchId);
-      }
-      for (const rowId of singleRowIds) {
-        if (!rowId) continue;
-        await deleteTeamWorkout(rowId);
-      }
+      const rowIds = Array.from(new Set(visibleCurrentWeekRows.map((row) => String(row.id ?? "").trim()).filter(Boolean)));
+      const deletedCount = await deleteTeamWorkoutsByIds(rowIds);
+      await cleanupEmptyBatchHeadersForRows(visibleCurrentWeekRows);
 
       await loadCalendarData({ force: true });
-      Alert.alert("Clear This Week", "All workouts for the visible week were removed.");
+      Alert.alert("Clear This Week", `Removed ${deletedCount} visible workout row${deletedCount === 1 ? "" : "s"} from this week.`);
     } catch (error: any) {
       Alert.alert("Clear failed", String(error?.message ?? "Could not clear this week."));
     } finally {
       setClearingWeek(false);
     }
-  }, [anchorWeekStart, clearingWeek, copyingWeek, loadCalendarData]);
+  }, [anchorWeekStart, clearingWeek, cleanupEmptyBatchHeadersForRows, copyingWeek, loadCalendarData, rawWorkoutPassesCurrentFilters]);
 
   const handleClearThisWeek = useCallback(() => {
     if (calendarMode !== "week" || copyingWeek || clearingWeek) return;
+    const message = "Delete all workout rows currently visible in this week? Current athlete, group, and season filters will be honored. This cannot be undone.";
     if (Platform.OS === "web") {
-      const confirmed = window.confirm("Delete all workouts in the currently visible week? This cannot be undone.");
+      const confirmed = window.confirm(message);
       if (confirmed) {
         void runClearThisWeek();
       }
@@ -3748,7 +3953,7 @@ export default function CoachCalendarMonth() {
     }
     Alert.alert(
       "Clear This Week",
-      "Delete all workouts in the currently visible week? This cannot be undone.",
+      message,
       [
         { text: "Cancel", style: "cancel" },
         { text: "Delete", style: "destructive", onPress: () => void runClearThisWeek() },
@@ -3962,6 +4167,16 @@ export default function CoachCalendarMonth() {
                         disabled={copyingWeek || clearingWeek}
                       >
                         <Text style={styles.actionMenuItemText}>{copyingWeek ? "Copying..." : "Copy Week..."}</Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => {
+                          setWeekActionsMenuOpen(false);
+                          setIsSelectingWorkouts(true);
+                          setSelectedWorkoutCardKeys([]);
+                        }}
+                        style={styles.actionMenuItem}
+                      >
+                        <Text style={styles.actionMenuItemText}>Select Workouts</Text>
                       </Pressable>
                       <Pressable
                         onPress={() => {
@@ -4309,6 +4524,43 @@ export default function CoachCalendarMonth() {
         </View>
       </View>
 
+      {calendarMode === "week" && isSelectingWorkouts ? (
+        <View style={styles.weekSelectionBar}>
+          <Text style={styles.weekSelectionCountText}>
+            {selectedWorkoutCardCount} selected
+          </Text>
+          <View style={styles.weekSelectionActions}>
+            <Pressable
+              onPress={() => void copySelectedWorkoutsToNextWeek()}
+              disabled={selectedWorkoutCardCount === 0 || copyingWeek || clearingWeek}
+              style={[
+                styles.weekSelectionButton,
+                (selectedWorkoutCardCount === 0 || copyingWeek || clearingWeek) && styles.weekSelectionButtonDisabled,
+              ]}
+            >
+              <Text style={styles.weekSelectionButtonText}>
+                {copyingWeek ? "Copying..." : "Copy to next week"}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => void deleteSelectedWorkouts()}
+              disabled={selectedWorkoutCardCount === 0 || copyingWeek || clearingWeek}
+              style={[
+                styles.weekSelectionDangerButton,
+                (selectedWorkoutCardCount === 0 || copyingWeek || clearingWeek) && styles.weekSelectionButtonDisabled,
+              ]}
+            >
+              <Text style={styles.weekSelectionDangerText}>
+                {clearingWeek ? "Deleting..." : "Delete selected"}
+              </Text>
+            </Pressable>
+            <Pressable onPress={cancelWorkoutSelection} style={styles.weekSelectionButton}>
+              <Text style={styles.weekSelectionButtonText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
       {calendarMode === "month" ? (
         isWebDesktop ? (
           <>
@@ -4518,6 +4770,8 @@ export default function CoachCalendarMonth() {
                     ) : (
                       day.workouts.map((workout) => {
                         const expanded = !!expandedWeeklyWorkouts[workout.key];
+                        const canSelectWorkout = isSelectingWorkouts && !workout.suggestedMileageOnly;
+                        const selected = selectedWorkoutCardKeySet.has(workout.key);
                         const timeText = String(workout.time ?? "").trim();
                         const locationText = String(workout.location ?? "").trim();
                         const titleText = String(workout.title ?? "").trim() || "Workout";
@@ -4528,7 +4782,15 @@ export default function CoachCalendarMonth() {
                         const accentColors = normalizeWorkoutAccentColors(visibleCategories, categories);
                         const accentBaseColor = accentColors[0] ?? "#e0e8f6";
                         return (
-                          <View key={workout.key} style={styles.weekWorkoutBox}>
+                          <Pressable
+                            key={workout.key}
+                            onPress={canSelectWorkout ? () => toggleWorkoutCardSelection(workout.key) : undefined}
+                            style={[
+                              styles.weekWorkoutBox,
+                              selected && styles.weekWorkoutBoxSelected,
+                              canSelectWorkout && styles.weekWorkoutBoxSelectable,
+                            ]}
+                          >
                             <View style={styles.weekWorkoutRow}>
                               <View style={[styles.weekWorkoutAccentStrip, { backgroundColor: accentBaseColor }]}>
                                 {accentColors.length > 1
@@ -4540,6 +4802,13 @@ export default function CoachCalendarMonth() {
                                     ))
                                   : null}
                               </View>
+                              {isSelectingWorkouts ? (
+                                <View style={styles.weekSelectionCheckWrap}>
+                                  <View style={[styles.weekSelectionCheck, selected && styles.weekSelectionCheckSelected]}>
+                                    <Text style={styles.weekSelectionCheckText}>{selected ? "✓" : ""}</Text>
+                                  </View>
+                                </View>
+                              ) : null}
                               <View style={styles.weekWorkoutMain}>
                                 <View style={styles.weekPlannerWorkoutBody}>
                                   {timeText || locationText ? (
@@ -4585,24 +4854,26 @@ export default function CoachCalendarMonth() {
 
                                   <View style={styles.weekPlannerMetaRow}>
                                     <Text style={styles.weekCompactMeta}>{`${workout.athleteCount} Ath • ${workout.groupCount} Gr`}</Text>
-                                    <Pressable
-                                      onPress={() =>
-                                        setExpandedWeeklyWorkouts((prev) => ({
-                                          ...prev,
-                                          [workout.key]: !prev[workout.key],
-                                        }))
-                                      }
-                                      style={styles.weekExpandButton}
-                                    >
-                                      <Text style={styles.weekExpandChevron}>{expanded ? "▾" : "▸"}</Text>
-                                    </Pressable>
+                                    {!isSelectingWorkouts ? (
+                                      <Pressable
+                                        onPress={() =>
+                                          setExpandedWeeklyWorkouts((prev) => ({
+                                            ...prev,
+                                            [workout.key]: !prev[workout.key],
+                                          }))
+                                        }
+                                        style={styles.weekExpandButton}
+                                      >
+                                        <Text style={styles.weekExpandChevron}>{expanded ? "▾" : "▸"}</Text>
+                                      </Pressable>
+                                    ) : null}
                                   </View>
                                 </View>
 
-                                {expanded ? renderWeeklyExpandedWorkout(workout) : null}
+                                {expanded && !isSelectingWorkouts ? renderWeeklyExpandedWorkout(workout) : null}
                               </View>
                             </View>
-                          </View>
+                          </Pressable>
                         );
                       })
                     )}
@@ -4646,13 +4917,22 @@ export default function CoachCalendarMonth() {
                     ) : (
                       day.workouts.map((workout) => {
                         const expanded = !!expandedWeeklyWorkouts[workout.key];
+                        const canSelectWorkout = isSelectingWorkouts && !workout.suggestedMileageOnly;
+                        const selected = selectedWorkoutCardKeySet.has(workout.key);
                         const visibleCategories = workout.categories
                           .map((cat) => String(cat ?? "").trim())
                           .filter(Boolean);
                         const accentColors = normalizeWorkoutAccentColors(visibleCategories, categories);
                         const accentBaseColor = accentColors[0] ?? "#e0e8f6";
                         return (
-                          <View key={workout.key} style={styles.weekWorkoutBox}>
+                          <View
+                            key={workout.key}
+                            style={[
+                              styles.weekWorkoutBox,
+                              selected && styles.weekWorkoutBoxSelected,
+                              canSelectWorkout && styles.weekWorkoutBoxSelectable,
+                            ]}
+                          >
                             <View style={styles.weekWorkoutRow}>
                               <View style={[styles.weekWorkoutAccentStrip, { backgroundColor: accentBaseColor }]}>
                                 {accentColors.length > 1
@@ -4666,14 +4946,23 @@ export default function CoachCalendarMonth() {
                               </View>
                               <View style={styles.weekWorkoutMain}>
                                 <Pressable
-                                  onPress={() =>
+                                  onPress={() => {
+                                    if (canSelectWorkout) {
+                                      toggleWorkoutCardSelection(workout.key);
+                                      return;
+                                    }
                                     setExpandedWeeklyWorkouts((prev) => ({
                                       ...prev,
                                       [workout.key]: !prev[workout.key],
-                                    }))
-                                  }
+                                    }));
+                                  }}
                                   style={styles.weekWorkoutHeader}
                                 >
+                                  {isSelectingWorkouts ? (
+                                    <View style={[styles.weekSelectionCheck, selected && styles.weekSelectionCheckSelected]}>
+                                      <Text style={styles.weekSelectionCheckText}>{selected ? "✓" : ""}</Text>
+                                    </View>
+                                  ) : null}
                                   <View style={{ flex: 1 }}>
                                     <Text style={styles.weekWorkoutTitle}>{workout.title}</Text>
                                     <Text style={styles.weekWorkoutMeta}>
@@ -4683,10 +4972,12 @@ export default function CoachCalendarMonth() {
                                       {` • ${workout.athleteCount} athletes • ${workout.groupCount} groups`}
                                     </Text>
                                   </View>
-                                  <Text style={styles.weekExpandChevron}>{expanded ? "▾" : "▸"}</Text>
+                                  {!isSelectingWorkouts ? (
+                                    <Text style={styles.weekExpandChevron}>{expanded ? "▾" : "▸"}</Text>
+                                  ) : null}
                                 </Pressable>
 
-                                {expanded ? renderWeeklyExpandedWorkout(workout) : null}
+                                {expanded && !isSelectingWorkouts ? renderWeeklyExpandedWorkout(workout) : null}
                               </View>
                             </View>
                           </View>
@@ -5544,6 +5835,60 @@ const styles = StyleSheet.create({
   weekSheetCellTitle: { fontSize: 12, fontWeight: "900", color: "#0f1b2d" },
   weekSheetCellMeta: { marginTop: 2, fontSize: 10, fontWeight: "700", color: "#5d6e86" },
 
+  weekSelectionBar: {
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#d8e3f2",
+    borderRadius: 8,
+    backgroundColor: "#f8fbff",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  weekSelectionCountText: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#1f324d",
+  },
+  weekSelectionActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  weekSelectionButton: {
+    borderWidth: 1,
+    borderColor: "#cbd9ea",
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: "#fff",
+  },
+  weekSelectionDangerButton: {
+    borderWidth: 1,
+    borderColor: "#fecdd3",
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: "#fff5f5",
+  },
+  weekSelectionButtonDisabled: {
+    opacity: 0.55,
+  },
+  weekSelectionButtonText: {
+    fontSize: 11,
+    fontWeight: "900",
+    color: "#24476f",
+  },
+  weekSelectionDangerText: {
+    fontSize: 11,
+    fontWeight: "900",
+    color: "#be123c",
+  },
   weekScroll: {
     borderWidth: 1,
     borderColor: "#ececec",
@@ -5728,6 +6073,13 @@ const styles = StyleSheet.create({
     borderColor: "#e8eef8",
     overflow: "hidden",
   },
+  weekWorkoutBoxSelectable: {
+    borderColor: "#c9d8eb",
+  },
+  weekWorkoutBoxSelected: {
+    borderColor: "#2f6fb2",
+    backgroundColor: "#f4f9ff",
+  },
   weekWorkoutRow: {
     flexDirection: "row",
     alignItems: "stretch",
@@ -5740,6 +6092,34 @@ const styles = StyleSheet.create({
   },
   weekWorkoutAccentSegment: {
     flex: 1,
+  },
+  weekSelectionCheckWrap: {
+    width: 32,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f8fbff",
+    borderRightWidth: 1,
+    borderRightColor: "#e7edf6",
+  },
+  weekSelectionCheck: {
+    width: 20,
+    height: 20,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "#b8c7da",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#fff",
+  },
+  weekSelectionCheckSelected: {
+    borderColor: "#2f6fb2",
+    backgroundColor: "#2f6fb2",
+  },
+  weekSelectionCheckText: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: "#fff",
+    lineHeight: 16,
   },
   weekWorkoutMain: {
     flex: 1,

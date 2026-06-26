@@ -137,3 +137,29 @@ export async function saveTeamWorkoutBatchHeaderNotes(input: {
 
   return { handledRowPropagation: false };
 }
+
+export async function deleteTeamWorkoutBatchHeader(input: {
+  batch_id: string;
+  date_iso: string;
+  session: "AM" | "PM";
+}): Promise<void> {
+  const teamId = await getCurrentTeamId();
+  await requireTeamPermission("training.edit", teamId);
+  const batchId = String(input.batch_id ?? "").trim();
+  const dateISO = String(input.date_iso ?? "").trim();
+  const session = normalizeSession(input.session);
+  if (!batchId || !dateISO) return;
+
+  const { error } = await supabase
+    .from("team_workout_batch_headers")
+    .delete()
+    .eq("team_id", teamId)
+    .eq("batch_id", batchId)
+    .eq("date_iso", dateISO)
+    .eq("session", session);
+
+  if (error) {
+    if (isMissingRelationOrFunction(error)) return;
+    throw error;
+  }
+}
