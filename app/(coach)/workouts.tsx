@@ -202,18 +202,18 @@ const DISTANCE_WEEK_START_DAY = 1 as const;
 const batchSheetCellBase = {
   borderRightWidth: 1,
   borderRightColor: SHEET_BORDER,
-  paddingHorizontal: 6,
-  paddingVertical: 5,
-  minHeight: 44,
+  paddingHorizontal: 5,
+  paddingVertical: 3,
+  minHeight: 34,
   justifyContent: "center",
   backgroundColor: SHEET_CELL_BG,
 } as const;
 
 const batchSheetLabelText = {
-  fontSize: 10,
+  fontSize: 9,
   fontWeight: "900",
   color: SHEET_LABEL_COLOR,
-  marginBottom: 3,
+  marginBottom: 2,
 } as const;
 
 const BATCH_GROUP_CORE_BG = "#ffffff";
@@ -5202,6 +5202,12 @@ export default function CoachWorkoutsDay() {
                 routineById: routineByIdForBatch,
                 mainWorkText: batchDraft.details,
               });
+              const workoutFlowPreviewText = workoutFlowSections
+                .map((section, flowIndex) => {
+                  const label = section.phase === "main" ? `Main: ${section.text || "Main work"}` : section.title;
+                  return `${flowIndex + 1} ${label}`;
+                })
+                .join(" → ");
 
               const athletePickerOpen = openAthletePickerBatchKey === batchRow.key;
               const athleteSelectionSyncing = !!athleteSelectionSyncByBatchKey[batchRow.key];
@@ -5271,43 +5277,6 @@ export default function CoachWorkoutsDay() {
                       zIndex: groupCategoryPickerOpenForBatch ? 50020 : batchHasOpenOverlay ? 220 : 1,
                     }}
                   >
-                    <View
-                      style={{
-                        flexDirection: "row",
-                        alignItems: "center",
-                        borderBottomWidth: 1,
-                        borderBottomColor: SHEET_BORDER,
-                        backgroundColor: BATCH_HEADER_CAPTION_BG,
-                      }}
-                    >
-                      <View style={{ flex: 1, paddingHorizontal: 8, paddingVertical: 3, flexDirection: "row", alignItems: "center", gap: 6 }}>
-                        <Text style={{ fontSize: 9, fontWeight: "800", color: BATCH_GROUP_CAPTION, letterSpacing: 0.2 }}>Core</Text>
-                        <Text
-                          style={{
-                            fontSize: 9,
-                            fontWeight: "900",
-                            color: visibilityLabel === "Published" ? "#166534" : visibilityLabel === "Hidden" ? "#991b1b" : "#92400e",
-                          }}
-                        >
-                          {visibilityLabel}
-                        </Text>
-                      </View>
-                      <View style={{ width: (COL.category + 46) * 3, paddingHorizontal: 8, paddingVertical: 3, borderLeftWidth: 2, borderLeftColor: BATCH_GROUP_DIVIDER }}>
-                        <Text style={{ fontSize: 9, fontWeight: "800", color: BATCH_GROUP_CAPTION, letterSpacing: 0.2 }}>Routines</Text>
-                      </View>
-                      <View
-                        style={{
-                          width: COL.athletes + 16 + 88 + 230 + 120,
-                          paddingHorizontal: 8,
-                          paddingVertical: 3,
-                          borderLeftWidth: 2,
-                          borderLeftColor: BATCH_GROUP_DIVIDER,
-                        }}
-                      >
-                        <Text style={{ fontSize: 9, fontWeight: "800", color: BATCH_GROUP_CAPTION, letterSpacing: 0.2, textAlign: "right" }}>Batch Tools</Text>
-                      </View>
-                    </View>
-
                     <View style={{ flexDirection: "row", alignItems: "stretch", gap: 0, borderBottomWidth: 1, borderBottomColor: SHEET_BORDER, backgroundColor: SHEET_HEADER_BG }}>
                       <View style={{ ...batchSheetCellBase, width: COL.toggle, alignItems: "center", backgroundColor: BATCH_GROUP_CORE_BG }}>
                         <Pressable
@@ -5565,7 +5534,7 @@ export default function CoachWorkoutsDay() {
                           backgroundColor: BATCH_GROUP_CORE_BG,
                         }}
                       >
-                        <Text style={batchSheetLabelText}>Workout Notes</Text>
+                        <Text style={batchSheetLabelText}>Notes</Text>
                         <NotesCellEditor
                           value={batchDraft.details}
                           onChangeText={(v) => onEditBatchField(batchRow.key, "details", v)}
@@ -5595,7 +5564,7 @@ export default function CoachWorkoutsDay() {
                               borderLeftColor: BATCH_GROUP_DIVIDER,
                             }}
                           >
-                            <Text style={batchSheetLabelText}>Category</Text>
+                            <Text style={batchSheetLabelText}>Cat</Text>
                             <View style={{ gap: 4 }}>
                               {categorySlots.map((slotValue, slotIndex) => (
                                 <View key={`cat-slot-${batchRow.key}-${slotIndex}`} style={{ flexDirection: "row", alignItems: "center", gap: 6, position: "relative", zIndex: openBatchPicker?.batchKey === batchRow.key && openBatchPicker.field === "category" && openBatchPicker.slotIndex === slotIndex ? 70 : 1 }}>
@@ -5698,7 +5667,7 @@ export default function CoachWorkoutsDay() {
                           </View>
 
                           <View style={{ ...batchSheetCellBase, width: COL.category + 46, justifyContent: "flex-start", overflow: "visible", zIndex: 5, backgroundColor: BATCH_GROUP_SECONDARY_BG }}>
-                            <Text style={batchSheetLabelText}>Before Main Work</Text>
+                            <Text style={batchSheetLabelText}>Before</Text>
                             <View style={{ gap: 4 }}>
                               {preSlots.map((slotValue, slotIndex) => {
                                 const routineTitle = auxiliaryRoutines.find((r) => String(r.id) === slotValue)?.title ?? "";
@@ -5811,7 +5780,7 @@ export default function CoachWorkoutsDay() {
                           </View>
 
                           <View style={{ ...batchSheetCellBase, width: COL.category + 46, justifyContent: "flex-start", overflow: "visible", zIndex: 4, backgroundColor: BATCH_GROUP_SECONDARY_BG }}>
-                            <Text style={batchSheetLabelText}>After Main Work</Text>
+                            <Text style={batchSheetLabelText}>After</Text>
                             <View style={{ gap: 4 }}>
                               {postSlots.map((slotValue, slotIndex) => {
                                 const routineTitle = auxiliaryRoutines.find((r) => String(r.id) === slotValue)?.title ?? "";
@@ -5934,40 +5903,16 @@ export default function CoachWorkoutsDay() {
                           borderLeftColor: BATCH_GROUP_DIVIDER,
                         }}
                       >
-                        <Text style={batchSheetLabelText}>Status</Text>
+                        <Text style={batchSheetLabelText}>{visibilityLabel}</Text>
                         <InlineSaveStatus status={batchState?.status ?? "idle"} message={batchState?.message} size="sm" align="right" />
                       </View>
                     </View>
 
-                    <View style={{ borderBottomWidth: 1, borderBottomColor: SHEET_BORDER, backgroundColor: "#f8fafc", paddingHorizontal: 8, paddingVertical: 6 }}>
-                      <Text style={{ fontSize: 9, fontWeight: "900", color: BATCH_GROUP_CAPTION, letterSpacing: 0.2 }}>Workout Flow Preview</Text>
-                      <View style={{ marginTop: 4, flexDirection: "row", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                        {workoutFlowSections.map((section, flowIndex) => {
-                          const isMain = section.phase === "main";
-                          return (
-                            <View
-                              key={`${batchRow.key}-flow-${section.key}`}
-                              style={{
-                                maxWidth: isMain ? 260 : 190,
-                                borderWidth: 1,
-                                borderColor: isMain ? "#bfdbfe" : "#dbe3ef",
-                                backgroundColor: isMain ? "#eff6ff" : "#fff",
-                                borderRadius: 999,
-                                paddingHorizontal: 8,
-                                paddingVertical: 4,
-                                flexDirection: "row",
-                                alignItems: "center",
-                                gap: 5,
-                              }}
-                            >
-                              <Text style={{ fontSize: 10, fontWeight: "900", color: "#64748b" }}>{flowIndex + 1}</Text>
-                              <Text numberOfLines={1} style={{ fontSize: 11, fontWeight: "800", color: isMain ? "#1e40af" : "#334155", flexShrink: 1 }}>
-                                {isMain && section.text ? `Main: ${section.text}` : section.title}
-                              </Text>
-                            </View>
-                          );
-                        })}
-                      </View>
+                    <View style={{ borderBottomWidth: 1, borderBottomColor: SHEET_BORDER, backgroundColor: "#f8fafc", paddingHorizontal: 8, paddingVertical: 4, flexDirection: "row", alignItems: "center", gap: 6 }}>
+                      <Text style={{ fontSize: 10, fontWeight: "900", color: BATCH_GROUP_CAPTION }}>Flow:</Text>
+                      <Text numberOfLines={1} style={{ flex: 1, fontSize: 11, fontWeight: "800", color: "#334155" }}>
+                        {workoutFlowPreviewText}
+                      </Text>
                     </View>
 
                     {openBatchPicker?.batchKey === batchRow.key ? (
