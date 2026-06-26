@@ -874,13 +874,21 @@ async function setAthleteRosterStatus(athleteId: string, rosterStatus: TeamAthle
   incLoading();
   const prevRoster = state.roster;
   const nowIso = rosterStatus === "active" ? null : new Date().toISOString();
+  const todayISO = toDateOnlyISO(new Date());
   try {
     const { teamId } = await ensureSessionAndTeam();
     if (!teamId) throw new Error("No team selected.");
 
+    const currentAthlete = state.roster.find((athlete) => athlete.id === athleteId) ?? null;
+    const shouldSetTeamEndDate = rosterStatus !== "active" && !String(currentAthlete?.team_end_date ?? "").trim();
     const nextRoster = state.roster.map((athlete) =>
       athlete.id === athleteId
-        ? { ...athlete, roster_status: rosterStatus, left_at: nowIso }
+        ? {
+            ...athlete,
+            roster_status: rosterStatus,
+            left_at: nowIso,
+            ...(shouldSetTeamEndDate ? { team_end_date: todayISO } : null),
+          }
         : athlete
     );
 
@@ -888,12 +896,19 @@ async function setAthleteRosterStatus(athleteId: string, rosterStatus: TeamAthle
       roster: nextRoster,
     });
 
+    const updatePayload: {
+      roster_status: TeamAthleteRosterStatus;
+      left_at: string | null;
+      team_end_date?: string;
+    } = {
+      roster_status: rosterStatus,
+      left_at: nowIso,
+    };
+    if (shouldSetTeamEndDate) updatePayload.team_end_date = todayISO;
+
     const { error } = await supabase
       .from("team_athletes")
-      .update({
-        roster_status: rosterStatus,
-        left_at: nowIso,
-      })
+      .update(updatePayload)
       .eq("team_id", teamId)
       .eq("id", athleteId);
 

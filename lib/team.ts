@@ -1,6 +1,7 @@
 import { supabase } from "./supabase";
 import { getActiveAccountContext } from "./accountContexts";
 import { normalizeTeamRole, requireTeamPermission, type TeamRole } from "./teamPermissions";
+import { toISODate } from "./mileagePlan";
 
 export async function getMyUserId(): Promise<string | null> {
   const { data } = await supabase.auth.getSession();
@@ -203,7 +204,12 @@ export async function deleteTeamAthlete(id: string) {
 }
 
 // Coach creates an athlete profile (roster entry) inside the team
-export async function createTeamAthlete(first_name: string, last_name: string, email?: string | null) {
+export async function createTeamAthlete(
+  first_name: string,
+  last_name: string,
+  email?: string | null,
+  options?: { team_start_date?: string | null }
+) {
   // IMPORTANT: ensure team exists on *this device/session*
   const teamId = (await ensureCoachTeam("My Team")) ?? (await getCurrentTeamId());
   if (!teamId) throw new Error("No current team");
@@ -212,6 +218,7 @@ export async function createTeamAthlete(first_name: string, last_name: string, e
   const fn = first_name.trim();
   const ln = last_name.trim();
   const display_name = `${fn} ${ln}`.trim();
+  const teamStartDate = String(options?.team_start_date ?? "").trim() || toISODate(new Date());
 
   const { data, error } = await supabase
     .from("team_athletes")
@@ -221,6 +228,7 @@ export async function createTeamAthlete(first_name: string, last_name: string, e
       last_name: ln,
       display_name,
       email: email?.trim() || null,
+      team_start_date: teamStartDate,
     })
     .select("id,team_id,first_name,last_name,display_name,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,created_at,updated_at")
     .single();
