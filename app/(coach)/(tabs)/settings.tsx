@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Image, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
 import { DateField } from "../../../components/ui/DateField";
+import { TeamLogoCropper } from "../../../components/branding/TeamLogoCropper";
 import { supabase } from "../../../lib/supabase";
 import {
   createCoachInvite,
@@ -38,6 +39,7 @@ import {
   loadTeamBranding,
   saveTeamBrandingName,
   uploadTeamLogo,
+  validateTeamLogoFile,
   type TeamBranding,
 } from "../../../lib/teamBranding";
 import {
@@ -150,6 +152,7 @@ export default function CoachSettingsTab() {
   const [teamNameText, setTeamNameText] = useState("");
   const [brandingBusy, setBrandingBusy] = useState(false);
   const [brandingStatus, setBrandingStatus] = useState<string | null>(null);
+  const [pendingLogoFile, setPendingLogoFile] = useState<File | null>(null);
 
   const [seasonsOpen, setSeasonsOpen] = useState(false);
   const [individualPaceOpen, setIndividualPaceOpen] = useState(false);
@@ -481,12 +484,20 @@ export default function CoachSettingsTab() {
     input.onchange = () => {
       const file = input.files?.[0];
       if (!file) return;
-      void uploadSelectedTeamLogo(file);
+      try {
+        validateTeamLogoFile(file);
+        setBrandingStatus(null);
+        setPendingLogoFile(file);
+      } catch (error: any) {
+        const message = getErrorMessage(error);
+        setBrandingStatus(message);
+        Alert.alert("Logo upload failed", message);
+      }
     };
     input.click();
   }
 
-  async function uploadSelectedTeamLogo(file: File) {
+  async function uploadSelectedTeamLogo(file: File): Promise<boolean> {
     setBrandingBusy(true);
     setBrandingStatus(null);
     try {
@@ -496,13 +507,25 @@ export default function CoachSettingsTab() {
       setBrandingStatus("Logo uploaded.");
       notifyTeamBrandingUpdated();
       Alert.alert("Logo uploaded", "Team logo updated.");
+      return true;
     } catch (error: any) {
       const message = getErrorMessage(error);
       setBrandingStatus(message);
       Alert.alert("Logo upload failed", message);
+      return false;
     } finally {
       setBrandingBusy(false);
     }
+  }
+
+  async function useOriginalTeamLogo(file: File) {
+    const ok = await uploadSelectedTeamLogo(file);
+    if (ok) setPendingLogoFile(null);
+  }
+
+  async function saveCroppedTeamLogo(file: File) {
+    const ok = await uploadSelectedTeamLogo(file);
+    if (ok) setPendingLogoFile(null);
   }
 
   async function removeTeamLogo() {
@@ -1546,6 +1569,14 @@ export default function CoachSettingsTab() {
         </View>
         </View>
       </ScrollView>
+      <TeamLogoCropper
+        file={pendingLogoFile}
+        visible={!!pendingLogoFile}
+        saving={brandingBusy}
+        onCancel={() => setPendingLogoFile(null)}
+        onUseOriginal={useOriginalTeamLogo}
+        onSaveCropped={saveCroppedTeamLogo}
+      />
     </View>
   );
 }
