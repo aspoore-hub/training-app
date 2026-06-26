@@ -1,5 +1,6 @@
 import { Modal, Pressable, ScrollView, Text, View } from "react-native";
 import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { AthleteRoutineDetails } from "../../athlete/AthleteRoutineDetails";
 import type { AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
 import type { DrillLibraryItem } from "../../../lib/drillLibrary";
@@ -59,6 +60,21 @@ function RoutineSection({
   drillById: Map<string, DrillLibraryItem>;
 }) {
   const cleanIds = ids.map((id) => String(id ?? "").trim()).filter(Boolean);
+  const [expandedRoutineIds, setExpandedRoutineIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    setExpandedRoutineIds(new Set());
+  }, [cleanIds.join("|")]);
+
+  function toggleRoutine(id: string) {
+    setExpandedRoutineIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   if (cleanIds.length === 0) return null;
   return (
     <Section title={title}>
@@ -73,10 +89,32 @@ function RoutineSection({
               </View>
             );
           }
+          const expanded = expandedRoutineIds.has(id);
+          const itemCount = Array.isArray(routine.items) ? routine.items.length : 0;
+          const detailsText = [routine.description, routine.details].map((value) => String(value ?? "").trim()).filter(Boolean);
+          const summaryParts = [
+            itemCount > 0 ? `${itemCount} item${itemCount === 1 ? "" : "s"}` : "",
+            detailsText.length > 0 ? "notes" : "",
+          ].filter(Boolean);
           return (
-            <View key={`${title}-${id}`} style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 12, padding: 10, backgroundColor: "#fff", gap: 8 }}>
-              <Text style={{ color: "#0f172a", fontWeight: "900", fontSize: 15 }}>{routine.title}</Text>
-              <AthleteRoutineDetails routine={routine} drillById={drillById} />
+            <View key={`${title}-${id}`} style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 12, backgroundColor: "#fff", overflow: "hidden" }}>
+              <Pressable
+                onPress={() => toggleRoutine(id)}
+                style={{ padding: 10, flexDirection: "row", alignItems: "center", gap: 10 }}
+              >
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={{ color: "#0f172a", fontWeight: "900", fontSize: 15 }}>{routine.title}</Text>
+                  <Text style={{ marginTop: 3, color: "#64748b", fontWeight: "800", fontSize: 12 }}>
+                    {summaryParts.length > 0 ? summaryParts.join(" · ") : "Tap to view"}
+                  </Text>
+                </View>
+                <Text style={{ color: "#2563eb", fontWeight: "900", fontSize: 16 }}>{expanded ? "▾" : "▸"}</Text>
+              </Pressable>
+              {expanded ? (
+                <View style={{ borderTopWidth: 1, borderTopColor: "#f1f5f9", padding: 10 }}>
+                  <AthleteRoutineDetails routine={routine} drillById={drillById} />
+                </View>
+              ) : null}
             </View>
           );
         })}
