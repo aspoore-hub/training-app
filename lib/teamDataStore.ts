@@ -1588,6 +1588,30 @@ function resolveAthleteSeasonWindow(
   };
 }
 
+function isDateOnlyISO(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function defaultPriorSeasonIdsForTeamStartDate(teamStartDate: string, seasons: TeamSeason[]): string[] {
+  const startDate = String(teamStartDate ?? "").trim();
+  if (!isDateOnlyISO(startDate)) return [];
+  const sorted = [...(Array.isArray(seasons) ? seasons : [])]
+    .filter((season) => !season?.archived_at)
+    .filter((season) => isDateOnlyISO(String(season?.start_date ?? "")) && isDateOnlyISO(String(season?.end_date ?? "")))
+    .sort((a, b) =>
+      String(a.start_date ?? "").localeCompare(String(b.start_date ?? "")) ||
+      String(a.end_date ?? "").localeCompare(String(b.end_date ?? "")) ||
+      String(a.name ?? "").localeCompare(String(b.name ?? ""))
+    );
+  const containingIndex = sorted.findIndex(
+    (season) => String(season.start_date ?? "") <= startDate && String(season.end_date ?? "") >= startDate
+  );
+  const priorSeasons = containingIndex >= 0
+    ? sorted.slice(0, containingIndex)
+    : sorted.filter((season) => String(season.end_date ?? "") < startDate);
+  return priorSeasons.map((season) => String(season.id ?? "").trim()).filter(Boolean);
+}
+
 async function loadAthleteSeasonOverrides(force = false) {
   const inFlightKey = teamScopedLoadKey(force ? "athlete-season-overrides:force" : "athlete-season-overrides");
   const existing = inFlightAthleteSeasonOverridesByKey.get(inFlightKey);
@@ -1677,6 +1701,33 @@ async function clearAthleteSeasonOverrideInStore(seasonId: string, athleteProfil
   } finally {
     decLoading();
   }
+}
+
+async function applyDefaultPriorSeasonExclusionsForAthlete(athleteProfileId: string, teamStartDate: string | null | undefined) {
+  const cleanAthleteId = String(athleteProfileId ?? "").trim();
+  const cleanStartDate = String(teamStartDate ?? "").trim();
+  if (!cleanAthleteId || !isDateOnlyISO(cleanStartDate)) return { added: 0 };
+
+  await loadTeamSeasons(false);
+  await loadAthleteSeasonOverrides(false);
+
+  const priorSeasonIds = defaultPriorSeasonIdsForTeamStartDate(cleanStartDate, state.teamSeasons);
+  if (priorSeasonIds.length === 0) return { added: 0 };
+  const existingOverrideKeys = new Set(
+    (Array.isArray(state.athleteSeasonOverrides) ? state.athleteSeasonOverrides : [])
+      .filter((row) => String(row.athlete_profile_id ?? "").trim() === cleanAthleteId)
+      .map((row) => String(row.season_id ?? "").trim())
+      .filter(Boolean)
+  );
+  const missingPriorSeasonIds = priorSeasonIds.filter((seasonId) => !existingOverrideKeys.has(seasonId));
+  for (const seasonId of missingPriorSeasonIds) {
+    await upsertAthleteSeasonOverrideInStore({
+      season_id: seasonId,
+      athlete_profile_id: cleanAthleteId,
+      is_excluded: true,
+    });
+  }
+  return { added: missingPriorSeasonIds.length };
 }
 
 async function createTeamSeasonInStore(input: {
@@ -1867,6 +1918,7 @@ export const teamDataStore = {
     setTeamSeasonArchived: setTeamSeasonArchivedInStore,
     upsertAthleteSeasonOverride: upsertAthleteSeasonOverrideInStore,
     clearAthleteSeasonOverride: clearAthleteSeasonOverrideInStore,
+    applyDefaultPriorSeasonExclusionsForAthlete,
   },
   resolveAthleteSeasonWindow,
 };

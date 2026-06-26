@@ -250,6 +250,7 @@ export default function CoachEditTeamAthlete() {
   const [teamTenureError, setTeamTenureError] = useState<string | null>(null);
   const [seasonDraftById, setSeasonDraftById] = useState<Record<string, { start: string; end: string }>>({});
   const [seasonSavingById, setSeasonSavingById] = useState<Record<string, boolean>>({});
+  const [excludedSeasonsExpanded, setExcludedSeasonsExpanded] = useState(false);
   const [seasonTrainingSelectedSeasonId, setSeasonTrainingSelectedSeasonId] = useState<string | null>(null);
   const [seasonTrainingLoading, setSeasonTrainingLoading] = useState(false);
   const [seasonTrainingError, setSeasonTrainingError] = useState<string | null>(null);
@@ -1024,6 +1025,7 @@ export default function CoachEditTeamAthlete() {
       }
       const displayName = `${cleanFirstName} ${cleanLastName}`.trim();
       const cleanEmail = email.trim();
+      const previousTeamStartDate = String(teamDataStore.getAthleteById(athleteId)?.team_start_date ?? "").trim();
       await teamDataStore.actions.updateAthlete(athleteId, {
         first_name: cleanFirstName,
         last_name: cleanLastName,
@@ -1032,6 +1034,9 @@ export default function CoachEditTeamAthlete() {
         team_start_date: start || null,
         team_end_date: end || null,
       });
+      if (start && start !== previousTeamStartDate) {
+        await teamDataStore.actions.applyDefaultPriorSeasonExclusionsForAthlete(athleteId, start);
+      }
 
       if (cleanEmail) {
         await tryLinkLoginEmail(cleanEmail);
@@ -1614,44 +1619,63 @@ export default function CoachEditTeamAthlete() {
             {excludedSeasons.length > 0 ? (
               <View style={{ gap: 8 }}>
                 <Divider />
-                <AppText variant="sub" style={{ fontWeight: "900" }}>Excluded Seasons</AppText>
-                {excludedSeasons.map((season) => {
-                  const seasonId = String(season.id ?? "").trim();
-                  const override = overridesBySeasonId.get(seasonId) ?? null;
-                  const saving = !!seasonSavingById[seasonId];
-                  return (
-                    <View
-                      key={`season-excluded-${seasonId}`}
-                      style={{
-                        borderWidth: 1,
-                        borderColor: "#e2e8f0",
-                        borderRadius: 10,
-                        paddingHorizontal: 10,
-                        paddingVertical: 10,
-                        gap: 6,
-                        backgroundColor: "#fff",
-                      }}
-                    >
-                      <AppText variant="sub" style={{ fontWeight: "900" }}>{season.name}</AppText>
-                      <AppText variant="caption" color="mutedText">
-                        Team default: {season.start_date} to {season.end_date}
-                      </AppText>
-                      {(override?.start_date || override?.end_date) ? (
-                        <AppText variant="caption" color="mutedText">
-                          Saved override dates: {String(override?.start_date ?? "inherit")} to {String(override?.end_date ?? "inherit")}
-                        </AppText>
-                      ) : null}
-                      <View style={{ flexDirection: "row", justifyContent: "flex-end", flexWrap: "wrap", gap: 8 }}>
-                        <Button
-                          title={saving ? "Restoring..." : "Restore Season"}
-                          variant="secondary"
-                          onPress={() => void restoreSeasonParticipation(seasonId)}
-                          disabled={busy || loading || saving}
-                        />
-                      </View>
-                    </View>
-                  );
-                })}
+                <View style={{ gap: 4 }}>
+                  <AppText variant="sub" style={{ fontWeight: "900" }}>
+                    {excludedSeasons.length} excluded season{excludedSeasons.length === 1 ? "" : "s"}
+                  </AppText>
+                  <AppText variant="caption" color="mutedText">
+                    Seasons before this athlete&apos;s team start date are excluded by default.
+                  </AppText>
+                </View>
+                <View style={{ alignItems: "flex-start" }}>
+                  <Button
+                    title={excludedSeasonsExpanded ? "Hide excluded seasons" : "Show excluded seasons"}
+                    variant="secondary"
+                    onPress={() => setExcludedSeasonsExpanded((prev) => !prev)}
+                    disabled={busy || loading}
+                  />
+                </View>
+                {excludedSeasonsExpanded ? (
+                  <View style={{ gap: 8 }}>
+                    {excludedSeasons.map((season) => {
+                      const seasonId = String(season.id ?? "").trim();
+                      const override = overridesBySeasonId.get(seasonId) ?? null;
+                      const saving = !!seasonSavingById[seasonId];
+                      return (
+                        <View
+                          key={`season-excluded-${seasonId}`}
+                          style={{
+                            borderWidth: 1,
+                            borderColor: "#e2e8f0",
+                            borderRadius: 10,
+                            paddingHorizontal: 10,
+                            paddingVertical: 10,
+                            gap: 6,
+                            backgroundColor: "#fff",
+                          }}
+                        >
+                          <AppText variant="sub" style={{ fontWeight: "900" }}>{season.name}</AppText>
+                          <AppText variant="caption" color="mutedText">
+                            Team default: {season.start_date} to {season.end_date}
+                          </AppText>
+                          {(override?.start_date || override?.end_date) ? (
+                            <AppText variant="caption" color="mutedText">
+                              Saved override dates: {String(override?.start_date ?? "inherit")} to {String(override?.end_date ?? "inherit")}
+                            </AppText>
+                          ) : null}
+                          <View style={{ flexDirection: "row", justifyContent: "flex-end", flexWrap: "wrap", gap: 8 }}>
+                            <Button
+                              title={saving ? "Restoring..." : "Restore Season"}
+                              variant="secondary"
+                              onPress={() => void restoreSeasonParticipation(seasonId)}
+                              disabled={busy || loading || saving}
+                            />
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </View>
+                ) : null}
               </View>
             ) : null}
           </View>

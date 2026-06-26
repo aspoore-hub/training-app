@@ -191,6 +191,17 @@ export function RosterListPane() {
       setStatus("");
       try {
         const created = await createTeamAthlete(fn, ln, nextEmail || null);
+        if (created?.id && created?.team_start_date) {
+          try {
+            await teamDataStore.actions.applyDefaultPriorSeasonExclusionsForAthlete(created.id, created.team_start_date);
+          } catch (seasonError) {
+            console.warn("Create athlete season defaults failed", seasonError);
+            Alert.alert(
+              "Season defaults not applied",
+              "Athlete profile was created, but prior season exclusions could not be applied. You can review season eligibility from the roster profile."
+            );
+          }
+        }
         if (nextEmail && created?.id) {
           try {
             const teamId = await getCurrentTeamId();
