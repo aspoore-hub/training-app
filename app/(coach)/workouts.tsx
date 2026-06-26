@@ -5592,9 +5592,9 @@ export default function CoachWorkoutsDay() {
                                           onKeyDown: (e: any) => handleBatchHeaderKeyDown(batchRow.key, "category", e),
                                         } as any)
                                       : null)}
-                                    style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff" }}
+                                    style={{ flex: 1, minWidth: 0, flexShrink: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff", overflow: "hidden" }}
                                   >
-                                    <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "700", color: slotValue ? "#334155" : "#94a3b8" }}>
+                                    <Text numberOfLines={1} style={{ minWidth: 0, flexShrink: 1, fontSize: 12, fontWeight: "700", color: slotValue ? "#334155" : "#94a3b8" }}>
                                       {slotValue || "Select"}
                                     </Text>
                                     <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
@@ -5697,9 +5697,9 @@ export default function CoachWorkoutsDay() {
                                             onKeyDown: (e: any) => handleBatchHeaderKeyDown(batchRow.key, "pre", e),
                                           } as any)
                                         : null)}
-                                      style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff" }}
+                                      style={{ flex: 1, minWidth: 0, flexShrink: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff", overflow: "hidden" }}
                                     >
-                                      <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "700", color: routineTitle ? "#334155" : "#94a3b8" }}>
+                                      <Text numberOfLines={1} style={{ minWidth: 0, flexShrink: 1, fontSize: 12, fontWeight: "700", color: routineTitle ? "#334155" : "#94a3b8" }}>
                                         {routineTitle || "Select"}
                                       </Text>
                                       <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
@@ -5810,9 +5810,9 @@ export default function CoachWorkoutsDay() {
                                             onKeyDown: (e: any) => handleBatchHeaderKeyDown(batchRow.key, "post", e),
                                           } as any)
                                         : null)}
-                                      style={{ flex: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff" }}
+                                      style={{ flex: 1, minWidth: 0, flexShrink: 1, borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 3, paddingHorizontal: 8, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff", overflow: "hidden" }}
                                     >
-                                      <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: "700", color: routineTitle ? "#334155" : "#94a3b8" }}>
+                                      <Text numberOfLines={1} style={{ minWidth: 0, flexShrink: 1, fontSize: 12, fontWeight: "700", color: routineTitle ? "#334155" : "#94a3b8" }}>
                                         {routineTitle || "Select"}
                                       </Text>
                                       <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
@@ -5908,9 +5908,9 @@ export default function CoachWorkoutsDay() {
                       </View>
                     </View>
 
-                    <View style={{ borderBottomWidth: 1, borderBottomColor: SHEET_BORDER, backgroundColor: "#f8fafc", paddingHorizontal: 8, paddingVertical: 4, flexDirection: "row", alignItems: "center", gap: 6 }}>
-                      <Text style={{ fontSize: 10, fontWeight: "900", color: BATCH_GROUP_CAPTION }}>Flow:</Text>
-                      <Text numberOfLines={1} style={{ flex: 1, fontSize: 11, fontWeight: "800", color: "#334155" }}>
+                    <View style={{ minWidth: 0, maxWidth: "100%", flexShrink: 1, overflow: "hidden", borderBottomWidth: 1, borderBottomColor: SHEET_BORDER, backgroundColor: "#f8fafc", paddingHorizontal: 8, paddingVertical: 4, flexDirection: "row", alignItems: "center", gap: 6 }}>
+                      <Text style={{ flexShrink: 0, fontSize: 10, fontWeight: "900", color: BATCH_GROUP_CAPTION }}>Flow:</Text>
+                      <Text numberOfLines={1} style={{ minWidth: 0, flex: 1, flexShrink: 1, overflow: "hidden", fontSize: 11, fontWeight: "800", color: "#334155" }}>
                         {workoutFlowPreviewText}
                       </Text>
                     </View>
