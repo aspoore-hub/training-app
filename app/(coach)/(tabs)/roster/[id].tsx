@@ -6,6 +6,7 @@ import * as Clipboard from "expo-clipboard";
 import { AppText } from "../../../../components/ui/AppText";
 import { Button } from "../../../../components/ui/Button";
 import { Card } from "../../../../components/ui/Card";
+import { DateField } from "../../../../components/ui/DateField";
 import { Divider } from "../../../../components/ui/Divider";
 import { Screen } from "../../../../components/ui/Screen";
 import { TextField } from "../../../../components/ui/TextField";
@@ -1357,27 +1358,25 @@ export default function CoachEditTeamAthlete() {
             Controls future planning/default selection. Historical records remain visible.
           </AppText>
         </View>
-        <TextField
+        <DateField
           label="Team Start Date"
           value={teamStartDate}
           onChangeText={(value) => {
             setTeamStartDate(value);
             if (teamTenureError) setTeamTenureError(null);
           }}
-          placeholder="YYYY-MM-DD"
-          autoCapitalize="none"
           editable={!readOnlyRoster}
+          allowClear
         />
-        <TextField
+        <DateField
           label="Team End Date"
           value={teamEndDate}
           onChangeText={(value) => {
             setTeamEndDate(value);
             if (teamTenureError) setTeamTenureError(null);
           }}
-          placeholder="YYYY-MM-DD"
-          autoCapitalize="none"
           editable={!readOnlyRoster}
+          allowClear
         />
         {teamTenureError ? (
           <AppText variant="caption" color="danger">
@@ -1549,21 +1548,19 @@ export default function CoachEditTeamAthlete() {
                       </AppText>
                       <View style={{ flexDirection: "row", gap: 8 }}>
                         <View style={{ flex: 1 }}>
-                          <TextField
+                          <DateField
                             label="Override start (optional)"
                             value={draft.start}
                             onChangeText={(value) => updateSeasonDraft(seasonId, { start: value })}
-                            placeholder={season.start_date}
-                            autoCapitalize="none"
+                            allowClear
                           />
                         </View>
                         <View style={{ flex: 1 }}>
-                          <TextField
+                          <DateField
                             label="Override end (optional)"
                             value={draft.end}
                             onChangeText={(value) => updateSeasonDraft(seasonId, { end: value })}
-                            placeholder={season.end_date}
-                            autoCapitalize="none"
+                            allowClear
                           />
                         </View>
                       </View>

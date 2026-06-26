@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
+import { DateField } from "../../../components/ui/DateField";
 import { supabase } from "../../../lib/supabase";
 import {
   createCoachInvite,
@@ -1287,23 +1288,19 @@ export default function CoachSettingsTab() {
 
                 <View style={{ flexDirection: "row", gap: 8 }}>
                   <View style={{ flex: 1 }}>
-                    <Text style={[styles.label, { marginTop: 8 }]}>Start date (YYYY-MM-DD)</Text>
-                    <TextInput
+                    <DateField
+                      label="Start date"
                       value={seasonStartDateText}
                       onChangeText={setSeasonStartDateText}
-                      placeholder="2026-06-01"
-                      style={styles.input}
-                      autoCapitalize="none"
+                      style={{ marginTop: 8 }}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={[styles.label, { marginTop: 8 }]}>End date (YYYY-MM-DD)</Text>
-                    <TextInput
+                    <DateField
+                      label="End date"
                       value={seasonEndDateText}
                       onChangeText={setSeasonEndDateText}
-                      placeholder="2026-08-31"
-                      style={styles.input}
-                      autoCapitalize="none"
+                      style={{ marginTop: 8 }}
                     />
                   </View>
                 </View>
