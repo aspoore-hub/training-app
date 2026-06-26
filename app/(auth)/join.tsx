@@ -1,13 +1,13 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Pressable, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, Image, Pressable, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   acceptInvite,
-  getAthleteInvitePreview,
+  getTeamInvitePreview,
   getMyClaimedAthleteProfileId,
   type AcceptInviteResult,
-  type AthleteInvitePreview,
+  type TeamInvitePreview,
 } from "../../lib/team";
 import { bootstrapTeamSyncOnce } from "../../lib/bootstrapTeamSync";
 import {
@@ -16,6 +16,7 @@ import {
 } from "../../lib/accountContexts";
 import { switchAccountContext } from "../../lib/accountContextSwitch";
 import { supabase } from "../../lib/supabase";
+import { useIsCoachMobileView } from "../../lib/useCoachMobileView";
 
 const SELECTED_ATHLETE_KEY = "training_app_selected_athlete_v1";
 const PENDING_INVITE_TOKEN_KEY = "training_app_pending_invite_token_v1";
@@ -39,7 +40,7 @@ function normalizeEmail(value: string | null | undefined) {
   return String(value ?? "").trim().toLowerCase();
 }
 
-function friendlyInviteError(preview: AthleteInvitePreview | null, fallback?: string) {
+function friendlyInviteError(preview: TeamInvitePreview | null, fallback?: string) {
   if (!preview) return fallback || "Could not load this invite.";
   if (preview.status === "expired") return "This invite has expired. Ask your coach for a new invite.";
   if (preview.status === "accepted") return "This invite has already been accepted. Contact your coach for a new invite.";
@@ -78,11 +79,12 @@ function friendlyClaimError(error: any) {
 
 export default function Join() {
   const router = useRouter();
+  const isCoachMobileView = useIsCoachMobileView();
   const params = useLocalSearchParams<{ token?: string | string[] }>();
   const urlToken = useMemo(() => String(firstString(params.token) ?? "").trim(), [params.token]);
 
   const [token, setToken] = useState(urlToken);
-  const [preview, setPreview] = useState<AthleteInvitePreview | null>(null);
+  const [preview, setPreview] = useState<TeamInvitePreview | null>(null);
   const [sessionUser, setSessionUser] = useState<SessionUser>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -103,7 +105,7 @@ export default function Join() {
       ? "blocked"
       : busy && message === "Accepting invite..."
         ? "claiming"
-        : message === "Invite accepted. Opening your athlete dashboard..."
+        : message?.startsWith("Invite accepted.")
           ? "claimed_success"
           : emailMismatch
             ? "wrong_account"
@@ -142,7 +144,7 @@ export default function Join() {
           return;
         }
 
-        const nextPreview = await getAthleteInvitePreview(resolvedToken);
+        const nextPreview = await getTeamInvitePreview(resolvedToken);
         if (cancelled) return;
         setPreview(nextPreview);
         if (nextPreview.email) setEmail(nextPreview.email);
@@ -171,13 +173,15 @@ export default function Join() {
     }
 
     const acceptedRole = typeof result === "object" ? String(result.role ?? "").trim().toLowerCase() : "";
-    if (acceptedRole === "editor" || acceptedRole === "viewer" || acceptedRole === "coach") {
+    if (acceptedRole === "editor" || acceptedRole === "viewer" || acceptedRole === "coach" || acceptedRole === "owner") {
       const contexts = await listAccountContextsForCurrentUser();
       const acceptedContext =
         contexts.find((context) => context.kind === "coach" && context.teamId === teamId) ??
         contexts.find((context) => context.kind === "coach");
       if (acceptedContext) {
-        const route = await switchAccountContext(acceptedContext);
+        const route = await switchAccountContext(acceptedContext, {
+          coachDefault: isCoachMobileView ? "home" : "calendar",
+        });
         await bootstrapTeamSyncOnce();
         router.replace(route);
         return;
@@ -238,7 +242,14 @@ export default function Join() {
       }
 
       const result = await acceptInvite(token);
-      setMessage("Invite accepted. Opening your athlete dashboard...");
+      const acceptedRole = typeof result === "object" ? String(result.role ?? "").trim().toLowerCase() : "";
+      const acceptedStaffInvite =
+        acceptedRole === "editor" || acceptedRole === "viewer" || acceptedRole === "coach" || acceptedRole === "owner";
+      setMessage(
+        acceptedStaffInvite
+          ? "Invite accepted. Opening your coach workspace..."
+          : "Invite accepted. Opening your athlete dashboard..."
+      );
       await AsyncStorage.removeItem(PENDING_INVITE_TOKEN_KEY).catch(() => {});
       await new Promise((resolve) => setTimeout(resolve, 700));
       await routeAfterClaim(result);
@@ -354,6 +365,9 @@ export default function Join() {
 
   const teamLabel = preview?.team_name?.trim() || "your team";
   const athleteLabel = preview?.athlete_name?.trim() || "your athlete profile";
+  const isStaffInvite = preview?.invite_kind === "staff";
+  const staffRoleLabel = preview?.staff_role === "viewer" ? "Viewer" : "Editor";
+  const inviteSubjectLabel = isStaffInvite ? `${staffRoleLabel} staff access` : athleteLabel;
 
   if (loading) {
     return (
@@ -369,16 +383,23 @@ export default function Join() {
       <Text style={{ fontSize: 26, fontWeight: "600" }}>Accept Invite</Text>
       <Text style={{ fontSize: 16, opacity: 0.7 }}>
         {preview?.ok
-          ? `Join ${teamLabel} as ${athleteLabel}.`
+          ? `Join ${teamLabel} as ${inviteSubjectLabel}.`
           : "We couldn't open this invite."}
       </Text>
 
       {preview ? (
         <View style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 12, padding: 12, gap: 6 }}>
+          {preview.team_logo_url ? (
+            <Image
+              source={{ uri: preview.team_logo_url }}
+              style={{ width: 56, height: 56, borderRadius: 12, marginBottom: 4 }}
+              resizeMode="cover"
+            />
+          ) : null}
           <Text style={{ fontSize: 14, opacity: 0.7 }}>Team</Text>
           <Text style={{ fontSize: 16, fontWeight: "600" }}>{teamLabel}</Text>
-          <Text style={{ fontSize: 14, opacity: 0.7 }}>Athlete</Text>
-          <Text style={{ fontSize: 16, fontWeight: "600" }}>{athleteLabel}</Text>
+          <Text style={{ fontSize: 14, opacity: 0.7 }}>{isStaffInvite ? "Staff role" : "Athlete"}</Text>
+          <Text style={{ fontSize: 16, fontWeight: "600" }}>{isStaffInvite ? staffRoleLabel : athleteLabel}</Text>
           <Text style={{ fontSize: 14, opacity: 0.7 }}>Invited email</Text>
           <Text style={{ fontSize: 16, fontWeight: "600" }}>{preview.email || "Not provided"}</Text>
         </View>

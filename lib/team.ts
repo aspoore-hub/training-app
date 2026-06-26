@@ -302,22 +302,38 @@ export type AthleteInvitePreviewStatus = "valid" | "invalid" | "expired" | "acce
 export type AthleteInvitePreview = {
   ok: boolean;
   status: AthleteInvitePreviewStatus;
+  invite_kind?: "athlete" | "staff" | null;
   email: string | null;
   team_name: string | null;
+  team_logo_url?: string | null;
   athlete_name: string | null;
+  staff_role?: CoachInviteRole | null;
   expires_at: string | null;
   accepted_at: string | null;
   message?: string;
   error?: string;
 };
 
-function normalizeInvitePreview(data: any): AthleteInvitePreview {
+export type TeamInvitePreview = AthleteInvitePreview & {
+  invite_kind: "athlete" | "staff" | null;
+  team_logo_url: string | null;
+  staff_role: CoachInviteRole | null;
+};
+
+function normalizeInvitePreview(data: any): TeamInvitePreview {
+  const rawStaffRole = String(data?.staff_role ?? "").trim().toLowerCase();
   return {
     ok: data?.ok === true,
     status: String(data?.status ?? "invalid") as AthleteInvitePreviewStatus,
+    invite_kind:
+      data?.invite_kind === "staff" || data?.invite_kind === "athlete"
+        ? data.invite_kind
+        : null,
     email: data?.email == null ? null : String(data.email),
     team_name: data?.team_name == null ? null : String(data.team_name),
+    team_logo_url: data?.team_logo_url == null ? null : String(data.team_logo_url),
     athlete_name: data?.athlete_name == null ? null : String(data.athlete_name),
+    staff_role: rawStaffRole === "viewer" ? "viewer" : rawStaffRole === "editor" ? "editor" : null,
     expires_at: data?.expires_at == null ? null : String(data.expires_at),
     accepted_at: data?.accepted_at == null ? null : String(data.accepted_at),
     message: data?.message == null ? undefined : String(data.message),
@@ -341,6 +357,31 @@ export async function getAthleteInvitePreview(token: string): Promise<AthleteInv
   }
 
   const { data, error } = await supabase.functions.invoke("get-athlete-invite", {
+    body: { token: cleanToken },
+  });
+  if (error) throw error;
+  return normalizeInvitePreview(data);
+}
+
+export async function getTeamInvitePreview(token: string): Promise<TeamInvitePreview> {
+  const cleanToken = String(token ?? "").trim();
+  if (!cleanToken) {
+    return {
+      ok: false,
+      status: "invalid",
+      invite_kind: null,
+      email: null,
+      team_name: null,
+      team_logo_url: null,
+      athlete_name: null,
+      staff_role: null,
+      expires_at: null,
+      accepted_at: null,
+      error: "Missing invite token.",
+    };
+  }
+
+  const { data, error } = await supabase.functions.invoke("get-team-invite", {
     body: { token: cleanToken },
   });
   if (error) throw error;
@@ -405,6 +446,7 @@ export type TeamCoachInvite = {
   role: CoachInviteRole;
   expires_at: string | null;
   created_at: string | null;
+  accepted_at: string | null;
 };
 
 export type TeamStaffMember = {
@@ -439,11 +481,34 @@ export async function createCoachInvite(email: string, role: CoachInviteRole, da
       expires_at: expires,
       created_by: userId,
     })
-    .select("token")
+    .select("id,token")
     .single();
 
   if (error) throw error;
-  return data.token as string;
+  return {
+    id: String(data.id ?? ""),
+    token: String(data.token ?? ""),
+  } satisfies TeamInviteCreateResult;
+}
+
+export type SendCoachInviteEmailResult = SendAthleteInviteEmailResult;
+
+export async function sendCoachInviteEmail(inviteId: string): Promise<SendCoachInviteEmailResult> {
+  const cleanInviteId = String(inviteId ?? "").trim();
+  if (!cleanInviteId) throw new Error("Missing invite id.");
+
+  const { data, error } = await supabase.functions.invoke("send-coach-invite", {
+    body: { invite_id: cleanInviteId },
+  });
+  if (error) throw error;
+
+  const result = (data ?? {}) as Record<string, unknown>;
+  return {
+    ok: result.ok === true,
+    invite_url: result.invite_url == null ? undefined : String(result.invite_url),
+    message: result.message == null ? undefined : String(result.message),
+    error: result.error == null ? undefined : String(result.error),
+  };
 }
 
 export async function listTeamStaffMembers(): Promise<TeamStaffMember[]> {
@@ -487,7 +552,7 @@ export async function listCoachInvites(): Promise<TeamCoachInvite[]> {
 
   const { data, error } = await supabase
     .from("team_invites")
-    .select("token,email,role,expires_at,created_at")
+    .select("token,email,role,expires_at,created_at,accepted_at")
     .eq("team_id", teamId)
     .in("role", ["editor", "viewer"])
     .order("created_at", { ascending: false });
@@ -498,6 +563,7 @@ export async function listCoachInvites(): Promise<TeamCoachInvite[]> {
     role: normalizeTeamRole(row.role as string | null) === "viewer" ? "viewer" : "editor",
     expires_at: row.expires_at == null ? null : String(row.expires_at),
     created_at: row.created_at == null ? null : String(row.created_at),
+    accepted_at: row.accepted_at == null ? null : String(row.accepted_at),
   }));
 }
 

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Image, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import * as Clipboard from "expo-clipboard";
 import { useFocusEffect, useRouter } from "expo-router";
 import { DateField } from "../../../components/ui/DateField";
 import { TeamLogoCropper } from "../../../components/branding/TeamLogoCropper";
@@ -9,6 +10,7 @@ import {
   listCoachInvites,
   listTeamStaffMembers,
   removeTeamStaffMember,
+  sendCoachInviteEmail,
   updateTeamStaffRole,
   type CoachInviteRole,
   type TeamCoachInvite,
@@ -117,6 +119,21 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function buildCoachInviteUrl(token: string) {
+  const cleanToken = String(token ?? "").trim();
+  const origin =
+    Platform.OS === "web" && typeof window !== "undefined"
+      ? window.location.origin
+      : "https://www.tracksidecoach.com";
+  return `${origin}/join?token=${encodeURIComponent(cleanToken)}`;
+}
+
+function coachInviteStatus(invite: TeamCoachInvite) {
+  if (invite.accepted_at) return "Accepted";
+  if (invite.expires_at && Date.parse(invite.expires_at) <= Date.now()) return "Expired";
+  return "Pending";
+}
+
 function convertWorkoutDistances(rawWorkouts: any[], from: DistanceUnit, to: DistanceUnit): any[] {
   return (rawWorkouts ?? []).map((w: any) => {
     const next: any = { ...w };
@@ -146,7 +163,7 @@ export default function CoachSettingsTab() {
   const [coachInviteRole, setCoachInviteRole] = useState<CoachInviteRole>("viewer");
   const [staffBusy, setStaffBusy] = useState(false);
   const [staffStatus, setStaffStatus] = useState<string | null>(null);
-  const [lastCoachInviteToken, setLastCoachInviteToken] = useState("");
+  const [lastCoachInviteUrl, setLastCoachInviteUrl] = useState("");
   const [teamBranding, setTeamBranding] = useState<TeamBranding | null>(null);
   const [teamNameText, setTeamNameText] = useState("");
   const [brandingBusy, setBrandingBusy] = useState(false);
@@ -747,12 +764,28 @@ export default function CoachSettingsTab() {
     setStaffBusy(true);
     setStaffStatus(null);
     try {
-      const token = await createCoachInvite(cleanEmail, coachInviteRole);
-      setLastCoachInviteToken(token);
+      const invite = await createCoachInvite(cleanEmail, coachInviteRole);
+      const inviteUrl = buildCoachInviteUrl(invite.token);
+      await Clipboard.setStringAsync(inviteUrl);
+      setLastCoachInviteUrl(inviteUrl);
       setCoachInviteEmail("");
-      setStaffStatus(`Invite created for ${cleanEmail}. Share the token with that coach.`);
+
+      try {
+        const emailResult = await sendCoachInviteEmail(invite.id);
+        const copyableUrl = emailResult.invite_url || inviteUrl;
+        await Clipboard.setStringAsync(copyableUrl);
+        setLastCoachInviteUrl(copyableUrl);
+        setStaffStatus(`Invite email sent to ${cleanEmail}. Invite link copied as backup.`);
+        Alert.alert("Invite email sent", "Invite email sent. The invite link was copied as a manual backup.");
+      } catch (emailError: any) {
+        setStaffStatus(`Invite link created, but email failed to send. Copy and send manually: ${inviteUrl}`);
+        Alert.alert(
+          "Invite link created",
+          `Invite link created, but email failed to send.\n\nThe invite link was copied so you can send it manually:\n${inviteUrl}`
+        );
+      }
+
       await loadStaffAccess();
-      Alert.alert("Coach invite created", "Share the invite token with the coach.");
     } catch (error: any) {
       const message = getErrorMessage(error);
       setStaffStatus(message);
@@ -1277,13 +1310,13 @@ export default function CoachSettingsTab() {
                 onPress={inviteCoachAccount}
                 style={[styles.saveBtn, staffBusy && styles.disabledBtn]}
               >
-                <Text style={styles.saveBtnText}>{staffBusy ? "Working..." : "Create Coach Invite"}</Text>
+                <Text style={styles.saveBtnText}>{staffBusy ? "Sending..." : "Send Invite"}</Text>
               </Pressable>
 
-              {lastCoachInviteToken ? (
+              {lastCoachInviteUrl ? (
                 <View style={styles.inviteTokenBox}>
-                  <Text style={styles.label}>Latest invite token</Text>
-                  <Text selectable style={styles.inviteTokenText}>{lastCoachInviteToken}</Text>
+                  <Text style={styles.label}>Latest invite link</Text>
+                  <Text selectable style={styles.inviteTokenText}>{lastCoachInviteUrl}</Text>
                 </View>
               ) : null}
             </View>
@@ -1345,18 +1378,34 @@ export default function CoachSettingsTab() {
               {coachInvites.length === 0 ? (
                 <Text style={styles.cardHint}>No coach invites yet.</Text>
               ) : (
-                coachInvites.slice(0, 6).map((invite) => (
-                  <View key={invite.token} style={styles.inviteRow}>
-                    <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text style={styles.staffName} numberOfLines={1}>{invite.email || "Coach invite"}</Text>
-                      <Text style={styles.groupMeta}>
-                        {invite.role === "viewer" ? "Viewer" : "Editor"}
-                        {invite.expires_at ? ` • expires ${invite.expires_at.slice(0, 10)}` : ""}
-                      </Text>
+                coachInvites.slice(0, 6).map((invite) => {
+                  const status = coachInviteStatus(invite);
+                  const inviteUrl = buildCoachInviteUrl(invite.token);
+                  return (
+                    <View key={invite.token} style={styles.inviteRow}>
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.staffName} numberOfLines={1}>{invite.email || "Coach invite"}</Text>
+                        <Text style={styles.groupMeta}>
+                          {invite.role === "viewer" ? "Viewer" : "Editor"}
+                          {` • ${status}`}
+                          {invite.created_at ? ` • created ${invite.created_at.slice(0, 10)}` : ""}
+                          {invite.expires_at && status !== "Accepted" ? ` • expires ${invite.expires_at.slice(0, 10)}` : ""}
+                        </Text>
+                      </View>
+                      <Pressable
+                        disabled={staffBusy}
+                        onPress={async () => {
+                          await Clipboard.setStringAsync(inviteUrl);
+                          setLastCoachInviteUrl(inviteUrl);
+                          setStaffStatus("Invite link copied.");
+                        }}
+                        style={[styles.staffMiniBtn, staffBusy && styles.disabledBtn]}
+                      >
+                        <Text style={styles.staffMiniBtnText}>Copy Link</Text>
+                      </Pressable>
                     </View>
-                    <Text selectable style={styles.inviteTokenInline}>{invite.token}</Text>
-                  </View>
-                ))
+                  );
+                })
               )}
             </View>
           ) : null}
