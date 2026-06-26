@@ -135,6 +135,81 @@ export function getRoutineTitles(ids: unknown, routineById: Map<string, Auxiliar
   );
 }
 
+export function moveArrayItem<T>(items: T[], fromIndex: number, toIndex: number): T[] {
+  if (!Array.isArray(items)) return [];
+  if (fromIndex < 0 || fromIndex >= items.length || toIndex < 0 || toIndex >= items.length || fromIndex === toIndex) {
+    return [...items];
+  }
+  const next = [...items];
+  const [moved] = next.splice(fromIndex, 1);
+  if (moved === undefined) return next;
+  next.splice(toIndex, 0, moved);
+  return next;
+}
+
+export function getRoutineTitleById(id: unknown, routineById: Map<string, AuxiliaryRoutine>): string {
+  const routineId = cleanDisplayText(id);
+  if (!routineId) return "";
+  return cleanDisplayText(routineById.get(routineId)?.title) || "Routine unavailable";
+}
+
+export type WorkoutFlowSection = {
+  key: string;
+  phase: "before" | "main" | "after";
+  label: string;
+  title: string;
+  text?: string;
+  routineId?: string;
+};
+
+function normalizeRoutineIdList(ids: unknown): string[] {
+  if (!Array.isArray(ids)) return [];
+  return ids.map((id) => cleanDisplayText(id)).filter(Boolean);
+}
+
+export function buildWorkoutFlowSections({
+  preRoutineIds,
+  postRoutineIds,
+  routineById,
+  mainWorkText,
+}: {
+  preRoutineIds: unknown;
+  postRoutineIds: unknown;
+  routineById: Map<string, AuxiliaryRoutine>;
+  mainWorkText?: unknown;
+}): WorkoutFlowSection[] {
+  const sections: WorkoutFlowSection[] = [];
+  normalizeRoutineIdList(preRoutineIds).forEach((routineId, index) => {
+    sections.push({
+      key: `before-${routineId}-${index}`,
+      phase: "before",
+      label: "Before Main Work",
+      title: getRoutineTitleById(routineId, routineById),
+      routineId,
+    });
+  });
+
+  const mainText = cleanDisplayText(mainWorkText);
+  sections.push({
+    key: "main-work",
+    phase: "main",
+    label: "Main Work",
+    title: mainText || "Main work",
+    text: mainText,
+  });
+
+  normalizeRoutineIdList(postRoutineIds).forEach((routineId, index) => {
+    sections.push({
+      key: `after-${routineId}-${index}`,
+      phase: "after",
+      label: "After Main Work",
+      title: getRoutineTitleById(routineId, routineById),
+      routineId,
+    });
+  });
+  return sections;
+}
+
 export function formatPrescribedLabel(value?: MileageValue | string | null): string {
   const raw = typeof value === "string" ? cleanDisplayText(value) : formatMileage(value ?? undefined);
   if (!raw) return "";

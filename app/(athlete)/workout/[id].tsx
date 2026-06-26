@@ -55,6 +55,7 @@ import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../
 import type { WorkoutCategory } from "../../../lib/types";
 import {
   buildBatchNotesByWorkoutId,
+  buildWorkoutFlowSections,
   cleanDisplayText,
   formatPlannedDistanceLabel,
   formatPrescribedLabel,
@@ -559,6 +560,12 @@ export default function AthleteWorkoutDetail() {
   const individualDetails = cleanDisplayText(workout?.details);
   const batchDetails = cleanDisplayText(batchHeaderNotes);
   const showIndividualDetails = Boolean(individualDetails && individualDetails !== batchDetails);
+  const workoutFlowSections = buildWorkoutFlowSections({
+    preRoutineIds: workout?.preRoutineIds ?? [],
+    postRoutineIds: workout?.postRoutineIds ?? [],
+    routineById,
+    mainWorkText: batchDetails || individualDetails,
+  });
   const prescribedPrefix = prescribedLabel.toLowerCase().includes("xt") ? "Cross training" : "Prescribed mileage";
 
   return (
@@ -617,78 +624,51 @@ export default function AthleteWorkoutDetail() {
           </View>
         ) : null}
 
-        <View style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 16, backgroundColor: "#ffffff", padding: 12 }}>
-          <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.6, color: "#64748b" }}>DETAILS</Text>
-          {batchDetails ? (
-            <>
-              <Text style={{ marginTop: 8, fontWeight: "900", color: "#0f172a" }}>Workout details</Text>
-              <Text style={{ marginTop: 4, color: "#111827", lineHeight: 20 }}>{batchDetails}</Text>
-            </>
-          ) : null}
-          {showIndividualDetails ? (
-            <>
-              <Text style={{ marginTop: 10, fontWeight: "900", color: "#0f172a" }}>Individual details</Text>
-              <Text style={{ marginTop: 4, color: "#111827", lineHeight: 20 }}>{individualDetails}</Text>
-            </>
-          ) : null}
-          {!batchDetails && !showIndividualDetails ? (
-            <Text style={{ marginTop: 8, color: "#64748b", fontWeight: "700" }}>No additional workout details.</Text>
-          ) : null}
+        <View style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 16, backgroundColor: "#ffffff", padding: 12, gap: 10 }}>
+          <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.6, color: "#64748b" }}>WORKOUT FLOW</Text>
+          {workoutFlowSections.map((section, index) => {
+            const routine = section.routineId ? routineById.get(section.routineId) ?? null : null;
+            if (section.phase === "main") {
+              return (
+                <View key={section.key} style={{ borderTopWidth: index === 0 ? 0 : 1, borderTopColor: "#f1f5f9", paddingTop: index === 0 ? 0 : 8, gap: 5 }}>
+                  <Text style={{ fontWeight: "900", color: "#0f172a" }}>{index + 1}. Main Work</Text>
+                  {batchDetails ? <Text style={{ color: "#111827", lineHeight: 20 }}>{batchDetails}</Text> : null}
+                  {showIndividualDetails ? (
+                    <Text style={{ color: "#475569", fontWeight: "700", lineHeight: 19 }}>Individual: {individualDetails}</Text>
+                  ) : null}
+                  {!batchDetails && !showIndividualDetails ? (
+                    <Text style={{ color: "#64748b", fontWeight: "700" }}>Main work</Text>
+                  ) : null}
+                </View>
+              );
+            }
+            const canShowDetails = !!routine && routineHasDisplayDetails(routine);
+            return (
+              <View key={section.key} style={{ borderTopWidth: index === 0 ? 0 : 1, borderTopColor: "#f1f5f9", paddingTop: index === 0 ? 0 : 8 }}>
+                <Pressable
+                  onPress={() => {
+                    if (!routine || !canShowDetails) return;
+                    setExpandedRoutineIds((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(routine.id)) next.delete(routine.id);
+                      else next.add(routine.id);
+                      return next;
+                    });
+                  }}
+                >
+                  <Text style={{ fontWeight: "900", color: "#0f172a" }}>
+                    {index + 1}. {section.label}: {section.title}{canShowDetails ? expandedRoutineIds.has(routine?.id ?? "") ? " • Hide details" : " • Show details" : ""}
+                  </Text>
+                </Pressable>
+                {routine && expandedRoutineIds.has(routine.id) ? (
+                  <View style={{ marginTop: 6 }}>
+                    <AthleteRoutineDetails routine={routine} drillById={drillById} />
+                  </View>
+                ) : null}
+              </View>
+            );
+          })}
         </View>
-
-        {preRoutines.length > 0 || postRoutines.length > 0 ? (
-          <View style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 16, backgroundColor: "#ffffff", padding: 12, gap: 10 }}>
-            <Text style={{ fontSize: 12, fontWeight: "900", letterSpacing: 0.6, color: "#64748b" }}>ROUTINES</Text>
-            {preRoutines.map((routine) => (
-              <View key={`pre-${routine.id}`} style={{ borderTopWidth: 1, borderTopColor: "#f1f5f9", paddingTop: 8 }}>
-                <Pressable
-                  onPress={() => {
-                    if (!routineHasDisplayDetails(routine)) return;
-                    setExpandedRoutineIds((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(routine.id)) next.delete(routine.id);
-                      else next.add(routine.id);
-                      return next;
-                    });
-                  }}
-                >
-                  <Text style={{ fontWeight: "900", color: "#0f172a" }}>
-                    Pre-run: {routine.title}{routineHasDisplayDetails(routine) ? expandedRoutineIds.has(routine.id) ? " • Hide details" : " • Show details" : ""}
-                  </Text>
-                </Pressable>
-                {expandedRoutineIds.has(routine.id) ? (
-                  <View style={{ marginTop: 6 }}>
-                    <AthleteRoutineDetails routine={routine} drillById={drillById} />
-                  </View>
-                ) : null}
-              </View>
-            ))}
-            {postRoutines.map((routine) => (
-              <View key={`post-${routine.id}`} style={{ borderTopWidth: 1, borderTopColor: "#f1f5f9", paddingTop: 8 }}>
-                <Pressable
-                  onPress={() => {
-                    if (!routineHasDisplayDetails(routine)) return;
-                    setExpandedRoutineIds((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(routine.id)) next.delete(routine.id);
-                      else next.add(routine.id);
-                      return next;
-                    });
-                  }}
-                >
-                  <Text style={{ fontWeight: "900", color: "#0f172a" }}>
-                    Post-run: {routine.title}{routineHasDisplayDetails(routine) ? expandedRoutineIds.has(routine.id) ? " • Hide details" : " • Show details" : ""}
-                  </Text>
-                </Pressable>
-                {expandedRoutineIds.has(routine.id) ? (
-                  <View style={{ marginTop: 6 }}>
-                    <AthleteRoutineDetails routine={routine} drillById={drillById} />
-                  </View>
-                ) : null}
-              </View>
-            ))}
-          </View>
-        ) : null}
 
         {showRoutineLinkDebug ? (
           <View style={{ borderWidth: 1, borderColor: "#f59e0b", borderRadius: 12, backgroundColor: "#fffbeb", padding: 10, gap: 8 }}>

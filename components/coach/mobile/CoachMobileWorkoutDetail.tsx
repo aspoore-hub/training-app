@@ -184,27 +184,6 @@ export function CoachMobileWorkoutDetail({
               </View>
             </View>
 
-            {item.batchDetails ? (
-              <Section title="Workout notes">
-                <View style={{ borderWidth: 1, borderColor: "#dbe3ef", backgroundColor: "#fff", borderRadius: 14, padding: 12 }}>
-                  <LinkifiedText text={item.batchDetails} style={{ color: "#111827", lineHeight: 20 }} />
-                </View>
-              </Section>
-            ) : null}
-
-            {item.individualDetails.length > 0 ? (
-              <Section title="Individual athlete notes">
-                <View style={{ gap: 8 }}>
-                  {item.individualDetails.map((entry) => (
-                    <View key={entry.workoutId} style={{ borderWidth: 1, borderColor: "#e2e8f0", backgroundColor: "#fff", borderRadius: 12, padding: 10, gap: 4 }}>
-                      <Text style={{ color: "#0f172a", fontWeight: "900" }}>{entry.athleteName}</Text>
-                      <LinkifiedText text={entry.details} style={{ color: "#475569", lineHeight: 19 }} />
-                    </View>
-                  ))}
-                </View>
-              </Section>
-            ) : null}
-
             <Section title={`Athletes (${item.athleteCount})`}>
               <View style={{ borderWidth: 1, borderColor: "#dbe3ef", backgroundColor: "#fff", borderRadius: 14, padding: 12 }}>
                 <Text style={{ color: "#334155", lineHeight: 20, fontWeight: "700" }}>{item.athleteNames.join(", ") || "No athletes"}</Text>
@@ -217,8 +196,31 @@ export function CoachMobileWorkoutDetail({
               </View>
             ) : null}
 
-            <RoutineSection title="Pre-routines" ids={item.preRoutineIds} routineById={routineById} drillById={drillById} />
-            <RoutineSection title="Post-routines" ids={item.postRoutineIds} routineById={routineById} drillById={drillById} />
+            <RoutineSection title="Before Main Work" ids={item.preRoutineIds} routineById={routineById} drillById={drillById} />
+            <Section title="Main Work">
+              <View style={{ borderWidth: 1, borderColor: "#dbe3ef", backgroundColor: "#fff", borderRadius: 14, padding: 12, gap: 10 }}>
+                {item.batchDetails ? (
+                  <View style={{ gap: 4 }}>
+                    <Text style={{ color: "#0f172a", fontWeight: "900" }}>Workout notes</Text>
+                    <LinkifiedText text={item.batchDetails} style={{ color: "#111827", lineHeight: 20 }} />
+                  </View>
+                ) : (
+                  <Text style={{ color: "#64748b", fontWeight: "700" }}>Main work</Text>
+                )}
+                {item.individualDetails.length > 0 ? (
+                  <View style={{ gap: 8 }}>
+                    <Text style={{ color: "#0f172a", fontWeight: "900" }}>Individual athlete notes</Text>
+                    {item.individualDetails.map((entry) => (
+                      <View key={entry.workoutId} style={{ borderTopWidth: 1, borderTopColor: "#f1f5f9", paddingTop: 8, gap: 4 }}>
+                        <Text style={{ color: "#0f172a", fontWeight: "900" }}>{entry.athleteName}</Text>
+                        <LinkifiedText text={entry.details} style={{ color: "#475569", lineHeight: 19 }} />
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            </Section>
+            <RoutineSection title="After Main Work" ids={item.postRoutineIds} routineById={routineById} drillById={drillById} />
           </ScrollView>
         </View>
       ) : null}

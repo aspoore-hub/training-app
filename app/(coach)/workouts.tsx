@@ -49,6 +49,7 @@ import {
   updateTeamWorkoutById,
 } from "../../lib/teamWorkoutsCloud";
 import { useAppRuntime } from "../../lib/appState";
+import { buildWorkoutFlowSections, moveArrayItem } from "../../lib/athleteWorkoutDisplay";
 import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../lib/teamDataStore";
 import type { WorkoutCategory } from "../../lib/types";
 import { canEditTraining, getCurrentTeamRole, type TeamRole } from "../../lib/teamPermissions";
@@ -5157,6 +5158,7 @@ export default function CoachWorkoutsDay() {
                 .map((r) => ({ id: String(r.id), title: String(r.title ?? "") }))
                 .filter((r) => r.id && r.title)
                 .filter((r) => r.title.toLowerCase().includes(String(batchPickerQuery ?? "").trim().toLowerCase()));
+              const routineByIdForBatch = new Map(auxiliaryRoutines.map((routine) => [String(routine.id), routine] as const));
 
               const applyBatchRoutineSlots = (field: "pre" | "post", nextIds: string[]) => {
                 const parsed = parseBatchKey(batchRow.key);
@@ -5185,6 +5187,21 @@ export default function CoachWorkoutsDay() {
                 );
                 scheduleBatchRoutineSave(batchRow.key, field, cleaned);
               };
+              const updateBatchRoutineSlots = (field: "pre" | "post", nextSlots: string[]) => {
+                const normalized = nextSlots.map((id) => String(id ?? "").trim());
+                if (field === "pre") {
+                  setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: normalized }));
+                } else {
+                  setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: normalized }));
+                }
+                applyBatchRoutineSlots(field, normalized);
+              };
+              const workoutFlowSections = buildWorkoutFlowSections({
+                preRoutineIds: preSlots.filter(Boolean),
+                postRoutineIds: postSlots.filter(Boolean),
+                routineById: routineByIdForBatch,
+                mainWorkText: batchDraft.details,
+              });
 
               const athletePickerOpen = openAthletePickerBatchKey === batchRow.key;
               const athleteSelectionSyncing = !!athleteSelectionSyncByBatchKey[batchRow.key];
@@ -5681,7 +5698,7 @@ export default function CoachWorkoutsDay() {
                           </View>
 
                           <View style={{ ...batchSheetCellBase, width: COL.category + 46, justifyContent: "flex-start", overflow: "visible", zIndex: 5, backgroundColor: BATCH_GROUP_SECONDARY_BG }}>
-                            <Text style={batchSheetLabelText}>Pre Workout</Text>
+                            <Text style={batchSheetLabelText}>Before Main Work</Text>
                             <View style={{ gap: 4 }}>
                               {preSlots.map((slotValue, slotIndex) => {
                                 const routineTitle = auxiliaryRoutines.find((r) => String(r.id) === slotValue)?.title ?? "";
@@ -5718,11 +5735,24 @@ export default function CoachWorkoutsDay() {
                                       </Text>
                                       <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
                                     </Pressable>
+                                    <Pressable
+                                      onPress={() => updateBatchRoutineSlots("pre", moveArrayItem(preSlots, slotIndex, slotIndex - 1))}
+                                      style={{ width: 22, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 ? 0.35 : 1, backgroundColor: "#fff" }}
+                                      disabled={slotIndex === 0}
+                                    >
+                                      <Text style={{ fontSize: 12, fontWeight: "900", color: "#334155" }}>↑</Text>
+                                    </Pressable>
+                                    <Pressable
+                                      onPress={() => updateBatchRoutineSlots("pre", moveArrayItem(preSlots, slotIndex, slotIndex + 1))}
+                                      style={{ width: 22, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex >= preSlots.length - 1 ? 0.35 : 1, backgroundColor: "#fff" }}
+                                      disabled={slotIndex >= preSlots.length - 1}
+                                    >
+                                      <Text style={{ fontSize: 12, fontWeight: "900", color: "#334155" }}>↓</Text>
+                                    </Pressable>
 	                                    <Pressable
 	                                      onPress={() => {
 	                                        const next = preSlots.filter((_, idx) => idx !== slotIndex);
-	                                        setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: next }));
-	                                        applyBatchRoutineSlots("pre", next);
+	                                        updateBatchRoutineSlots("pre", next);
 	                                      }}
 	                                      style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && preSlots.length <= 1 && !slotValue ? 0.4 : 1, backgroundColor: "#fff" }}
 	                                      disabled={slotIndex === 0 && preSlots.length <= 1 && !slotValue}
@@ -5739,7 +5769,7 @@ export default function CoachWorkoutsDay() {
                                     {openBatchPicker?.batchKey === batchRow.key &&
                                     openBatchPicker.field === "pre" &&
                                     openBatchPicker.slotIndex === slotIndex ? (
-                                      <View style={{ position: "absolute", top: 34, left: 0, right: 58, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
+                                      <View style={{ position: "absolute", top: 34, left: 0, right: 110, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
 	                                        <TextInput value={batchPickerQuery} onChangeText={setBatchPickerQuery} placeholder="Search..." style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }} />
 	                                        <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
 	                                          <Pressable
@@ -5748,8 +5778,7 @@ export default function CoachWorkoutsDay() {
 	                                              const next = [...preSlots];
 	                                              next[slotIndex] = "";
 	                                              const cleaned = next.filter(Boolean);
-	                                              setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: cleaned }));
-	                                              applyBatchRoutineSlots("pre", cleaned);
+	                                              updateBatchRoutineSlots("pre", cleaned);
 	                                              setOpenBatchPicker(null);
 	                                            }}
 	                                            style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7", backgroundColor: "#f8fafc" }}
@@ -5764,8 +5793,7 @@ export default function CoachWorkoutsDay() {
                                                 if (next.includes(routine.id) && next[slotIndex] !== routine.id) return;
                                                 next[slotIndex] = routine.id;
                                                 const cleaned = next.filter(Boolean);
-                                                setBatchPreRoutineSlots((prev) => ({ ...prev, [batchRow.key]: cleaned }));
-                                                applyBatchRoutineSlots("pre", cleaned);
+                                                updateBatchRoutineSlots("pre", cleaned);
                                                 setOpenBatchPicker(null);
                                               }}
                                               style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7" }}
@@ -5783,7 +5811,7 @@ export default function CoachWorkoutsDay() {
                           </View>
 
                           <View style={{ ...batchSheetCellBase, width: COL.category + 46, justifyContent: "flex-start", overflow: "visible", zIndex: 4, backgroundColor: BATCH_GROUP_SECONDARY_BG }}>
-                            <Text style={batchSheetLabelText}>Post Workout</Text>
+                            <Text style={batchSheetLabelText}>After Main Work</Text>
                             <View style={{ gap: 4 }}>
                               {postSlots.map((slotValue, slotIndex) => {
                                 const routineTitle = auxiliaryRoutines.find((r) => String(r.id) === slotValue)?.title ?? "";
@@ -5820,11 +5848,24 @@ export default function CoachWorkoutsDay() {
                                       </Text>
                                       <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>▾</Text>
                                     </Pressable>
+                                    <Pressable
+                                      onPress={() => updateBatchRoutineSlots("post", moveArrayItem(postSlots, slotIndex, slotIndex - 1))}
+                                      style={{ width: 22, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 ? 0.35 : 1, backgroundColor: "#fff" }}
+                                      disabled={slotIndex === 0}
+                                    >
+                                      <Text style={{ fontSize: 12, fontWeight: "900", color: "#334155" }}>↑</Text>
+                                    </Pressable>
+                                    <Pressable
+                                      onPress={() => updateBatchRoutineSlots("post", moveArrayItem(postSlots, slotIndex, slotIndex + 1))}
+                                      style={{ width: 22, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex >= postSlots.length - 1 ? 0.35 : 1, backgroundColor: "#fff" }}
+                                      disabled={slotIndex >= postSlots.length - 1}
+                                    >
+                                      <Text style={{ fontSize: 12, fontWeight: "900", color: "#334155" }}>↓</Text>
+                                    </Pressable>
 	                                    <Pressable
 	                                      onPress={() => {
 	                                        const next = postSlots.filter((_, idx) => idx !== slotIndex);
-	                                        setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: next }));
-	                                        applyBatchRoutineSlots("post", next);
+	                                        updateBatchRoutineSlots("post", next);
 	                                      }}
 	                                      style={{ width: 24, height: 24, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 3, alignItems: "center", justifyContent: "center", opacity: slotIndex === 0 && postSlots.length <= 1 && !slotValue ? 0.4 : 1, backgroundColor: "#fff" }}
 	                                      disabled={slotIndex === 0 && postSlots.length <= 1 && !slotValue}
@@ -5841,7 +5882,7 @@ export default function CoachWorkoutsDay() {
                                     {openBatchPicker?.batchKey === batchRow.key &&
                                     openBatchPicker.field === "post" &&
                                     openBatchPicker.slotIndex === slotIndex ? (
-                                      <View style={{ position: "absolute", top: 34, left: 0, right: 58, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
+                                      <View style={{ position: "absolute", top: 34, left: 0, right: 110, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff", zIndex: 80, ...(Platform.OS === "android" ? { elevation: 7 } : null) }}>
 	                                        <TextInput value={batchPickerQuery} onChangeText={setBatchPickerQuery} placeholder="Search..." style={{ borderBottomWidth: 1, borderBottomColor: "#edf2f7", paddingHorizontal: 8, paddingVertical: 6, fontSize: 12, fontWeight: "700" }} />
 	                                        <ScrollView style={{ maxHeight: 180 }} keyboardShouldPersistTaps="handled">
 	                                          <Pressable
@@ -5850,8 +5891,7 @@ export default function CoachWorkoutsDay() {
 	                                              const next = [...postSlots];
 	                                              next[slotIndex] = "";
 	                                              const cleaned = next.filter(Boolean);
-	                                              setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: cleaned }));
-	                                              applyBatchRoutineSlots("post", cleaned);
+	                                              updateBatchRoutineSlots("post", cleaned);
 	                                              setOpenBatchPicker(null);
 	                                            }}
 	                                            style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7", backgroundColor: "#f8fafc" }}
@@ -5866,8 +5906,7 @@ export default function CoachWorkoutsDay() {
                                                 if (next.includes(routine.id) && next[slotIndex] !== routine.id) return;
                                                 next[slotIndex] = routine.id;
                                                 const cleaned = next.filter(Boolean);
-                                                setBatchPostRoutineSlots((prev) => ({ ...prev, [batchRow.key]: cleaned }));
-                                                applyBatchRoutineSlots("post", cleaned);
+                                                updateBatchRoutineSlots("post", cleaned);
                                                 setOpenBatchPicker(null);
                                               }}
                                               style={{ paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#edf2f7" }}
@@ -5897,6 +5936,37 @@ export default function CoachWorkoutsDay() {
                       >
                         <Text style={batchSheetLabelText}>Status</Text>
                         <InlineSaveStatus status={batchState?.status ?? "idle"} message={batchState?.message} size="sm" align="right" />
+                      </View>
+                    </View>
+
+                    <View style={{ borderBottomWidth: 1, borderBottomColor: SHEET_BORDER, backgroundColor: "#f8fafc", paddingHorizontal: 8, paddingVertical: 6 }}>
+                      <Text style={{ fontSize: 9, fontWeight: "900", color: BATCH_GROUP_CAPTION, letterSpacing: 0.2 }}>Workout Flow Preview</Text>
+                      <View style={{ marginTop: 4, flexDirection: "row", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                        {workoutFlowSections.map((section, flowIndex) => {
+                          const isMain = section.phase === "main";
+                          return (
+                            <View
+                              key={`${batchRow.key}-flow-${section.key}`}
+                              style={{
+                                maxWidth: isMain ? 260 : 190,
+                                borderWidth: 1,
+                                borderColor: isMain ? "#bfdbfe" : "#dbe3ef",
+                                backgroundColor: isMain ? "#eff6ff" : "#fff",
+                                borderRadius: 999,
+                                paddingHorizontal: 8,
+                                paddingVertical: 4,
+                                flexDirection: "row",
+                                alignItems: "center",
+                                gap: 5,
+                              }}
+                            >
+                              <Text style={{ fontSize: 10, fontWeight: "900", color: "#64748b" }}>{flowIndex + 1}</Text>
+                              <Text numberOfLines={1} style={{ fontSize: 11, fontWeight: "800", color: isMain ? "#1e40af" : "#334155", flexShrink: 1 }}>
+                                {isMain && section.text ? `Main: ${section.text}` : section.title}
+                              </Text>
+                            </View>
+                          );
+                        })}
                       </View>
                     </View>
 

@@ -141,10 +141,10 @@ export function CoachMobileWorkoutCard({
       </View>
 
       {item.preRoutineTitles.length > 0 ? (
-        <Text style={{ color: "#334155", fontWeight: "800", lineHeight: 19 }}>Pre: {item.preRoutineTitles.join(", ")}</Text>
+        <Text style={{ color: "#334155", fontWeight: "800", lineHeight: 19 }}>Before: {item.preRoutineTitles.join(", ")}</Text>
       ) : null}
       {item.postRoutineTitles.length > 0 ? (
-        <Text style={{ color: "#334155", fontWeight: "800", lineHeight: 19 }}>Post: {item.postRoutineTitles.join(", ")}</Text>
+        <Text style={{ color: "#334155", fontWeight: "800", lineHeight: 19 }}>After: {item.postRoutineTitles.join(", ")}</Text>
       ) : null}
     </Pressable>
   );

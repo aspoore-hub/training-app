@@ -136,12 +136,12 @@ export function AthleteSessionCard({
         ) : null}
         {preTitles.length > 0 ? (
           <Text style={{ marginTop: 7, color: "#334155", fontWeight: "800", lineHeight: 19 }}>
-            Pre-run: {preTitles.join(", ")}
+            Before: {preTitles.join(", ")}
           </Text>
         ) : null}
         {postTitles.length > 0 ? (
           <Text style={{ marginTop: 4, color: "#334155", fontWeight: "800", lineHeight: 19 }}>
-            Post-run: {postTitles.join(", ")}
+            After: {postTitles.join(", ")}
           </Text>
         ) : null}
         {planSummary ? <Text style={{ marginTop: 7, color: "#334155", fontWeight: "700", lineHeight: 19 }}>{planSummary}</Text> : null}

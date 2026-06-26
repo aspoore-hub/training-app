@@ -1895,8 +1895,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
         .map((name) => String(name ?? "").trim())
         .filter(Boolean);
       const parts = [...categoryNames];
-      if (preNames.length) parts.push(`Pre: ${preNames.join(", ")}`);
-      if (postNames.length) parts.push(`Post: ${postNames.join(", ")}`);
+      if (preNames.length) parts.push(`Before: ${preNames.join(", ")}`);
+      if (postNames.length) parts.push(`After: ${postNames.join(", ")}`);
       return parts.join(" • ");
     },
     [categoryById, routineById]
@@ -3700,27 +3700,27 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
                         <View style={metadataSectionRowStyle}>
                           <View style={{ flex: 1, minWidth: 0 }}>
-                            <Text style={metadataSectionLabelStyle}>Pre-routines</Text>
+                            <Text style={metadataSectionLabelStyle}>Before Main Work</Text>
                             {renderSelectedMetadataChips(selectedPreRoutineIds, "preRoutineIds")}
                           </View>
                           <Pressable
                             onPress={() => openMetadataPicker(metadataEditorDateISO, session, "preRoutineIds")}
                             style={metadataEditButtonStyle}
                           >
-                            <Text style={metadataEditButtonTextStyle}>Add/edit pre-routines</Text>
+                            <Text style={metadataEditButtonTextStyle}>Add/edit before routines</Text>
                           </Pressable>
                         </View>
 
                         <View style={metadataSectionRowStyle}>
                           <View style={{ flex: 1, minWidth: 0 }}>
-                            <Text style={metadataSectionLabelStyle}>Post-routines</Text>
+                            <Text style={metadataSectionLabelStyle}>After Main Work</Text>
                             {renderSelectedMetadataChips(selectedPostRoutineIds, "postRoutineIds")}
                           </View>
                           <Pressable
                             onPress={() => openMetadataPicker(metadataEditorDateISO, session, "postRoutineIds")}
                             style={metadataEditButtonStyle}
                           >
-                            <Text style={metadataEditButtonTextStyle}>Add/edit post-routines</Text>
+                            <Text style={metadataEditButtonTextStyle}>Add/edit after routines</Text>
                           </Pressable>
                         </View>
 
@@ -3777,8 +3777,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
               const title = field === "categoryIds"
                 ? "Add/edit categories"
                 : field === "preRoutineIds"
-                  ? "Add/edit pre-routines"
-                  : "Add/edit post-routines";
+                  ? "Add/edit before routines"
+                  : "Add/edit after routines";
               const searchPlaceholder = field === "categoryIds" ? "Search categories" : "Search routines or folders";
               const visibleCategories = sortedCategories.filter((category) => {
                 if (!query) return true;
