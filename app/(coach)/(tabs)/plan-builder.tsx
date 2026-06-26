@@ -28,7 +28,9 @@ import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataS
 import { getAthleteDisplayName, getAthleteFirstName, getAthleteLastName } from "../../../lib/athleteName";
 import type { WorkoutCategory } from "../../../lib/types";
 import {
+  loadPlanBuilderViewState,
   loadWorkoutPlanBuilderDrafts,
+  savePlanBuilderViewState,
   upsertWorkoutPlanBuilderDraft,
   workoutPlanBuilderCellKey,
   type WorkoutPlanBuilderCell,
@@ -613,6 +615,7 @@ function setDraftCellCombinedValue(
 export default function WorkoutPlanBuilderDraftScreen() {
   const router = useRouter();
   const store = teamDataStore.use();
+  const teamId = String((store as any)?.teamId ?? "").trim();
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
   const [drafts, setDrafts] = useState<WorkoutPlanBuilderDraft[]>([]);
   const [activeDraft, setActiveDraft] = useState<WorkoutPlanBuilderDraft | null>(null);
@@ -658,6 +661,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const [targetType, setTargetType] = useState<PlanBuilderTargetType>("athlete");
   const [selectedTrainingGroupId, setSelectedTrainingGroupId] = useState("");
   const [trainingGroupPickerOpen, setTrainingGroupPickerOpen] = useState(false);
+  const [viewStateReady, setViewStateReady] = useState(false);
+  const [viewStateTeamId, setViewStateTeamId] = useState("");
+  const [selectedSeasonInitialized, setSelectedSeasonInitialized] = useState(false);
   const readOnlyPlanBuilder = !canApplyPlanBuilder(currentTeamRole);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveGenerationRef = useRef(0);
@@ -666,6 +672,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const editingFieldsRef = useRef<Record<string, string>>({});
   const focusedEditorKeyRef = useRef<string | null>(null);
   const existingCellsRef = useRef<Record<string, ExistingPlanCell>>({});
+  const savedViewStateSnapshotRef = useRef("");
   const selectedAthleteIdRef = useRef("");
   const selectedPlanTargetIdRef = useRef("");
   const targetTypeRef = useRef<PlanBuilderTargetType>("athlete");
@@ -754,6 +761,85 @@ export default function WorkoutPlanBuilderDraftScreen() {
     () => seasons.find((season) => String(season?.id ?? "").trim() === String(selectedSeasonId ?? "").trim()) ?? null,
     [seasons, selectedSeasonId]
   );
+
+  useEffect(() => {
+    setViewStateReady(false);
+    setViewStateTeamId("");
+    setSelectedSeasonInitialized(false);
+    savedViewStateSnapshotRef.current = "";
+  }, [teamId]);
+
+  useEffect(() => {
+    if (!teamId) return;
+    if (viewStateReady && viewStateTeamId === teamId) return;
+    if (!store.rosterLoaded || !store.trainingGroupsLoaded || !store.teamSeasonsLoaded) return;
+    let cancelled = false;
+    (async () => {
+      const saved = await loadPlanBuilderViewState(teamId).catch(() => null);
+      if (cancelled) return;
+
+      const athleteIds = new Set(roster.map((athlete) => String(athlete.id ?? "").trim()).filter(Boolean));
+      const groupIds = new Set(trainingGroups.map((group) => String(group.id ?? "").trim()).filter(Boolean));
+      const seasonIds = new Set(seasons.map((season) => String(season.id ?? "").trim()).filter(Boolean));
+
+      const fallbackAthleteId = String(roster[0]?.id ?? "").trim();
+      const fallbackGroupId = String(trainingGroups[0]?.id ?? "").trim();
+      const savedAthleteId = String(saved?.selectedAthleteId ?? "").trim();
+      const savedGroupId = String(saved?.selectedTrainingGroupId ?? "").trim();
+      const nextAthleteId = savedAthleteId && athleteIds.has(savedAthleteId) ? savedAthleteId : fallbackAthleteId;
+      const nextGroupId = savedGroupId && groupIds.has(savedGroupId) ? savedGroupId : fallbackGroupId;
+      const nextTargetType: PlanBuilderTargetType =
+        saved?.targetType === "trainingGroup" && nextGroupId ? "trainingGroup" : "athlete";
+
+      const savedHadSeason = !!saved;
+      const savedSeasonId = String(saved?.selectedSeasonId ?? "").trim();
+      const sharedSeasonId = String(store.sharedSelectedSeasonId ?? "").trim();
+      const fallbackSeasonId = sharedSeasonId && seasonIds.has(sharedSeasonId)
+        ? sharedSeasonId
+        : String(seasons[0]?.id ?? "").trim();
+      const nextSeasonId = savedHadSeason
+        ? savedSeasonId && seasonIds.has(savedSeasonId) ? savedSeasonId : null
+        : fallbackSeasonId || null;
+
+      const fallbackFirstWeek = getWeekStartISO(toISODate(new Date()), weekStartsOn);
+      const nextFirstWeek = isDateISO(saved?.firstWeekStartISO) ? saved.firstWeekStartISO : fallbackFirstWeek;
+      const nextWeekCount = normalizeWeekCount(saved?.numberOfWeeks);
+
+      setTargetType(nextTargetType);
+      setSelectedAthleteId(nextAthleteId);
+      setSelectedTrainingGroupId(nextGroupId);
+      setSelectedSeasonId(nextSeasonId);
+      setSelectedSeasonInitialized(true);
+      setFirstWeekInput(nextFirstWeek);
+      setWeekCountInput(String(nextWeekCount));
+      setViewStateTeamId(teamId);
+      setViewStateReady(true);
+      savedViewStateSnapshotRef.current = JSON.stringify({
+        targetType: nextTargetType,
+        selectedAthleteId: nextAthleteId || null,
+        selectedTrainingGroupId: nextGroupId || null,
+        selectedSeasonId: nextSeasonId,
+        rangeMode: saved?.rangeMode ?? (nextSeasonId ? "season" : "custom"),
+        firstWeekStartISO: nextFirstWeek,
+        numberOfWeeks: nextWeekCount,
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    roster,
+    seasons,
+    store.rosterLoaded,
+    store.sharedSelectedSeasonId,
+    store.teamSeasonsLoaded,
+    store.trainingGroupsLoaded,
+    teamId,
+    trainingGroups,
+    viewStateReady,
+    viewStateTeamId,
+    weekStartsOn,
+  ]);
 
   const athleteSeasonOverridesBySeasonAndAthlete = useMemo(() => {
     const map = new Map<string, (typeof store.athleteSeasonOverrides)[number]>();
@@ -947,6 +1033,39 @@ export default function WorkoutPlanBuilderDraftScreen() {
   }, [activeDraft]);
 
   useEffect(() => {
+    if (!viewStateReady || viewStateTeamId !== teamId || !teamId) return;
+    const rangeMode = activeDraft?.rangeMode === "season" || activeDraft?.rangeMode === "custom"
+      ? activeDraft.rangeMode
+      : selectedSeasonId ? "season" : "custom";
+    const snapshot = {
+      targetType,
+      selectedAthleteId: String(selectedAthleteId ?? "").trim() || null,
+      selectedTrainingGroupId: String(selectedTrainingGroupId ?? "").trim() || null,
+      selectedSeasonId: String(selectedSeasonId ?? "").trim() || null,
+      rangeMode,
+      firstWeekStartISO,
+      numberOfWeeks: weekCount,
+    };
+    const serialized = JSON.stringify(snapshot);
+    if (savedViewStateSnapshotRef.current === serialized) return;
+    savedViewStateSnapshotRef.current = serialized;
+    void savePlanBuilderViewState(teamId, snapshot).catch((error) => {
+      console.warn("[plan-builder] failed to save view state", error);
+    });
+  }, [
+    activeDraft?.rangeMode,
+    firstWeekStartISO,
+    selectedAthleteId,
+    selectedSeasonId,
+    selectedTrainingGroupId,
+    targetType,
+    teamId,
+    viewStateReady,
+    viewStateTeamId,
+    weekCount,
+  ]);
+
+  useEffect(() => {
     existingCellsRef.current = existingCellsByKey;
   }, [existingCellsByKey]);
 
@@ -1037,23 +1156,36 @@ export default function WorkoutPlanBuilderDraftScreen() {
   }, []);
 
   useEffect(() => {
-    if (selectedAthleteId || roster.length === 0) return;
+    if (!viewStateReady || viewStateTeamId !== teamId) return;
+    if ((selectedAthleteId && roster.some((athlete) => String(athlete.id ?? "").trim() === selectedAthleteId)) || roster.length === 0) return;
     setSelectedAthleteId(String(roster[0]?.id ?? "").trim());
-  }, [roster, selectedAthleteId]);
+  }, [roster, selectedAthleteId, teamId, viewStateReady, viewStateTeamId]);
 
   useEffect(() => {
-    if (selectedTrainingGroupId || trainingGroups.length === 0) return;
+    if (!viewStateReady || viewStateTeamId !== teamId) return;
+    if (
+      (selectedTrainingGroupId && trainingGroups.some((group) => String(group.id ?? "").trim() === selectedTrainingGroupId)) ||
+      trainingGroups.length === 0
+    ) return;
     setSelectedTrainingGroupId(String(trainingGroups[0]?.id ?? "").trim());
-  }, [selectedTrainingGroupId, trainingGroups]);
+  }, [selectedTrainingGroupId, teamId, trainingGroups, viewStateReady, viewStateTeamId]);
 
   useEffect(() => {
-    if (selectedSeasonId !== null) return;
+    if (!viewStateReady || viewStateTeamId !== teamId || selectedSeasonInitialized) return;
     const shared = String(store.sharedSelectedSeasonId ?? "").trim();
     if (shared) setSelectedSeasonId(shared);
     else if (seasons[0]?.id) setSelectedSeasonId(String(seasons[0].id));
-  }, [seasons, selectedSeasonId, store.sharedSelectedSeasonId]);
+    setSelectedSeasonInitialized(true);
+  }, [seasons, selectedSeasonInitialized, store.sharedSelectedSeasonId, teamId, viewStateReady, viewStateTeamId]);
 
   useEffect(() => {
+    if (!viewStateReady || viewStateTeamId !== teamId) return;
+    if (targetType !== "trainingGroup" || selectedTrainingGroupId || trainingGroups.length > 0) return;
+    setTargetType("athlete");
+  }, [selectedTrainingGroupId, targetType, teamId, trainingGroups.length, viewStateReady, viewStateTeamId]);
+
+  useEffect(() => {
+    if (!viewStateReady || viewStateTeamId !== teamId) return;
     if (!selectedPlanTargetId) {
       setActiveDraft(null);
       return;
@@ -1091,7 +1223,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
     setSelectedSeasonId(next.seasonId ?? null);
     setFirstWeekInput(next.firstWeekStartISO);
     setWeekCountInput(String(next.numberOfWeeks));
-  }, [drafts, selectedAthlete, selectedPlanTargetId, selectedSeason]);
+  }, [drafts, selectedAthlete, selectedPlanTargetId, selectedSeason, teamId, viewStateReady, viewStateTeamId]);
 
   const applySeasonRange = useCallback(() => {
     if ((!selectedAthlete && targetType !== "trainingGroup") || !selectedSeason) return;

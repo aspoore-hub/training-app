@@ -1,6 +1,8 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { loadJSON, saveJSON } from "./storage";
 
 export const WORKOUT_PLAN_BUILDER_DRAFTS_KEY = "training_app_workout_plan_builder_drafts_v1";
+export const WORKOUT_PLAN_BUILDER_VIEW_STATE_KEY_PREFIX = "training_app_workout_plan_builder_view_state_v1";
 
 export type WorkoutPlanBuilderCell = {
   dateISO: string;
@@ -41,6 +43,17 @@ export type WorkoutPlanBuilderDraft = {
   numberOfWeeks: number;
   cellsByKey: Record<string, WorkoutPlanBuilderCell>;
   createdAt: number;
+  updatedAt: number;
+};
+
+export type WorkoutPlanBuilderViewState = {
+  targetType: "athlete" | "trainingGroup";
+  selectedAthleteId: string | null;
+  selectedTrainingGroupId: string | null;
+  selectedSeasonId: string | null;
+  rangeMode: "season" | "custom";
+  firstWeekStartISO: string;
+  numberOfWeeks: number;
   updatedAt: number;
 };
 
@@ -140,6 +153,59 @@ function normalizeDraft(raw: any): WorkoutPlanBuilderDraft | null {
     createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
     updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
   };
+}
+
+function planBuilderViewStateStorageKey(teamId: string) {
+  return `${WORKOUT_PLAN_BUILDER_VIEW_STATE_KEY_PREFIX}:${String(teamId ?? "").trim()}`;
+}
+
+function normalizeViewState(raw: any): WorkoutPlanBuilderViewState | null {
+  if (!raw || typeof raw !== "object") return null;
+  const firstWeekStartISO = String(raw.firstWeekStartISO ?? "").trim();
+  if (!isDateISO(firstWeekStartISO)) return null;
+  const updatedAt = Number(raw.updatedAt);
+  return {
+    targetType: raw.targetType === "trainingGroup" ? "trainingGroup" : "athlete",
+    selectedAthleteId: normalizeNullableString(raw.selectedAthleteId),
+    selectedTrainingGroupId: normalizeNullableString(raw.selectedTrainingGroupId),
+    selectedSeasonId: normalizeNullableString(raw.selectedSeasonId),
+    rangeMode: raw.rangeMode === "season" || raw.rangeMode === "custom" ? raw.rangeMode : "custom",
+    firstWeekStartISO,
+    numberOfWeeks: Math.min(52, Math.max(1, Math.round(Number(raw.numberOfWeeks) || 6))),
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+  };
+}
+
+export async function loadPlanBuilderViewState(teamId: string): Promise<WorkoutPlanBuilderViewState | null> {
+  const cleanTeamId = String(teamId ?? "").trim();
+  if (!cleanTeamId) return null;
+  const raw = await AsyncStorage.getItem(planBuilderViewStateStorageKey(cleanTeamId));
+  if (!raw) return null;
+  try {
+    return normalizeViewState(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+export async function savePlanBuilderViewState(
+  teamId: string,
+  state: Omit<WorkoutPlanBuilderViewState, "updatedAt"> & { updatedAt?: number }
+): Promise<void> {
+  const cleanTeamId = String(teamId ?? "").trim();
+  if (!cleanTeamId) return;
+  const normalized = normalizeViewState({
+    ...state,
+    updatedAt: Number.isFinite(Number(state.updatedAt)) ? Number(state.updatedAt) : Date.now(),
+  });
+  if (!normalized) return;
+  await AsyncStorage.setItem(planBuilderViewStateStorageKey(cleanTeamId), JSON.stringify(normalized));
+}
+
+export async function clearPlanBuilderViewState(teamId: string): Promise<void> {
+  const cleanTeamId = String(teamId ?? "").trim();
+  if (!cleanTeamId) return;
+  await AsyncStorage.removeItem(planBuilderViewStateStorageKey(cleanTeamId));
 }
 
 export async function loadWorkoutPlanBuilderDrafts(): Promise<WorkoutPlanBuilderDraft[]> {
