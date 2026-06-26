@@ -4,7 +4,9 @@ import { type ReactNode, useMemo, useState } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { AccountContextSelector } from "../account/AccountContextSelector";
 import { resolveCoachTitle } from "../../lib/coachNav";
+import { useIsCoachMobileView } from "../../lib/useCoachMobileView";
 import { CoachDrawer } from "./CoachDrawer";
+import { CoachMobileShell } from "./mobile/CoachMobileShell";
 import { CoachSidebar } from "./CoachSidebar";
 
 type CoachShellProps = {
@@ -19,6 +21,7 @@ export function CoachShell({ children, title, subtitle, statusText }: CoachShell
   const pathname = usePathname();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const isWeb = Platform.OS === "web";
+  const isCoachMobileView = useIsCoachMobileView();
 
   const resolvedTitle = useMemo(() => {
     if (title) return title;
@@ -28,6 +31,10 @@ export function CoachShell({ children, title, subtitle, statusText }: CoachShell
   const navigate = (href: string) => {
     router.replace(href as any);
   };
+
+  if (isCoachMobileView) {
+    return <CoachMobileShell />;
+  }
 
   return (
     <View style={{ flex: 1, backgroundColor: "#f3f6fb", flexDirection: "row" }}>
