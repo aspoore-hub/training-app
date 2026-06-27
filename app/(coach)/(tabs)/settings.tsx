@@ -976,16 +976,23 @@ export default function CoachSettingsTab() {
                 ) : (
                   staffMembers.map((member) => {
                     const normalizedRole = member.is_owner ? "owner" : normalizeTeamRole(member.raw_role);
+                    const displayName = staffMemberDisplayName(member);
+                    const email = String(member.email ?? "").trim();
                     return (
                       <View key={`${member.team_id}-${member.user_id}`} style={styles.staffRow}>
                         <View style={{ flex: 1, minWidth: 0 }}>
                           <Text style={styles.staffName} numberOfLines={1}>
-                            {member.user_id}
+                            {displayName}
                           </Text>
                           <Text style={styles.groupMeta}>
                             {member.is_owner ? "Owner" : normalizedRole === "editor" ? "Editor" : "Viewer"}
                             {member.raw_role && !member.is_owner ? ` - stored as ${member.raw_role}` : ""}
                           </Text>
+                          {email && email !== displayName ? (
+                            <Text style={styles.staffEmail} numberOfLines={1}>
+                              {email}
+                            </Text>
+                          ) : null}
                         </View>
                       </View>
                     );
