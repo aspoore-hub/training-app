@@ -560,27 +560,9 @@ export async function listTeamStaffMembers(): Promise<TeamStaffMember[]> {
       created_at: row.created_at == null ? null : String(row.created_at),
       updated_at: row.updated_at == null ? null : String(row.updated_at),
       is_owner: isOwner,
-      first_name: cleanOptionalText(
-        row.first_name == null
-          ? row.profile_first_name == null
-            ? null
-            : String(row.profile_first_name)
-          : String(row.first_name)
-      ),
-      last_name: cleanOptionalText(
-        row.last_name == null
-          ? row.profile_last_name == null
-            ? null
-            : String(row.profile_last_name)
-          : String(row.last_name)
-      ),
-      display_name: cleanOptionalText(
-        row.display_name == null
-          ? row.profile_display_name == null
-            ? null
-            : String(row.profile_display_name)
-          : String(row.display_name)
-      ),
+      first_name: cleanOptionalText(row.first_name == null ? null : String(row.first_name)),
+      last_name: cleanOptionalText(row.last_name == null ? null : String(row.last_name)),
+      display_name: cleanOptionalText(row.display_name == null ? null : String(row.display_name)),
       email: cleanOptionalText(row.email == null ? null : String(row.email)),
     };
   });
