@@ -134,6 +134,26 @@ function coachInviteStatus(invite: TeamCoachInvite) {
   return "Pending";
 }
 
+function joinNameParts(firstName: string | null | undefined, lastName: string | null | undefined): string {
+  return [firstName, lastName]
+    .map((part) => String(part ?? "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function staffMemberDisplayName(member: TeamStaffMember): string {
+  return (
+    joinNameParts(member.first_name, member.last_name) ||
+    String(member.display_name ?? "").trim() ||
+    String(member.email ?? "").trim() ||
+    "Unknown coach"
+  );
+}
+
+function coachInviteDisplayName(invite: TeamCoachInvite): string {
+  return joinNameParts(invite.first_name, invite.last_name) || String(invite.email ?? "").trim() || "Coach invite";
+}
+
 function convertWorkoutDistances(rawWorkouts: any[], from: DistanceUnit, to: DistanceUnit): any[] {
   return (rawWorkouts ?? []).map((w: any) => {
     const next: any = { ...w };
@@ -159,6 +179,8 @@ export default function CoachSettingsTab() {
   const settingsReadOnly = normalizeTeamRole(currentTeamRole) === "viewer";
   const [staffMembers, setStaffMembers] = useState<TeamStaffMember[]>([]);
   const [coachInvites, setCoachInvites] = useState<TeamCoachInvite[]>([]);
+  const [coachInviteFirstName, setCoachInviteFirstName] = useState("");
+  const [coachInviteLastName, setCoachInviteLastName] = useState("");
   const [coachInviteEmail, setCoachInviteEmail] = useState("");
   const [coachInviteRole, setCoachInviteRole] = useState<CoachInviteRole>("viewer");
   const [staffBusy, setStaffBusy] = useState(false);
@@ -764,10 +786,15 @@ export default function CoachSettingsTab() {
     setStaffBusy(true);
     setStaffStatus(null);
     try {
-      const invite = await createCoachInvite(cleanEmail, coachInviteRole);
+      const invite = await createCoachInvite(cleanEmail, coachInviteRole, 14, {
+        firstName: coachInviteFirstName,
+        lastName: coachInviteLastName,
+      });
       const inviteUrl = buildCoachInviteUrl(invite.token);
       await Clipboard.setStringAsync(inviteUrl);
       setLastCoachInviteUrl(inviteUrl);
+      setCoachInviteFirstName("");
+      setCoachInviteLastName("");
       setCoachInviteEmail("");
 
       try {
@@ -1273,7 +1300,30 @@ export default function CoachSettingsTab() {
 
           {canManageCoaches(currentTeamRole) ? (
             <View style={styles.staffInviteBox}>
-              <Text style={styles.label}>Invite coach by email</Text>
+              <Text style={styles.label}>Invite coach</Text>
+              <View style={styles.staffNameInputs}>
+                <View style={styles.staffNameInputCell}>
+                  <Text style={styles.label}>First name</Text>
+                  <TextInput
+                    value={coachInviteFirstName}
+                    onChangeText={setCoachInviteFirstName}
+                    placeholder="First"
+                    style={styles.input}
+                    autoCapitalize="words"
+                  />
+                </View>
+                <View style={styles.staffNameInputCell}>
+                  <Text style={styles.label}>Last name</Text>
+                  <TextInput
+                    value={coachInviteLastName}
+                    onChangeText={setCoachInviteLastName}
+                    placeholder="Last"
+                    style={styles.input}
+                    autoCapitalize="words"
+                  />
+                </View>
+              </View>
+              <Text style={[styles.label, { marginTop: 10 }]}>Email</Text>
               <TextInput
                 value={coachInviteEmail}
                 onChangeText={setCoachInviteEmail}
@@ -1329,16 +1379,23 @@ export default function CoachSettingsTab() {
             ) : (
               staffMembers.map((member) => {
                 const normalizedRole = member.is_owner ? "owner" : normalizeTeamRole(member.raw_role);
+                const displayName = staffMemberDisplayName(member);
+                const email = String(member.email ?? "").trim();
                 return (
                   <View key={`${member.team_id}-${member.user_id}`} style={styles.staffRow}>
                     <View style={{ flex: 1, minWidth: 0 }}>
                       <Text style={styles.staffName} numberOfLines={1}>
-                        {member.user_id}
+                        {displayName}
                       </Text>
                       <Text style={styles.groupMeta}>
                         {member.is_owner ? "Owner" : normalizedRole === "editor" ? "Editor" : "Viewer"}
                         {member.raw_role && !member.is_owner ? ` • stored as ${member.raw_role}` : ""}
                       </Text>
+                      {email && email !== displayName ? (
+                        <Text style={styles.staffEmail} numberOfLines={1}>
+                          {email}
+                        </Text>
+                      ) : null}
                     </View>
                     {canManageCoaches(currentTeamRole) && !member.is_owner ? (
                       <View style={styles.staffActions}>
@@ -1381,10 +1438,17 @@ export default function CoachSettingsTab() {
                 coachInvites.slice(0, 6).map((invite) => {
                   const status = coachInviteStatus(invite);
                   const inviteUrl = buildCoachInviteUrl(invite.token);
+                  const displayName = coachInviteDisplayName(invite);
+                  const email = String(invite.email ?? "").trim();
                   return (
                     <View key={invite.token} style={styles.inviteRow}>
                       <View style={{ flex: 1, minWidth: 0 }}>
-                        <Text style={styles.staffName} numberOfLines={1}>{invite.email || "Coach invite"}</Text>
+                        <Text style={styles.staffName} numberOfLines={1}>{displayName}</Text>
+                        {email && email !== displayName ? (
+                          <Text style={styles.staffEmail} numberOfLines={1}>
+                            {email}
+                          </Text>
+                        ) : null}
                         <Text style={styles.groupMeta}>
                           {invite.role === "viewer" ? "Viewer" : "Editor"}
                           {` • ${status}`}
@@ -1942,6 +2006,16 @@ const styles = StyleSheet.create({
     padding: 10,
     marginBottom: 10,
   },
+  staffNameInputs: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 8,
+  },
+  staffNameInputCell: {
+    flex: 1,
+    minWidth: 140,
+  },
   staffRoleToggle: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -1983,6 +2057,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   staffName: { fontWeight: "900", color: "#111", fontSize: 13 },
+  staffEmail: { marginTop: 2, color: "#7b8497", fontWeight: "700", fontSize: 12 },
   staffActions: {
     flexDirection: "row",
     flexWrap: "wrap",

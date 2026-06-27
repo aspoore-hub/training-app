@@ -446,6 +446,8 @@ export type CoachInviteRole = Extract<TeamRole, "editor" | "viewer">;
 export type TeamCoachInvite = {
   token: string;
   email: string | null;
+  first_name: string | null;
+  last_name: string | null;
   role: CoachInviteRole;
   expires_at: string | null;
   created_at: string | null;
@@ -460,9 +462,28 @@ export type TeamStaffMember = {
   created_at: string | null;
   updated_at: string | null;
   is_owner: boolean;
+  first_name: string | null;
+  last_name: string | null;
+  display_name: string | null;
+  email: string | null;
 };
 
-export async function createCoachInvite(email: string, role: CoachInviteRole, daysValid = 14) {
+export type CreateCoachInviteOptions = {
+  firstName?: string | null;
+  lastName?: string | null;
+};
+
+function cleanOptionalText(value: string | null | undefined): string | null {
+  const text = String(value ?? "").trim();
+  return text || null;
+}
+
+export async function createCoachInvite(
+  email: string,
+  role: CoachInviteRole,
+  daysValid = 14,
+  options: CreateCoachInviteOptions = {}
+) {
   await requireTeamPermission("coaches.manage");
   const userId = await getMyUserId();
   const teamId = await getCurrentTeamId();
@@ -479,6 +500,8 @@ export async function createCoachInvite(email: string, role: CoachInviteRole, da
     .insert({
       team_id: teamId,
       email: cleanEmail,
+      first_name: cleanOptionalText(options.firstName),
+      last_name: cleanOptionalText(options.lastName),
       role: normalizedRole,
       athlete_profile_id: null,
       expires_at: expires,
@@ -522,23 +545,13 @@ export async function listTeamStaffMembers(): Promise<TeamStaffMember[]> {
   if (!teamId) throw new Error("No current team");
   await requireTeamPermission("team.view", teamId);
 
-  const [{ data: team, error: teamError }, { data: members, error: membersError }] = await Promise.all([
-    supabase.from("teams").select("owner_id").eq("id", teamId).maybeSingle(),
-    supabase
-      .from("team_members")
-      .select("team_id,user_id,role,created_at,updated_at")
-      .eq("team_id", teamId)
-      .order("created_at", { ascending: true }),
-  ]);
+  const { data, error } = await supabase.rpc("list_team_staff_identity", { p_team_id: teamId });
+  if (error) throw error;
 
-  if (teamError) throw teamError;
-  if (membersError) throw membersError;
-
-  const ownerId = String(team?.owner_id ?? "");
-  return ((members ?? []) as Array<Record<string, unknown>>).map((row) => {
+  return ((data ?? []) as Array<Record<string, unknown>>).map((row) => {
     const rawRole = row.role == null ? null : String(row.role);
     const userId = String(row.user_id ?? "");
-    const isOwner = ownerId !== "" && userId === ownerId;
+    const isOwner = row.is_owner === true;
     return {
       team_id: String(row.team_id ?? teamId),
       user_id: userId,
@@ -547,6 +560,10 @@ export async function listTeamStaffMembers(): Promise<TeamStaffMember[]> {
       created_at: row.created_at == null ? null : String(row.created_at),
       updated_at: row.updated_at == null ? null : String(row.updated_at),
       is_owner: isOwner,
+      first_name: cleanOptionalText(row.profile_first_name == null ? null : String(row.profile_first_name)),
+      last_name: cleanOptionalText(row.profile_last_name == null ? null : String(row.profile_last_name)),
+      display_name: cleanOptionalText(row.profile_display_name == null ? null : String(row.profile_display_name)),
+      email: cleanOptionalText(row.email == null ? null : String(row.email)),
     };
   });
 }
@@ -558,7 +575,7 @@ export async function listCoachInvites(): Promise<TeamCoachInvite[]> {
 
   const { data, error } = await supabase
     .from("team_invites")
-    .select("token,email,role,expires_at,created_at,accepted_at")
+    .select("token,email,first_name,last_name,role,expires_at,created_at,accepted_at")
     .eq("team_id", teamId)
     .in("role", ["editor", "viewer"])
     .order("created_at", { ascending: false });
@@ -566,6 +583,8 @@ export async function listCoachInvites(): Promise<TeamCoachInvite[]> {
   return ((data ?? []) as Array<Record<string, unknown>>).map((row) => ({
     token: String(row.token ?? ""),
     email: row.email == null ? null : String(row.email),
+    first_name: cleanOptionalText(row.first_name == null ? null : String(row.first_name)),
+    last_name: cleanOptionalText(row.last_name == null ? null : String(row.last_name)),
     role: normalizeTeamRole(row.role as string | null) === "viewer" ? "viewer" : "editor",
     expires_at: row.expires_at == null ? null : String(row.expires_at),
     created_at: row.created_at == null ? null : String(row.created_at),

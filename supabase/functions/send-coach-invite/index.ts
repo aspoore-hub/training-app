@@ -5,6 +5,8 @@ type InviteRow = {
   id: string;
   token: string;
   email: string | null;
+  first_name: string | null;
+  last_name: string | null;
   role: string | null;
   athlete_profile_id: string | null;
   team_id: string;
@@ -176,7 +178,7 @@ Deno.serve(async (req) => {
 
     const { data: invite, error: inviteError } = await adminClient
       .from("team_invites")
-      .select("id,token,email,role,athlete_profile_id,team_id,expires_at,accepted_at")
+      .select("id,token,email,first_name,last_name,role,athlete_profile_id,team_id,expires_at,accepted_at")
       .eq("id", inviteId)
       .maybeSingle();
     if (inviteError) throw inviteError;
@@ -212,9 +214,16 @@ Deno.serve(async (req) => {
 
     const teamName = String(team?.name ?? "your team").trim() || "your team";
     const permissionLabel = role === "viewer" ? "Viewer" : "Editor";
+    const inviteeName = [inviteRow.first_name, inviteRow.last_name]
+      .map((part) => String(part ?? "").trim())
+      .filter(Boolean)
+      .join(" ");
+    const greeting = inviteeName ? `Hi ${inviteeName},` : "Hi,";
     const inviteUrl = `${siteUrl}/join?token=${encodeURIComponent(inviteRow.token)}`;
     const subject = `Accept your ${teamName} staff invite`;
     const text = [
+      greeting,
+      "",
       `You have been invited to join ${teamName} on Trackside Coach as ${permissionLabel}.`,
       "",
       `Open this link to create your account or sign in and accept your invite:`,
@@ -223,6 +232,7 @@ Deno.serve(async (req) => {
       "If you were not expecting this invite, you can ignore this email.",
     ].join("\n");
     const html = [
+      `<p>${escapeHtml(greeting)}</p>`,
       `<p>You have been invited to join <strong>${escapeHtml(teamName)}</strong> on Trackside Coach as <strong>${escapeHtml(permissionLabel)}</strong>.</p>`,
       `<p><a href="${escapeHtml(inviteUrl)}">Create your account or sign in and accept invite</a></p>`,
       `<p>If the button does not work, copy and paste this link:</p>`,

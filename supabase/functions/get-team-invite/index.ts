@@ -51,6 +51,9 @@ Deno.serve(async (req) => {
         team_logo_url: null,
         athlete_name: null,
         staff_role: null,
+        staff_name: null,
+        first_name: null,
+        last_name: null,
         expires_at: null,
         accepted_at: null,
         error: "Missing invite token.",
@@ -60,7 +63,7 @@ Deno.serve(async (req) => {
     const adminClient = createClient(requiredEnv("SUPABASE_URL"), requiredEnv("SUPABASE_SERVICE_ROLE_KEY"));
     const { data: invite, error: inviteError } = await adminClient
       .from("team_invites")
-      .select("token,email,role,athlete_profile_id,team_id,expires_at,accepted_at")
+      .select("token,email,first_name,last_name,role,athlete_profile_id,team_id,expires_at,accepted_at")
       .eq("token", token)
       .maybeSingle();
     if (inviteError) throw inviteError;
@@ -78,6 +81,9 @@ Deno.serve(async (req) => {
         team_logo_url: null,
         athlete_name: null,
         staff_role: null,
+        staff_name: null,
+        first_name: null,
+        last_name: null,
         expires_at: null,
         accepted_at: null,
         error: "This invite link is invalid.",
@@ -109,6 +115,9 @@ Deno.serve(async (req) => {
       null;
     const logoUrl = await signedLogoUrl(adminClient, team?.logo_path, team?.logo_updated_at);
     const staffRole = isStaff ? (role === "viewer" ? "viewer" : "editor") : null;
+    const inviteFirstName = String(invite.first_name ?? "").trim() || null;
+    const inviteLastName = String(invite.last_name ?? "").trim() || null;
+    const staffName = isStaff ? [inviteFirstName, inviteLastName].filter(Boolean).join(" ").trim() || null : null;
 
     return jsonResponse(200, {
       ok: status === "valid",
@@ -119,6 +128,9 @@ Deno.serve(async (req) => {
       team_logo_url: logoUrl,
       athlete_name: isAthlete ? athleteName : null,
       staff_role: staffRole,
+      staff_name: staffName,
+      first_name: isStaff ? inviteFirstName : null,
+      last_name: isStaff ? inviteLastName : null,
       expires_at: expiresAt,
       accepted_at: acceptedAt,
       message:
@@ -139,6 +151,9 @@ Deno.serve(async (req) => {
       team_logo_url: null,
       athlete_name: null,
       staff_role: null,
+      staff_name: null,
+      first_name: null,
+      last_name: null,
       expires_at: null,
       accepted_at: null,
       error: error instanceof Error ? error.message : "Could not load invite.",
