@@ -54,6 +54,7 @@ import {
 import { listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../../lib/teamWorkoutsCloud";
 import { setSeasonWeekVisibility, setSeasonWeekVisibilityByDateRange } from "../../../lib/seasonWeekVisibility";
 import { canEditMileage, canExport, canPublishTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
+import { loadCoachDateCursor, saveCoachDateCursorForDate } from "../../../lib/coachDateCursor";
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MILEAGE_GRID_ID = "mileage-grid";
@@ -786,16 +787,22 @@ export default function CoachMileageTab() {
   useEffect(() => {
     let active = true;
     (async () => {
-      const prefs = await loadJSON<{
-        weekAnchorISO?: string;
-        mode?: MileageViewMode;
-        athleteMultiSelectedId?: string;
-        mileageRangeStartISO?: string;
-        mileageRangeEndISO?: string;
-      }>(MILEAGE_VIEW_PREFS_KEY, {});
+      const [prefs, sharedCursor] = await Promise.all([
+        loadJSON<{
+          weekAnchorISO?: string;
+          mode?: MileageViewMode;
+          athleteMultiSelectedId?: string;
+          mileageRangeStartISO?: string;
+          mileageRangeEndISO?: string;
+        }>(MILEAGE_VIEW_PREFS_KEY, {}),
+        loadCoachDateCursor(),
+      ]);
       if (!active) return;
       if (isValidISODate(prefs?.weekAnchorISO)) {
         setWeekAnchorISO(prefs.weekAnchorISO);
+      }
+      if (sharedCursor?.weekStartIso && isValidISODate(sharedCursor.weekStartIso)) {
+        setWeekAnchorISO(sharedCursor.weekStartIso);
       }
       if (
         isValidISODate(prefs?.mileageRangeStartISO) &&
@@ -951,6 +958,14 @@ export default function CoachMileageTab() {
   }, [mileageDraftsByKey]);
 
   const weekStartISO = useMemo(() => getWeekStartISO(weekAnchorISO, weekStartsOn), [weekAnchorISO, weekStartsOn]);
+  useEffect(() => {
+    if (!weekAnchorReady || !isValidISODate(weekStartISO)) return;
+    void saveCoachDateCursorForDate({
+      selectedDateIso: weekStartISO,
+      source: "mileage",
+      weekStartsOn: weekStartsOn === 0 ? 0 : 1,
+    }).catch(() => {});
+  }, [weekAnchorReady, weekStartISO, weekStartsOn]);
 
   const weekdayLabels = useMemo(() => {
     const arr: string[] = [];

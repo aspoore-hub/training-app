@@ -21,6 +21,7 @@ import { listTeamWorkoutsInRange, type TeamWorkoutRow } from "../../../lib/teamW
 import { isActiveTrainingGroupMembership, teamDataStore } from "../../../lib/teamDataStore";
 import { formatParsedWorkoutEntry, parseWorkoutEntryValue } from "../../../lib/workoutEntryParser";
 import type { WeekStartDay } from "../../../lib/types";
+import { loadCoachDateCursor, saveCoachDateCursorForDate } from "../../../lib/coachDateCursor";
 
 type FeedbackFilter = "submitted" | "missing" | "all";
 type ViewMode = "day" | "week" | "month";
@@ -483,10 +484,13 @@ export default function CoachTrainingLogsTab() {
     let active = true;
     (async () => {
       try {
-        const [savedAthletesRaw, savedFeedbackFilterRaw, savedViewModeRaw] = await AsyncStorage.multiGet([
-          COACH_TRAINING_LOGS_SELECTED_ATHLETES_KEY,
-          COACH_TRAINING_LOGS_FEEDBACK_FILTER_KEY,
-          COACH_TRAINING_LOGS_VIEW_MODE_KEY,
+        const [[savedAthletesRaw, savedFeedbackFilterRaw, savedViewModeRaw], sharedCursor] = await Promise.all([
+          AsyncStorage.multiGet([
+            COACH_TRAINING_LOGS_SELECTED_ATHLETES_KEY,
+            COACH_TRAINING_LOGS_FEEDBACK_FILTER_KEY,
+            COACH_TRAINING_LOGS_VIEW_MODE_KEY,
+          ]),
+          loadCoachDateCursor(),
         ]);
 
         if (!active) return;
@@ -507,6 +511,9 @@ export default function CoachTrainingLogsTab() {
         setSelectedAthleteIds(nextSelectedAthletes);
         setFeedbackFilter(nextFeedbackFilter);
         setViewMode(nextViewMode);
+        if (sharedCursor?.selectedDateIso) {
+          setAnchorDateISO(sharedCursor.selectedDateIso);
+        }
       } finally {
         if (active) setPrefsHydrated(true);
       }
@@ -547,6 +554,15 @@ export default function CoachTrainingLogsTab() {
     if (!prefsHydrated) return;
     void AsyncStorage.setItem(COACH_TRAINING_LOGS_VIEW_MODE_KEY, viewMode).catch(() => {});
   }, [prefsHydrated, viewMode]);
+
+  useEffect(() => {
+    if (!prefsHydrated) return;
+    void saveCoachDateCursorForDate({
+      selectedDateIso: anchorDateISO,
+      source: "trainingLogs",
+      weekStartsOn: weekStartsOn === 0 ? 0 : 1,
+    }).catch(() => {});
+  }, [anchorDateISO, prefsHydrated, weekStartsOn]);
 
   const trainingGroupFilterOptions = useMemo<TrainingGroupFilterOption[]>(() => {
     const byId = new Map<string, TrainingGroupFilterOption>();

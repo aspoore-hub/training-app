@@ -48,6 +48,7 @@ import {
 } from "../../../lib/teamRoster";
 import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
 import { loadJSON, saveJSON } from "../../../lib/storage";
+import { loadCoachDateCursor, saveCoachDateCursorForDate } from "../../../lib/coachDateCursor";
 import { normalizeWorkoutTimeInput } from "../../../lib/time";
 import { formatMileageForSheet, getWeekIndex, getWeekStartISO } from "../../../lib/mileagePlan";
 import { getWeekLabelTone, getWeekLabelToneColors, getWeekLabelToneText, type WeekLabelType } from "../../../lib/weekLabelStyle";
@@ -1486,21 +1487,26 @@ export default function CoachCalendarMonth() {
     let active = true;
     (async () => {
       try {
-        const prefs = await loadJSON<{
-          mode?: "month" | "week";
-          monthISO?: string;
-          weekStartISO?: string;
-        }>(COACH_CALENDAR_VIEW_PREFS_KEY, {});
+        const [prefs, sharedCursor] = await Promise.all([
+          loadJSON<{
+            mode?: "month" | "week";
+            monthISO?: string;
+            weekStartISO?: string;
+          }>(COACH_CALENDAR_VIEW_PREFS_KEY, {}),
+          loadCoachDateCursor(),
+        ]);
         if (!active) return;
         const requestedView = Array.isArray(view) ? view[0] : view;
         const forceMonthlyView = requestedView === "monthly" || requestedView === "month";
         const mode = forceMonthlyView ? "month" : prefs?.mode === "week" ? "week" : prefs?.mode === "month" ? "month" : null;
         if (mode) setCalendarMode(mode);
-        if (typeof prefs?.monthISO === "string" && /^\d{4}-\d{2}-\d{2}$/.test(prefs.monthISO)) {
-          setAnchorMonth(monthStart(new Date(`${prefs.monthISO}T00:00:00`)));
+        const monthISO = sharedCursor?.monthIso ?? prefs?.monthISO;
+        const weekStartISO = sharedCursor?.weekStartIso ?? prefs?.weekStartISO;
+        if (typeof monthISO === "string" && /^\d{4}-\d{2}-\d{2}$/.test(monthISO)) {
+          setAnchorMonth(monthStart(new Date(`${monthISO}T00:00:00`)));
         }
-        if (typeof prefs?.weekStartISO === "string" && /^\d{4}-\d{2}-\d{2}$/.test(prefs.weekStartISO)) {
-          setAnchorWeekStart(new Date(`${prefs.weekStartISO}T00:00:00`));
+        if (typeof weekStartISO === "string" && /^\d{4}-\d{2}-\d{2}$/.test(weekStartISO)) {
+          setAnchorWeekStart(new Date(`${weekStartISO}T00:00:00`));
         }
       } finally {
         if (!active) return;
@@ -2937,6 +2943,15 @@ export default function CoachCalendarMonth() {
     if (todayISO >= startISO && todayISO <= endISO) return todayISO;
     return startISO;
   }, [anchorMonth, calendarMode, todayISO, weekDates]);
+
+  useEffect(() => {
+    if (!calendarPrefsReady) return;
+    void saveCoachDateCursorForDate({
+      selectedDateIso: quickNewSessionDateISO,
+      source: "calendar",
+      weekStartsOn: weekStartsOn === 0 ? 0 : 1,
+    }).catch(() => {});
+  }, [calendarPrefsReady, quickNewSessionDateISO, weekStartsOn]);
 
   const openCreateSession = useCallback(() => {
     const targetDateISO = String(quickNewSessionDateISO ?? "").trim();

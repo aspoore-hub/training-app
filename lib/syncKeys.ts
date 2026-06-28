@@ -30,6 +30,7 @@ export const USER_KEYS = [
   "training_app_athlete_day_ui_state_v1",
   "training_app_athlete_month_ui_state_v1",
   "training_app_athlete_feedback_ui_state_v1",
+  "training_app_coach_date_cursor_v1",
 
   // Migration bookkeeping (safe as user-level)
   "training_app_migrations_v1",

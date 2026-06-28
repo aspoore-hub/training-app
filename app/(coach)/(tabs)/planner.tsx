@@ -60,6 +60,7 @@ import {
 } from "../../../lib/teamDataStore";
 import { useAppRuntime } from "../../../lib/appState";
 import { canEditTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
+import { loadCoachDateCursor, saveCoachDateCursorForDate } from "../../../lib/coachDateCursor";
 
 import type { WorkoutCategory } from "../../../lib/types";
 
@@ -506,8 +507,21 @@ export default function PlannerScreen() {
 
   useEffect(() => {
     const next = String(dateParam ?? "").trim();
-    if (!next || !isISODateOnly(next)) return;
-    setDateISO(next);
+    if (next && isISODateOnly(next)) {
+      setDateISO(next);
+      setPickerMonth(monthStart(parseISODateOnly(next)));
+      return;
+    }
+    let active = true;
+    (async () => {
+      const cursor = await loadCoachDateCursor().catch(() => null);
+      if (!active || !cursor?.selectedDateIso) return;
+      setDateISO(cursor.selectedDateIso);
+      setPickerMonth(monthStart(parseISODateOnly(cursor.selectedDateIso)));
+    })();
+    return () => {
+      active = false;
+    };
   }, [dateParam]);
 
   useEffect(() => {
@@ -728,6 +742,15 @@ export default function PlannerScreen() {
 
   const ws = useMemo(() => weekStartsOn(weekStartSetting), [weekStartSetting]);
   const weekStartISO = useMemo(() => getWeekStartISO(dateISO, ws), [dateISO, ws]);
+
+  useEffect(() => {
+    if (!isISODateOnly(dateISO)) return;
+    void saveCoachDateCursorForDate({
+      selectedDateIso: dateISO,
+      source: "planner",
+      weekStartsOn: ws,
+    }).catch(() => {});
+  }, [dateISO, ws]);
 
   useEffect(() => {
     void teamDataStore.actions.loadMileageWeek(weekStartISO).catch((error) => {

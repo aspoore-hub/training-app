@@ -53,6 +53,7 @@ import { buildWorkoutFlowSections, moveArrayItem } from "../../lib/athleteWorkou
 import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../lib/teamDataStore";
 import type { WorkoutCategory } from "../../lib/types";
 import { canEditTraining, getCurrentTeamRole, type TeamRole } from "../../lib/teamPermissions";
+import { loadCoachDateCursor, saveCoachDateCursorForDate } from "../../lib/coachDateCursor";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 const DEBUG_WORKOUTS = false;
@@ -1166,6 +1167,14 @@ function addDaysISO(dateISO: string, delta: number): string {
   return `${yy}-${mm}-${dd}`;
 }
 
+function todayISODate(): string {
+  const dt = new Date();
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
 function normalizeSession(value: string): "AM" | "PM" {
   const v = String(value ?? "").trim().toUpperCase();
   return v === "AM" ? "AM" : "PM";
@@ -1418,6 +1427,23 @@ export default function CoachWorkoutsDay() {
     const raw = Array.isArray(batch) ? batch[0] : batch;
     return String(raw ?? "").trim();
   }, [batch]);
+
+  useEffect(() => {
+    if (dayISO) return;
+    let active = true;
+    (async () => {
+      const cursor = await loadCoachDateCursor().catch(() => null);
+      if (!active) return;
+      const targetDateISO =
+        cursor?.selectedDateIso && isISODateOnly(cursor.selectedDateIso)
+          ? cursor.selectedDateIso
+          : todayISODate();
+      router.replace({ pathname: "/(coach)/workouts", params: { date: targetDateISO } });
+    })();
+    return () => {
+      active = false;
+    };
+  }, [dayISO, router]);
 
   const teamIdRef = useRef<string | null>(null);
   const isUnmountingRef = useRef(false);
@@ -2194,6 +2220,14 @@ export default function CoachWorkoutsDay() {
       activeDateISO: dayISO || null,
     });
   }, [batchParam, dayISO, highlightBatchKey, patchAppRuntime]);
+
+  useEffect(() => {
+    if (!isISODateOnly(dayISO)) return;
+    void saveCoachDateCursorForDate({
+      selectedDateIso: dayISO,
+      source: "workouts",
+    }).catch(() => {});
+  }, [dayISO]);
 
   useEffect(() => {
     let mounted = true;
