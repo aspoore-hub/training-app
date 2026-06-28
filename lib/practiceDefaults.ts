@@ -1,4 +1,7 @@
-import { loadJSON, saveJSON } from "./storage";
+import {
+  loadJSONWithTeamCloudSyncAuthoritative,
+  saveJSONWithTeamCloudSyncStrict,
+} from "./teamCloudSync";
 import { normalizeWorkoutTimeInput } from "./time";
 
 export const PRACTICE_DEFAULTS_KEY = "training_app_default_practice_times_v1";
@@ -35,12 +38,12 @@ export function normalizePracticeTimeDefaults(raw: any): PracticeTimeDefaults {
 }
 
 export async function loadPracticeTimeDefaults(): Promise<PracticeTimeDefaults> {
-  const raw = await loadJSON<any>(PRACTICE_DEFAULTS_KEY, emptyPracticeTimeDefaults());
+  const raw = await loadJSONWithTeamCloudSyncAuthoritative<any>(PRACTICE_DEFAULTS_KEY, emptyPracticeTimeDefaults());
   return normalizePracticeTimeDefaults(raw);
 }
 
 export async function savePracticeTimeDefaults(next: PracticeTimeDefaults) {
-  await saveJSON(PRACTICE_DEFAULTS_KEY, normalizePracticeTimeDefaults(next));
+  await saveJSONWithTeamCloudSyncStrict(PRACTICE_DEFAULTS_KEY, normalizePracticeTimeDefaults(next));
 }
 
 export function getDefaultPracticeTime(

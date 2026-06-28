@@ -10,6 +10,7 @@ import {
   type PracticeTimeDefaults,
   emptyPracticeTimeDefaults,
   loadPracticeTimeDefaults,
+  savePracticeTimeDefaults,
 } from "./practiceDefaults";
 import { loadJSON, saveJSON } from "./storage";
 import { sortCategoriesForDisplay } from "./sortHelpers";
@@ -431,7 +432,7 @@ export async function loadCoreCoachSettings(): Promise<CoachCoreSettings> {
 export async function loadCoachSettings(): Promise<CoachAppSettings> {
   const [core, storedDefaults] = await Promise.all([
     loadCoreCoachSettings(),
-    loadJSON<PracticeTimeDefaults>(PRACTICE_DEFAULTS_KEY, emptyPracticeTimeDefaults()),
+    loadPracticeTimeDefaults(),
   ]);
 
   const teamBacked = normalizeCoachSettings({
@@ -488,7 +489,7 @@ export async function saveCoachSettings(next: Partial<CoachAppSettings>): Promis
       saveJSON(DISTANCE_UNIT_KEY, merged.distanceUnit),
     ];
     if (hasDefaultSessionTimesOverride) {
-      writes.push(saveJSON(PRACTICE_DEFAULTS_KEY, toPracticeDefaults(merged)));
+      writes.push(savePracticeTimeDefaults(toPracticeDefaults(merged)));
     }
 
     await Promise.all(writes);

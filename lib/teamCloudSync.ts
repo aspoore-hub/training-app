@@ -199,6 +199,38 @@ export async function loadJSONWithTeamCloudSync<T>(
 }
 
 /**
+ * Cloud-authoritative team load:
+ * - uses the team cloud row whenever it exists, even if local storage is dirty/newer
+ * - updates local storage to match the cloud row
+ * - falls back to local/fallback only when the cloud row is missing or unreadable
+ */
+export async function loadJSONWithTeamCloudSyncAuthoritative<T>(
+  key: string,
+  fallback: T,
+  storage: StorageLike = AsyncStorage
+): Promise<T> {
+  try {
+    const remote = await downloadFromTeam(key);
+    if (remote) {
+      await storage.setItem(key, remote.payload);
+      await writeMeta(key, { version: remote.version, updatedAt: remote.updatedAt }, storage);
+      await clearDirty(key, storage);
+      return JSON.parse(remote.payload) as T;
+    }
+  } catch (e) {
+    console.warn("Team authoritative load failed", key, e);
+  }
+
+  try {
+    const raw = await storage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
  * Retry uploads for any team keys that are marked dirty.
  * Safe to call periodically.
  */
