@@ -685,6 +685,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const targetTypeRef = useRef<PlanBuilderTargetType>("athlete");
   const commitEditingFieldsRef = useRef<((keys?: string[]) => Promise<WorkoutPlanBuilderDraft | null>) | null>(null);
   const existingLoadSeqRef = useRef(0);
+  const autoPreviewRequestKeyRef = useRef<string | null>(null);
   const planBuilderClipboardRef = useRef("");
   const pendingPasteDebugRef = useRef<{
     rowCount: number;
@@ -2236,6 +2237,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       return;
     }
     if (!isDateISO(startISO) || !isDateISO(endISO) || endISO < startISO) {
+      setApplyPreviewRows([]);
       setApplyPreviewError("Choose a valid preview date range.");
       return;
     }
@@ -3100,6 +3102,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
     await commitEditingFields();
     const startISO = dateRows[0] ?? firstWeekStartISO;
     const endISO = dateRows[dateRows.length - 1] ?? addDaysISO(firstWeekStartISO, Math.max(0, weekCount * 7 - 1));
+    autoPreviewRequestKeyRef.current = null;
     setApplyPreviewScope("entire");
     setApplyPreviewStartISO(startISO);
     setApplyPreviewEndISO(endISO);
@@ -3109,6 +3112,49 @@ export default function WorkoutPlanBuilderDraftScreen() {
     setApplyPreviewFilter("all");
     setApplyPreviewOpen(true);
   }, [applyTargetValidationMessage, commitEditingFields, dateRows, firstWeekStartISO, weekCount]);
+
+  useEffect(() => {
+    if (!applyPreviewOpen) {
+      setApplyPreviewLoading(false);
+      return;
+    }
+
+    if (applyTargetValidationMessage) {
+      autoPreviewRequestKeyRef.current = null;
+      setApplyPreviewLoading(false);
+      setApplyPreviewRows([]);
+      setApplyPreviewError(applyTargetValidationMessage);
+      return;
+    }
+
+    const requestKey = JSON.stringify({
+      scope: applyPreviewScope,
+      startISO: applyPreviewStartISO,
+      endISO: applyPreviewEndISO,
+      targetId: selectedPlanTargetId,
+      targetAthleteIds: selectedTargetAthleteIds,
+      draftUpdatedAt: activeDraft?.updatedAt ?? 0,
+    });
+    if (autoPreviewRequestKeyRef.current === requestKey) return;
+    autoPreviewRequestKeyRef.current = requestKey;
+    setApplyPreviewLoading(true);
+    setApplyPreviewError(null);
+
+    const timer = setTimeout(() => {
+      void generateApplyPreview();
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [
+    activeDraft?.updatedAt,
+    applyPreviewEndISO,
+    applyPreviewOpen,
+    applyPreviewScope,
+    applyPreviewStartISO,
+    applyTargetValidationMessage,
+    generateApplyPreview,
+    selectedPlanTargetId,
+    selectedTargetAthleteIds,
+  ]);
 
   const applyActionBusy = applyNewLoading || applyUpdateLoading || applySafeLoading || applyPreviewLoading;
   const applyActionsDisabled = applyActionBusy || !!applyTargetValidationMessage;
@@ -4034,10 +4080,14 @@ export default function WorkoutPlanBuilderDraftScreen() {
                 style={[primaryButtonStyle, applyPreviewLoading && { opacity: 0.55 }]}
               >
                 <Text style={primaryButtonTextStyle}>
-                  {applyPreviewLoading ? "Generating..." : "Generate Preview"}
+                  {applyPreviewLoading ? "Generating..." : "Refresh Preview"}
                 </Text>
               </Pressable>
             </View>
+
+            {applyPreviewLoading ? (
+              <Text style={{ marginTop: 10, color: "#475569", fontWeight: "900" }}>Generating preview...</Text>
+            ) : null}
 
             {applyPreviewError ? (
               <Text style={{ marginTop: 10, color: "#b91c1c", fontWeight: "800" }}>{applyPreviewError}</Text>
@@ -4134,9 +4184,11 @@ export default function WorkoutPlanBuilderDraftScreen() {
                   </View>
                 </ScrollView>
               </>
-            ) : (
+            ) : applyPreviewLoading ? null : (
               <Text style={{ marginTop: 14, color: "#64748b", fontWeight: "700" }}>
-                Generate a preview to see what would be created, updated, skipped, or flagged for review.
+                {applyPreviewError
+                  ? "Resolve the validation message above, then refresh the preview."
+                  : "Refresh the preview to see what would be created, updated, skipped, or flagged for review."}
               </Text>
             )}
 
