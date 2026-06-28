@@ -96,6 +96,13 @@ type ApplyPreviewRow = {
   reason: string;
 };
 
+type ApplyTargetSummary = {
+  targetTypeLabel: string;
+  targetLabel: string;
+  eligibleAthleteCount: number;
+  validationMessage: string | null;
+};
+
 type ApplySummary = {
   title: string;
   created: number;
@@ -756,6 +763,32 @@ export default function WorkoutPlanBuilderDraftScreen() {
     if (targetType === "trainingGroup") return activeTrainingGroupAthleteIds;
     return selectedAthleteId ? [selectedAthleteId] : [];
   }, [activeTrainingGroupAthleteIds, selectedAthleteId, targetType]);
+
+  const applyTargetValidationMessage = useMemo(() => {
+    if (targetType === "trainingGroup") {
+      if (!String(selectedTrainingGroupId ?? "").trim()) return "Select a training group before previewing.";
+      if (!selectedTrainingGroup) return "Select a valid training group before previewing.";
+      if (selectedTargetAthleteIds.length === 0) return "Selected training group has no active athletes.";
+      return null;
+    }
+    if (!String(selectedAthleteId ?? "").trim() || selectedTargetAthleteIds.length === 0) {
+      return "Select at least one athlete before previewing.";
+    }
+    return null;
+  }, [selectedAthleteId, selectedTargetAthleteIds.length, selectedTrainingGroup, selectedTrainingGroupId, targetType]);
+
+  const applyTargetSummary = useMemo<ApplyTargetSummary>(() => {
+    const targetTypeLabel = targetType === "trainingGroup" ? "Training Group" : "Athletes";
+    const targetLabel = targetType === "trainingGroup"
+      ? String(selectedTrainingGroup?.name ?? "").trim() || "No training group selected"
+      : selectedAthlete ? rosterRowDisplayName(selectedAthlete) : "No athletes selected";
+    return {
+      targetTypeLabel,
+      targetLabel,
+      eligibleAthleteCount: selectedTargetAthleteIds.length,
+      validationMessage: applyTargetValidationMessage,
+    };
+  }, [applyTargetValidationMessage, selectedAthlete, selectedTargetAthleteIds.length, selectedTrainingGroup?.name, targetType]);
 
   const selectedSeason = useMemo(
     () => seasons.find((season) => String(season?.id ?? "").trim() === String(selectedSeasonId ?? "").trim()) ?? null,
@@ -2100,11 +2133,12 @@ export default function WorkoutPlanBuilderDraftScreen() {
           const existingSnapshot = existingCell?.source?.snapshot ?? null;
           const sourceWorkoutId = String(draftCell?.sourceWorkoutId ?? "").trim();
           const draftHasContent = draftCell ? hasDraftCellContent(draftCell) : false;
+          const draftRequestsApply = !!draftCell && (draftHasContent || draftCell.sourceType === "existing" || !!draftCell.originalSnapshot);
           let status: ApplyPreviewStatus = "unchanged";
           let reason = "No draft changes.";
 
           const eligibleCount = getEligibleTargetAthleteIdsForDate(dateISO).length;
-          if (eligibleCount === 0) {
+          if (draftRequestsApply && eligibleCount === 0) {
             status = "conflict";
             reason = "No eligible target athletes for this date.";
           } else if (existingCell?.conflictReason) {
@@ -2191,8 +2225,14 @@ export default function WorkoutPlanBuilderDraftScreen() {
     const targetId = String(selectedPlanTargetId ?? "").trim();
     const targetAthleteIds = selectedTargetAthleteIds;
 
+    if (applyTargetValidationMessage) {
+      setApplyPreviewRows([]);
+      setApplyPreviewError(applyTargetValidationMessage);
+      return;
+    }
     if (!targetId || targetAthleteIds.length === 0) {
-      setApplyPreviewError(`Select a ${planTargetLabel(targetType).toLowerCase()} with at least one eligible athlete before generating a preview.`);
+      setApplyPreviewRows([]);
+      setApplyPreviewError("Select a valid target before previewing.");
       return;
     }
     if (!isDateISO(startISO) || !isDateISO(endISO) || endISO < startISO) {
@@ -2225,9 +2265,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
     buildFreshApplyPreviewRows,
     commitEditingFields,
     getApplyScopeRange,
+    applyTargetValidationMessage,
     selectedPlanTargetId,
     selectedTargetAthleteIds,
-    targetType,
   ]);
 
   const visibleRangeLabel = dateRows.length > 0
@@ -2708,8 +2748,14 @@ export default function WorkoutPlanBuilderDraftScreen() {
     const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
     const targetAthleteIds = selectedTargetAthleteIds;
     const teamId = String((store as any)?.teamId ?? "").trim();
+    if (applyTargetValidationMessage) {
+      setApplyPreviewRows([]);
+      setApplyPreviewError(applyTargetValidationMessage);
+      return;
+    }
     if (!targetId || targetAthleteIds.length === 0) {
-      setApplyPreviewError(`Select a ${planTargetLabel(targetType).toLowerCase()} with at least one eligible athlete before creating workouts.`);
+      setApplyPreviewRows([]);
+      setApplyPreviewError("Select a valid target before creating workouts.");
       return;
     }
     if (!teamId) {
@@ -2799,10 +2845,10 @@ export default function WorkoutPlanBuilderDraftScreen() {
     confirmCreateNewWorkouts,
     createSafeNewDraftRows,
     getApplyScopeRange,
+    applyTargetValidationMessage,
     refreshExistingWorkoutOverlay,
     selectedTargetAthleteIds,
     store,
-    targetType,
   ]);
 
   const applySafeExistingUpdates = useCallback(async () => {
@@ -2811,8 +2857,14 @@ export default function WorkoutPlanBuilderDraftScreen() {
     const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
     const targetAthleteIds = selectedTargetAthleteIds;
     const teamId = String((store as any)?.teamId ?? "").trim();
+    if (applyTargetValidationMessage) {
+      setApplyPreviewRows([]);
+      setApplyPreviewError(applyTargetValidationMessage);
+      return;
+    }
     if (!targetId || targetAthleteIds.length === 0) {
-      setApplyPreviewError(`Select a ${planTargetLabel(targetType).toLowerCase()} with at least one eligible athlete before updating workouts.`);
+      setApplyPreviewRows([]);
+      setApplyPreviewError("Select a valid target before updating workouts.");
       return;
     }
     if (!isDateISO(startISO) || !isDateISO(endISO) || endISO < startISO) {
@@ -2902,11 +2954,11 @@ export default function WorkoutPlanBuilderDraftScreen() {
     commitEditingFields,
     confirmUpdateExistingWorkouts,
     getApplyScopeRange,
+    applyTargetValidationMessage,
     loadFreshExistingCellIndex,
     refreshExistingWorkoutOverlay,
     selectedTargetAthleteIds,
     store,
-    targetType,
     updateSafeExistingDraftRows,
   ]);
 
@@ -2916,8 +2968,14 @@ export default function WorkoutPlanBuilderDraftScreen() {
     const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
     const targetAthleteIds = selectedTargetAthleteIds;
     const teamId = String((store as any)?.teamId ?? "").trim();
+    if (applyTargetValidationMessage) {
+      setApplyPreviewRows([]);
+      setApplyPreviewError(applyTargetValidationMessage);
+      return;
+    }
     if (!targetId || targetAthleteIds.length === 0) {
-      setApplyPreviewError(`Select a ${planTargetLabel(targetType).toLowerCase()} with at least one eligible athlete before applying safe changes.`);
+      setApplyPreviewRows([]);
+      setApplyPreviewError("Select a valid target before applying safe changes.");
       return;
     }
     if (!teamId) {
@@ -3029,6 +3087,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
     createSafeNewDraftRows,
     deleteSafeClearedDraftRows,
     getApplyScopeRange,
+    applyTargetValidationMessage,
     loadFreshExistingCellIndex,
     refreshExistingWorkoutOverlay,
     selectedTargetAthleteIds,
@@ -3045,13 +3104,14 @@ export default function WorkoutPlanBuilderDraftScreen() {
     setApplyPreviewStartISO(startISO);
     setApplyPreviewEndISO(endISO);
     setApplyPreviewRows([]);
-    setApplyPreviewError(null);
+    setApplyPreviewError(applyTargetValidationMessage);
     setLastApplySummary(null);
     setApplyPreviewFilter("all");
     setApplyPreviewOpen(true);
-  }, [commitEditingFields, dateRows, firstWeekStartISO, weekCount]);
+  }, [applyTargetValidationMessage, commitEditingFields, dateRows, firstWeekStartISO, weekCount]);
 
   const applyActionBusy = applyNewLoading || applyUpdateLoading || applySafeLoading || applyPreviewLoading;
+  const applyActionsDisabled = applyActionBusy || !!applyTargetValidationMessage;
 
   const renderSelectedMetadataChips = useCallback(
     (ids: string[], kind: MetadataPickerField) => {
@@ -3221,8 +3281,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
           </Pressable>
           <Pressable
             onPress={() => void openApplyPreview()}
-            disabled={!selectedPlanTargetId || selectedTargetAthleteIds.length === 0}
-            style={[primaryButtonStyle, (!selectedPlanTargetId || selectedTargetAthleteIds.length === 0) && { opacity: 0.45 }]}
+            style={primaryButtonStyle}
           >
             <Text style={primaryButtonTextStyle}>Preview Apply...</Text>
           </Pressable>
@@ -3911,6 +3970,23 @@ export default function WorkoutPlanBuilderDraftScreen() {
               </Text>
             </View>
 
+            <View style={{ marginTop: 10, borderWidth: 1, borderColor: "#dbe2ee", borderRadius: 12, backgroundColor: "#f8fafc", padding: 10, gap: 4 }}>
+              <Text style={{ color: "#334155", fontWeight: "900" }}>
+                Target type: {applyTargetSummary.targetTypeLabel}
+              </Text>
+              <Text style={{ color: "#475569", fontWeight: "800" }}>
+                Selected: {applyTargetSummary.targetLabel}
+              </Text>
+              <Text style={{ color: "#475569", fontWeight: "800" }}>
+                Eligible athlete count: {applyTargetSummary.eligibleAthleteCount}
+              </Text>
+              {applyTargetSummary.validationMessage ? (
+                <Text style={{ color: "#b91c1c", fontWeight: "900" }}>
+                  {applyTargetSummary.validationMessage}
+                </Text>
+              ) : null}
+            </View>
+
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, alignItems: "flex-end", marginTop: 12 }}>
               <View>
                 <Text style={{ fontSize: 12, fontWeight: "900", color: "#475569", marginBottom: 6 }}>Scope</Text>
@@ -4070,8 +4146,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
               </Pressable>
               <Pressable
                 onPress={() => void applyNewDraftWorkouts()}
-                disabled={applyActionBusy}
-                style={[secondaryButtonStyle, applyActionBusy && { opacity: 0.55 }]}
+                disabled={applyActionsDisabled}
+                style={[secondaryButtonStyle, applyActionsDisabled && { opacity: 0.55 }]}
               >
                 <Text style={secondaryButtonTextStyle}>
                   {applyNewLoading ? "Creating..." : "Import New Only"}
@@ -4079,8 +4155,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
               </Pressable>
               <Pressable
                 onPress={() => void applySafeExistingUpdates()}
-                disabled={applyActionBusy}
-                style={[secondaryButtonStyle, applyActionBusy && { opacity: 0.55 }]}
+                disabled={applyActionsDisabled}
+                style={[secondaryButtonStyle, applyActionsDisabled && { opacity: 0.55 }]}
               >
                 <Text style={secondaryButtonTextStyle}>
                   {applyUpdateLoading ? "Updating..." : "Update Safe Existing"}
@@ -4088,8 +4164,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
               </Pressable>
               <Pressable
                 onPress={() => void applySafeChanges()}
-                disabled={applyActionBusy}
-                style={[primaryButtonStyle, applyActionBusy && { opacity: 0.55 }]}
+                disabled={applyActionsDisabled}
+                style={[primaryButtonStyle, applyActionsDisabled && { opacity: 0.55 }]}
               >
                 <Text style={primaryButtonTextStyle}>
                   {applySafeLoading ? "Applying..." : "Apply Safe Changes"}
