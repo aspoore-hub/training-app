@@ -10,11 +10,12 @@ export type CoachNavItem = {
 
 export const COACH_NAV_ITEMS: CoachNavItem[] = [
   { key: "calendar", label: "Calendar", href: "/(coach)/(tabs)/calendar", icon: "calendar-outline" },
+  { key: "plan-builder", label: "Workout Plan Builder", href: "/(coach)/(tabs)/plan-builder", icon: "map-outline" },
   { key: "training-logs", label: "Training Logs", href: "/(coach)/(tabs)/training-logs", icon: "document-text-outline" },
   { key: "mileage", label: "Mileage", href: "/(coach)/(tabs)/mileage", icon: "grid-outline" },
   { key: "roster", label: "Roster", href: "/(coach)/(tabs)/roster", icon: "people-outline" },
   { key: "workout-catalog", label: "Workout Catalog", href: "/(coach)/(tabs)/workout-catalog", icon: "library-outline" },
-  { key: "auxiliary-routines", label: "Drill Routines", href: "/(coach)/(tabs)/auxiliary-routines", icon: "fitness-outline" },
+  { key: "auxiliary-routines", label: "Drill Routines", href: "/(coach)/(tabs)/auxiliary-routines", icon: "barbell" },
   { key: "training-groups", label: "Training Groups", href: "/(coach)/(tabs)/training-groups", icon: "people-circle-outline" },
   { key: "categories", label: "Workout Categories", href: "/(coach)/(tabs)/categories", icon: "pricetags-outline" },
   { key: "settings", label: "Settings", href: "/(coach)/(tabs)/settings", icon: "settings-outline" },

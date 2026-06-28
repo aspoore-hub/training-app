@@ -439,9 +439,9 @@ function resolveCellState(args: {
 
 function cellStatusLabel(state: PlanBuilderCellState) {
   if (state === "existing") return "Existing";
-  if (state === "new") return "New draft";
+  if (state === "new") return "Planned";
   if (state === "changed") return "Changed";
-  if (state === "cleared") return "Cleared draft";
+  if (state === "cleared") return "Cleared plan";
   if (state === "conflict") return "Multiple workouts";
   return "";
 }
@@ -2136,7 +2136,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
           const draftHasContent = draftCell ? hasDraftCellContent(draftCell) : false;
           const draftRequestsApply = !!draftCell && (draftHasContent || draftCell.sourceType === "existing" || !!draftCell.originalSnapshot);
           let status: ApplyPreviewStatus = "unchanged";
-          let reason = "No draft changes.";
+          let reason = "No plan changes.";
 
           const eligibleCount = getEligibleTargetAthleteIdsForDate(dateISO).length;
           if (draftRequestsApply && eligibleCount === 0) {
@@ -2148,8 +2148,8 @@ export default function WorkoutPlanBuilderDraftScreen() {
           } else if (targetType === "trainingGroup" && draftCell && draftHasContent && existingCell?.source) {
             status = snapshotsEqual(draftSnapshot, existingSnapshot) ? "unchanged" : "update";
             reason = status === "update"
-              ? `Draft will apply to ${eligibleCount} eligible group member${eligibleCount === 1 ? "" : "s"}.`
-              : "Draft matches the current group values.";
+              ? `Plan will apply to ${eligibleCount} eligible group member${eligibleCount === 1 ? "" : "s"}.`
+              : "Plan matches the current group values.";
           } else if (draftCell?.sourceType === "existing" || draftCell?.originalSnapshot) {
             if (!draftHasContent) {
               status = "cleared";
@@ -2165,34 +2165,34 @@ export default function WorkoutPlanBuilderDraftScreen() {
               reason = "Source slot now points to a different workout.";
             } else if (!snapshotsEqual(existingCell.source.snapshot, draftCell.originalSnapshot)) {
               status = "conflict";
-              reason = "Existing workout changed since this draft was created.";
+              reason = "Existing workout changed since this plan was last saved.";
             } else if (snapshotsEqual(draftSnapshot, existingCell.source.snapshot)) {
               status = "unchanged";
-              reason = "Draft matches the current existing workout.";
+              reason = "Plan matches the current existing workout.";
             } else {
               status = "update";
-              reason = "Draft differs from the existing workout.";
+              reason = "Plan differs from the existing workout.";
             }
           } else if (draftCell && draftHasContent) {
             if (existingCell?.source) {
               if (targetType === "trainingGroup") {
                 status = "update";
-                reason = `Draft will apply to ${eligibleCount} eligible group member${eligibleCount === 1 ? "" : "s"}.`;
+                reason = `Plan will apply to ${eligibleCount} eligible group member${eligibleCount === 1 ? "" : "s"}.`;
               } else {
                 status = "conflict";
-                reason = "Draft would create into a slot that now has an existing workout.";
+                reason = "Plan would create into a slot that now has an existing workout.";
               }
             } else {
               status = "new";
               reason = targetType === "trainingGroup"
-                ? `Draft content in an empty real slot for ${eligibleCount} eligible group member${eligibleCount === 1 ? "" : "s"}.`
-                : "Draft content in an empty real slot.";
+                ? `Planned workout in an empty real slot for ${eligibleCount} eligible group member${eligibleCount === 1 ? "" : "s"}.`
+                : "Planned workout in an empty real slot.";
             }
           } else if (existingCell?.source) {
             status = "unchanged";
             reason = targetType === "trainingGroup" && (existingCell.mixedFields?.length ?? 0) > 0
               ? `Existing group values are mixed: ${existingCell.mixedFields?.join(", ")}.`
-              : "Existing workout has no draft override.";
+              : "Existing workout has no planned change.";
           }
 
           return {
@@ -2783,7 +2783,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       setApplyPreviewRows(firstFreshRows);
       const firstNewRows = firstFreshRows.filter((row) => row.status === "new");
       if (firstNewRows.length === 0) {
-        setApplyPreviewError("No new draft workouts are safe to create.");
+        setApplyPreviewError("No new planned workouts are safe to create.");
         return;
       }
 
@@ -2801,7 +2801,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       setApplyPreviewRows(finalFreshRows);
       const rowsToCreate = finalFreshRows.filter((row) => row.status === "new");
       if (rowsToCreate.length === 0) {
-        setApplyPreviewError("No new draft workouts remain safe to create after the fresh conflict check.");
+        setApplyPreviewError("No new planned workouts remain safe to create after the fresh conflict check.");
         return;
       }
 
@@ -2836,7 +2836,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       });
       setApplyPreviewError(null);
     } catch (error: any) {
-      setApplyPreviewError(String(error?.message ?? "Could not create new draft workouts."));
+      setApplyPreviewError(String(error?.message ?? "Could not create new planned workouts."));
     } finally {
       setApplyNewLoading(false);
     }
@@ -3188,7 +3188,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
   if (readOnlyPlanBuilder) {
     return (
-      <View style={{ flex: 1, backgroundColor: "#f3f0e8" }}>
+      <View style={{ flex: 1, backgroundColor: "#f8fafc" }}>
         <ScrollView contentContainerStyle={{ padding: 18, gap: 14 }}>
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
             <View>
@@ -3199,7 +3199,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
             </View>
             <Pressable
               onPress={() => router.push("/(coach)/(tabs)/calendar")}
-              style={{ borderWidth: 1, borderColor: "#d6d3c8", borderRadius: 999, paddingHorizontal: 14, paddingVertical: 9, backgroundColor: "#fffaf0" }}
+              style={{ borderWidth: 1, borderColor: "#dbe2ee", borderRadius: 999, paddingHorizontal: 14, paddingVertical: 9, backgroundColor: "#fff" }}
             >
               <Text style={{ fontWeight: "900", color: "#334155" }}>Back to Calendar</Text>
             </Pressable>
@@ -3218,13 +3218,13 @@ export default function WorkoutPlanBuilderDraftScreen() {
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: "#f3f0e8" }}>
+    <View style={{ flex: 1, backgroundColor: "#f8fafc" }}>
       <ScrollView contentContainerStyle={{ padding: 18, gap: 14 }}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <View>
             <Text style={{ fontSize: 28, fontWeight: "900", color: "#1f2933" }}>Workout Plan Builder</Text>
             <Text style={{ marginTop: 4, color: "#64748b", fontWeight: "700" }}>
-              Draft matrix for fast long-range planning.
+              Build longer-range workout plans, preview changes, and safely apply them to athlete calendars.
             </Text>
           </View>
           <Pressable
@@ -3232,18 +3232,18 @@ export default function WorkoutPlanBuilderDraftScreen() {
               await commitEditingFields();
               router.push("/(coach)/(tabs)/planner");
             }}
-            style={{ borderWidth: 1, borderColor: "#d6d3c8", borderRadius: 999, paddingHorizontal: 14, paddingVertical: 9, backgroundColor: "#fffaf0" }}
+            style={{ borderWidth: 1, borderColor: "#dbe2ee", borderRadius: 999, paddingHorizontal: 14, paddingVertical: 9, backgroundColor: "#fff" }}
           >
             <Text style={{ fontWeight: "900", color: "#334155" }}>Back to Planner</Text>
           </Pressable>
         </View>
 
-        <View style={{ borderWidth: 1, borderColor: "#f0c36a", backgroundColor: "#fff7dd", borderRadius: 18, padding: 14 }}>
-          <Text style={{ fontSize: 14, fontWeight: "900", color: "#7c4a03" }}>
-            Draft only - does not update Calendar yet.
+        <View style={{ borderWidth: 1, borderColor: "#dbe2ee", backgroundColor: "#f8fafc", borderRadius: 18, padding: 14 }}>
+          <Text style={{ fontSize: 14, fontWeight: "900", color: "#334155" }}>
+            Plan, review, and apply training with control.
           </Text>
-          <Text style={{ marginTop: 4, color: "#7c4a03", fontWeight: "700" }}>
-            This screen saves isolated plan drafts only. It does not create workout batches, change mileage, or alter exports.
+          <Text style={{ marginTop: 4, color: "#64748b", fontWeight: "700" }}>
+            Use Apply Preview to review new workouts, safe updates, conflicts, and skipped rows before anything is added to athlete calendars.
           </Text>
         </View>
 
@@ -3335,9 +3335,9 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
         <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <Text style={{ fontWeight: "900", color: "#334155" }}>Range: {visibleRangeLabel}</Text>
-          <Text style={{ color: "#64748b", fontWeight: "700" }}>Draft cells: {draftCellCount}</Text>
+          <Text style={{ color: "#64748b", fontWeight: "700" }}>Planned cells: {draftCellCount}</Text>
           <Text style={{ color: saveState === "error" ? "#b91c1c" : "#64748b", fontWeight: "800" }}>
-            {saveState === "dirty" ? "Unsaved cell edit" : saveState === "saving" ? "Saving draft..." : saveState === "saved" ? "Draft saved" : saveState === "error" ? "Draft save failed" : "Draft ready"}
+            {saveState === "dirty" ? "Unsaved cell edit" : saveState === "saving" ? "Saving plan..." : saveState === "saved" ? "Plan saved" : saveState === "error" ? "Plan save failed" : "Plan ready"}
           </Text>
           <Text style={{ color: existingWorkoutsError ? "#b91c1c" : "#64748b", fontWeight: "800" }}>
             {existingWorkoutsLoading ? "Loading existing workouts..." : existingWorkoutsError ? existingWorkoutsError : "Existing workouts overlay ready"}
@@ -3763,7 +3763,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
               Tags / Metadata {metadataEditorDateISO ? `• ${formatDateShort(metadataEditorDateISO)}` : ""}
             </Text>
             <Text style={{ marginBottom: 12, color: "#64748b", fontWeight: "700" }}>
-              Tags are draft-only. They are saved with this plan draft and do not update Calendar.
+              Tags and routine metadata are saved with this plan and included in Apply Preview.
             </Text>
             <ScrollView style={{ maxHeight: 520 }} keyboardShouldPersistTaps="handled">
               {metadataEditorDateISO
@@ -4154,7 +4154,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
                       <Text style={[previewHeaderTextStyle, { width: 92 }]}>Date</Text>
                       <Text style={[previewHeaderTextStyle, { width: 56 }]}>Day</Text>
                       <Text style={[previewHeaderTextStyle, { width: 70 }]}>Session</Text>
-                      <Text style={[previewHeaderTextStyle, { flex: 1 }]}>Draft title</Text>
+                      <Text style={[previewHeaderTextStyle, { flex: 1 }]}>Planned title</Text>
                       <Text style={[previewHeaderTextStyle, { flex: 1 }]}>Existing title</Text>
                       <Text style={[previewHeaderTextStyle, { width: 100 }]}>Status</Text>
                       <Text style={[previewHeaderTextStyle, { flex: 1.2 }]}>Reason</Text>

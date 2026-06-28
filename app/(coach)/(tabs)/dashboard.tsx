@@ -62,18 +62,18 @@ export default function Dashboard() {
           onPress={() => router.push("/(coach)/(tabs)/plan-builder")}
           style={{
             borderWidth: 1,
-            borderColor: "#f0c36a",
+            borderColor: "#dbe2ee",
             padding: 14,
             borderRadius: 12,
             alignItems: "center",
-            backgroundColor: "#fff7dd",
+            backgroundColor: "#ffffff",
           }}
         >
-          <Text style={{ fontWeight: "800", color: "#7c4a03" }}>
-            Workout Plan Builder (Draft)
+          <Text style={{ fontWeight: "800", color: "#1f2a44" }}>
+            Workout Plan Builder
           </Text>
-          <Text style={{ marginTop: 4, color: "#7c4a03", fontWeight: "600" }}>
-            Draft only - does not update Calendar yet.
+          <Text style={{ marginTop: 4, color: "#64748b", fontWeight: "600", textAlign: "center" }}>
+            Build longer-range workout plans, preview changes, and safely apply them to athlete calendars.
           </Text>
         </Pressable>
       ) : (
