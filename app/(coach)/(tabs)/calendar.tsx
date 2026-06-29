@@ -45,6 +45,7 @@ import {
   loadTeamRoster,
   resolveAthleteSeasonWindowWithTenure,
   resolveAthleteDisplayName,
+  type TeamRosterAthlete,
 } from "../../../lib/teamRoster";
 import { loadAuxiliaryRoutines, type AuxiliaryRoutine } from "../../../lib/auxiliaryRoutines";
 import { loadJSON, saveJSON } from "../../../lib/storage";
@@ -55,7 +56,6 @@ import { getWeekLabelTone, getWeekLabelToneColors, getWeekLabelToneText, type We
 import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../../lib/teamDataStore";
 import { setSeasonWeekVisibilityByDateRange } from "../../../lib/seasonWeekVisibility";
 import { canEditTraining, canExport, canPublishTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
-import { splitDisplayNameForEdit } from "../../../lib/athleteName";
 
 const SCREEN_W = Dimensions.get("window").width;
 const COACH_CALENDAR_VIEW_PREFS_KEY = "coach_calendar_view_prefs_v1";
@@ -202,6 +202,19 @@ function formatPdfDateShort(dateISO: string): string {
   return `${dt.getDate()}-${dt.toLocaleDateString(undefined, { month: "short" })}`;
 }
 
+function getWeeklyRoutineNames(
+  routineIds: string[],
+  routineById?: Map<string, AuxiliaryRoutine>
+): string[] {
+  if (!routineById) return [];
+  return (Array.isArray(routineIds) ? routineIds : [])
+    .map((routineId) => {
+      const routine = routineById.get(String(routineId ?? "").trim());
+      return String(routine?.title ?? "").trim();
+    })
+    .filter(Boolean);
+}
+
 function buildWeeklyHandoutHtml(args: {
   weekLabel: string;
   weekAnnotation?: string;
@@ -209,6 +222,7 @@ function buildWeeklyHandoutHtml(args: {
   generatedAtLabel?: string;
   days: WeeklyDaySection[];
   categories: WorkoutCategory[];
+  auxiliaryRoutineById?: Map<string, AuxiliaryRoutine>;
 }): string {
   const weekAnnotationText = String(args.weekAnnotation ?? "").trim();
   const weekAnnotationTone = args.weekAnnotationTone ?? getWeekLabelTone(weekAnnotationText);
@@ -226,6 +240,16 @@ function buildWeeklyHandoutHtml(args: {
                 const title = String(workout.title ?? "").trim();
                 const batchNotes = String(workout.details ?? "").trim();
                 const showBatchNotes = batchNotes.length > 0 && batchNotes.toLowerCase() !== "no notes";
+                const preRoutineNames = getWeeklyRoutineNames(workout.preRoutineIds, args.auxiliaryRoutineById);
+                const postRoutineNames = getWeeklyRoutineNames(workout.postRoutineIds, args.auxiliaryRoutineById);
+                const routineLinesHtml = [
+                  preRoutineNames.length > 0
+                    ? `<div class="workout-routine-line"><span class="workout-routine-label">Pre:</span> ${escapePdfHtml(preRoutineNames.join(", "))}</div>`
+                    : "",
+                  postRoutineNames.length > 0
+                    ? `<div class="workout-routine-line"><span class="workout-routine-label">Post:</span> ${escapePdfHtml(postRoutineNames.join(", "))}</div>`
+                    : "",
+                ].join("");
                 const accentColors = normalizeWorkoutAccentColors(workout.categories, args.categories);
                 const accentBackground = buildVerticalAccentBackground(accentColors);
                 const dotsHtml = (Array.isArray(workout.categories) ? workout.categories : [])
@@ -264,6 +288,7 @@ function buildWeeklyHandoutHtml(args: {
                       </div>
                       ${dotsHtml ? `<div class="workout-categories-row">${dotsHtml}</div>` : ""}
                       ${title ? `<div class="workout-title">${escapePdfHtml(title)}</div>` : ""}
+                      ${routineLinesHtml}
                       ${showBatchNotes ? `<div class="workout-batch-notes">${escapePdfHtml(batchNotes)}</div>` : ""}
                       ${groups}
                     </div>
@@ -465,6 +490,20 @@ function buildWeeklyHandoutHtml(args: {
         color: #334155;
         white-space: normal;
         word-break: break-word;
+      }
+
+      .workout-routine-line {
+        font-size: 7px;
+        line-height: 1.2;
+        margin: 0 0 2px 0;
+        color: #475569;
+        white-space: normal;
+        word-break: break-word;
+      }
+
+      .workout-routine-label {
+        font-weight: 800;
+        color: #1f2937;
       }
 
       .group-details {
@@ -1176,8 +1215,7 @@ function athleteLastNamePreview(workout: WeeklyWorkoutSection): string {
           lastNames.add(trimmed.split(",")[0].trim());
           return;
         }
-        const lastName = splitDisplayNameForEdit(trimmed).lastName || trimmed;
-        lastNames.add(lastName);
+        lastNames.add(trimmed);
       });
     });
   });
@@ -1258,12 +1296,42 @@ function parseDisplayName(fullName: string): ParsedDisplayName {
   };
 }
 
-function buildCompactWeeklyAthleteLabels(records: Array<{ athleteId: string; resolvedName: string }>): Map<string, string> {
+function parseWeeklyAthleteName(record: {
+  resolvedName: string;
+  firstName?: string;
+  lastName?: string;
+  displayName?: string;
+}): ParsedDisplayName {
+  const first = String(record.firstName ?? "").trim().replace(/\s+/g, " ");
+  const last = String(record.lastName ?? "").trim().replace(/\s+/g, " ");
+  const display = String(record.displayName ?? record.resolvedName ?? "").trim().replace(/\s+/g, " ");
+  if (first || last) {
+    const full = `${first} ${last}`.trim() || display || "Unknown athlete";
+    return {
+      full,
+      last,
+      first,
+      firstInitial: first ? first.charAt(0).toUpperCase() : "",
+      secondInitial: "",
+    };
+  }
+  return parseDisplayName(display || record.resolvedName);
+}
+
+function buildCompactWeeklyAthleteLabels(
+  records: Array<{
+    athleteId: string;
+    resolvedName: string;
+    firstName?: string;
+    lastName?: string;
+    displayName?: string;
+  }>
+): Map<string, string> {
   const parsedById = new Map<string, ParsedDisplayName>();
   for (const record of records) {
     if (!record.athleteId) continue;
     if (!parsedById.has(record.athleteId)) {
-      parsedById.set(record.athleteId, parseDisplayName(record.resolvedName));
+      parsedById.set(record.athleteId, parseWeeklyAthleteName(record));
     }
   }
 
@@ -1393,6 +1461,7 @@ export default function CoachCalendarMonth() {
   const [categories, setCategories] = useState<WorkoutCategory[]>(() => getCachedCoachCategories());
   const [auxiliaryRoutines, setAuxiliaryRoutines] = useState<AuxiliaryRoutine[]>([]);
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
+  const [rosterAthleteById, setRosterAthleteById] = useState<Map<string, TeamRosterAthlete>>(new Map());
   const [anchorMonth, setAnchorMonth] = useState(() => monthStart(new Date()));
   const [anchorWeekStart, setAnchorWeekStart] = useState(() => startOfWeek(new Date(), 1));
   const [showSavedBanner, setShowSavedBanner] = useState(false);
@@ -1634,6 +1703,13 @@ export default function CoachCalendarMonth() {
           setCategories(getCategoryOptions({ categories: categoryDefs }));
           setAuxiliaryRoutines(Array.isArray(savedAuxiliaryRoutines) ? savedAuxiliaryRoutines : []);
           setRosterNameById(rosterMap);
+          setRosterAthleteById(
+            new Map(
+              (Array.isArray(rosterRows) ? rosterRows : [])
+                .map((athlete) => [String(athlete.id ?? "").trim(), athlete] as const)
+                .filter(([athleteId]) => !!athleteId)
+            )
+          );
           setWeekLabelsByStart(weekLabels ?? {});
         }
       );
@@ -2323,12 +2399,19 @@ export default function CoachCalendarMonth() {
         .filter((w) => weekDateISOs.includes(getWorkoutDateISO(w)))
         .map((w) => {
           const athleteId = String(w.athleteId ?? "").trim();
+          const rosterAthlete = athleteId ? rosterAthleteById.get(athleteId) : null;
           const resolvedName = resolveAthleteDisplayName(
             athleteId,
             rosterNameLookup,
             getAthleteFallbackName(w)
           );
-          return { athleteId, resolvedName: resolvedName || "Unknown athlete" };
+          return {
+            athleteId,
+            resolvedName: resolvedName || "Unknown athlete",
+            firstName: rosterAthlete?.firstName,
+            lastName: rosterAthlete?.lastName,
+            displayName: rosterAthlete?.displayName,
+          };
         })
     );
 
@@ -2491,7 +2574,7 @@ export default function CoachCalendarMonth() {
         workouts,
       };
     });
-  }, [athleteFilterOptions, categories, rosterNameById]);
+  }, [athleteFilterOptions, categories, rosterAthleteById, rosterNameById]);
 
   const weeklyDaySections = useMemo<WeeklyDaySection[]>(() => {
     const headerByBatchId: Record<string, string> = {};
@@ -3023,6 +3106,7 @@ export default function CoachCalendarMonth() {
         generatedAtLabel,
         days: exportDays,
         categories,
+        auxiliaryRoutineById,
       });
       debugCalendar("[weekly-pdf] using handout html builder");
       debugCalendar("[weekly-pdf] html preview", html.slice(0, 400));
@@ -3050,7 +3134,7 @@ export default function CoachCalendarMonth() {
     } finally {
       setExportingPdf(false);
     }
-  }, [calendarMode, categories, currentWeekAnnotation, exportingPdf, weekDateISOs, weekLabel, weeklyDaySectionsForDisplay]);
+  }, [auxiliaryRoutineById, calendarMode, categories, currentWeekAnnotation, currentWeekLabelType, exportingPdf, weekDateISOs, weekLabel, weeklyDaySectionsForDisplay]);
 
   const openTrainingPlanExport = useCallback(() => {
     const startISO = currentWeekStartISO;
