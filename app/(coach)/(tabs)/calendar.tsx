@@ -225,8 +225,6 @@ function buildWeeklyHandoutHtml(args: {
   auxiliaryRoutineById?: Map<string, AuxiliaryRoutine>;
 }): string {
   const weekAnnotationText = String(args.weekAnnotation ?? "").trim();
-  const weekAnnotationTone = args.weekAnnotationTone ?? getWeekLabelTone(weekAnnotationText);
-  const weekAnnotationColors = getWeekLabelToneColors(weekAnnotationTone);
   const dayColumns = (Array.isArray(args.days) ? args.days : [])
     .map((day) => {
       const workoutHtml =
@@ -236,31 +234,36 @@ function buildWeeklyHandoutHtml(args: {
               .map((workout) => {
                 const time = String(workout.time ?? "").trim() || String(workout.session ?? "").trim();
                 const location = String(workout.location ?? "").trim();
-                const headerLine = [time, location ? `@ ${location}` : ""].filter(Boolean).join(" ");
+                const categoryNames = (Array.isArray(workout.categories) ? workout.categories : [])
+                  .map((cat) => String(cat ?? "").trim() || "Other")
+                  .filter(Boolean);
+                const categorySummary = categoryNames.join(" + ");
+                const headerLine = [
+                  [time, location ? `@ ${location}` : ""].filter(Boolean).join(" "),
+                  categorySummary,
+                ].filter(Boolean).join(" · ");
                 const title = String(workout.title ?? "").trim();
                 const batchNotes = String(workout.details ?? "").trim();
                 const showBatchNotes = batchNotes.length > 0 && batchNotes.toLowerCase() !== "no notes";
                 const preRoutineNames = getWeeklyRoutineNames(workout.preRoutineIds, args.auxiliaryRoutineById);
                 const postRoutineNames = getWeeklyRoutineNames(workout.postRoutineIds, args.auxiliaryRoutineById);
-                const routineLinesHtml = [
+                const auxParts = [
                   preRoutineNames.length > 0
-                    ? `<div class="workout-routine-line"><span class="workout-routine-label">Pre:</span> ${escapePdfHtml(preRoutineNames.join(", "))}</div>`
+                    ? `Pre ${preRoutineNames.join(", ")}`
                     : "",
                   postRoutineNames.length > 0
-                    ? `<div class="workout-routine-line"><span class="workout-routine-label">Post:</span> ${escapePdfHtml(postRoutineNames.join(", "))}</div>`
+                    ? `Post ${postRoutineNames.join(", ")}`
                     : "",
-                ].join("");
+                ].filter(Boolean);
+                const routineLineHtml = auxParts.length > 0
+                  ? `<div class="workout-routine-line"><span class="workout-routine-label">Aux:</span> ${escapePdfHtml(auxParts.join(" · "))}</div>`
+                  : "";
                 const accentColors = normalizeWorkoutAccentColors(workout.categories, args.categories);
                 const accentBackground = buildVerticalAccentBackground(accentColors);
-                const dotsHtml = (Array.isArray(workout.categories) ? workout.categories : [])
+                const dotsHtml = categoryNames
                   .map((cat) => {
                     const color = categoryColorByName(args.categories, cat);
-                    return `
-                      <span class="workout-category-item">
-                        <span class="workout-dot" style="background:${escapePdfHtml(color)};"></span>
-                        <span class="workout-category-label">${escapePdfHtml(String(cat ?? "").trim() || "Other")}</span>
-                      </span>
-                    `;
+                    return `<span class="workout-dot" style="background:${escapePdfHtml(color)};"></span>`;
                   })
                   .join("");
                 const groups = (Array.isArray(workout.groups) ? workout.groups : [])
@@ -271,8 +274,10 @@ function buildWeeklyHandoutHtml(args: {
                         const names = (Array.isArray(line.athleteNames) ? line.athleteNames : []).join(", ");
                         const showDetails = !!details;
                         return `
-                          ${showDetails ? `<div class="group-details">${escapePdfHtml(details)}</div>` : ""}
-                          <div class="group-athletes">${escapePdfHtml(names || "Unknown athlete")}</div>
+                          <div class="group-line">
+                            ${showDetails ? `<span class="group-details">${escapePdfHtml(details)}</span>` : ""}
+                            <span class="group-athletes">${escapePdfHtml(names || "Unknown athlete")}</span>
+                          </div>
                         `;
                       })
                       .join("")
@@ -283,13 +288,13 @@ function buildWeeklyHandoutHtml(args: {
                   <div class="workout-block">
                     <div class="workout-accent" style="background:${escapePdfHtml(accentBackground)};"></div>
                     <div class="workout-content">
-                      <div class="workout-header-row">
-                        <div class="workout-header">${escapePdfHtml(headerLine || "Workout")}</div>
+                      <div class="workout-meta-row">
+                        ${dotsHtml ? `<span class="workout-dot-strip">${dotsHtml}</span>` : ""}
+                        <span class="workout-header">${escapePdfHtml(headerLine || "Workout")}</span>
                       </div>
-                      ${dotsHtml ? `<div class="workout-categories-row">${dotsHtml}</div>` : ""}
                       ${title ? `<div class="workout-title">${escapePdfHtml(title)}</div>` : ""}
-                      ${routineLinesHtml}
                       ${showBatchNotes ? `<div class="workout-batch-notes">${escapePdfHtml(batchNotes)}</div>` : ""}
+                      ${routineLineHtml}
                       ${groups}
                     </div>
                   </div>
@@ -318,7 +323,7 @@ function buildWeeklyHandoutHtml(args: {
     <meta charset="utf-8" />
     <title>Weekly Training Plan</title>
     <style>
-      @page { size: Letter landscape; margin: 0.22in; }
+      @page { size: Letter landscape; margin: 0.16in; }
 
       * { box-sizing: border-box; }
 
@@ -331,27 +336,38 @@ function buildWeeklyHandoutHtml(args: {
 
       .page {
         width: 100%;
+        transform-origin: top left;
       }
 
       .title {
-        font-size: 14px;
+        font-size: 10px;
         font-weight: 800;
-        margin: 0 0 2px 0;
-        line-height: 1.1;
+        margin: 0;
+        line-height: 1.05;
       }
 
       .subtitle {
-        font-size: 8px;
+        font-size: 6.5px;
         font-weight: 700;
-        margin: 0 0 6px 0;
+        margin: 0;
         color: #374151;
         line-height: 1.1;
+      }
+
+      .page-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        margin: 0 0 3px 0;
+        border-bottom: 0.5px solid #cbd5e1;
+        padding-bottom: 2px;
       }
 
       .week-grid {
         display: grid;
         grid-template-columns: repeat(7, minmax(0, 1fr));
-        gap: 6px;
+        gap: 3px;
         align-items: stretch;
         overflow: visible;
       }
@@ -372,21 +388,21 @@ function buildWeeklyHandoutHtml(args: {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 5px;
+        gap: 3px;
         border-bottom: 1px solid #d1d5db;
-        padding: 4px 5px 3px 5px;
+        padding: 2px 3px;
         background: #f8fafc;
       }
 
       .day-name {
-        font-size: 9px;
+        font-size: 7.5px;
         font-weight: 800;
         color: #111827;
         line-height: 1.1;
       }
 
       .day-date {
-        font-size: 8px;
+        font-size: 7px;
         font-weight: 800;
         color: #334155;
         line-height: 1.1;
@@ -394,7 +410,7 @@ function buildWeeklyHandoutHtml(args: {
       }
 
       .day-workouts {
-        padding: 4px;
+        padding: 2px;
         overflow: visible;
         flex: 1 1 auto;
         align-content: flex-start;
@@ -403,7 +419,7 @@ function buildWeeklyHandoutHtml(args: {
       .workout-block {
         break-inside: avoid;
         page-break-inside: avoid;
-        margin-bottom: 4px;
+        margin-bottom: 2px;
         border: 1px solid #d1d5db;
         border-radius: 3px;
         background: #ffffff;
@@ -416,27 +432,28 @@ function buildWeeklyHandoutHtml(args: {
       .workout-block:last-child { margin-bottom: 0; }
 
       .workout-accent {
-        width: 4px;
-        flex: 0 0 4px;
+        width: 3px;
+        flex: 0 0 3px;
       }
 
       .workout-content {
         flex: 1;
         min-width: 0;
-        padding: 3px 4px;
+        padding: 2px 3px;
       }
 
-      .workout-header-row {
+      .workout-meta-row {
         display: flex;
         align-items: center;
-        gap: 4px;
-        margin: 0 0 2px 0;
+        gap: 2px;
+        margin: 0 0 1px 0;
+        min-width: 0;
       }
 
       .workout-header {
-        font-size: 8px;
+        font-size: 6.4px;
         font-weight: 800;
-        line-height: 1.2;
+        line-height: 1.08;
         margin: 0;
         flex: 1;
         min-width: 0;
@@ -444,58 +461,43 @@ function buildWeeklyHandoutHtml(args: {
         word-break: break-word;
       }
 
-      .workout-categories-row {
+      .workout-dot-strip {
         display: flex;
         align-items: center;
-        gap: 4px;
-        flex-wrap: wrap;
-        margin: 0 0 2px 0;
-      }
-
-      .workout-category-item {
-        display: inline-flex;
-        align-items: center;
-        gap: 3px;
-        min-width: 0;
+        gap: 1px;
+        flex: 0 0 auto;
       }
 
       .workout-dot {
-        width: 6px;
-        height: 6px;
+        width: 4px;
+        height: 4px;
         border-radius: 999px;
         display: inline-block;
         border: 0.5px solid rgba(0,0,0,0.18);
       }
 
-      .workout-category-label {
+      .workout-title {
         font-size: 7px;
         font-weight: 700;
-        color: #334155;
-        line-height: 1.15;
-      }
-
-      .workout-title {
-        font-size: 8px;
-        font-weight: 700;
-        line-height: 1.2;
-        margin: 0 0 2px 0;
+        line-height: 1.08;
+        margin: 0 0 1px 0;
         white-space: normal;
         word-break: break-word;
       }
 
       .workout-batch-notes {
-        font-size: 7.5px;
-        line-height: 1.2;
-        margin: 0 0 2px 0;
+        font-size: 6.4px;
+        line-height: 1.1;
+        margin: 0 0 1px 0;
         color: #334155;
         white-space: normal;
         word-break: break-word;
       }
 
       .workout-routine-line {
-        font-size: 7px;
-        line-height: 1.2;
-        margin: 0 0 2px 0;
+        font-size: 6.2px;
+        line-height: 1.08;
+        margin: 0 0 1px 0;
         color: #475569;
         white-space: normal;
         word-break: break-word;
@@ -506,50 +508,54 @@ function buildWeeklyHandoutHtml(args: {
         color: #1f2937;
       }
 
-      .group-details {
-        font-size: 7.5px;
-        line-height: 1.2;
+      .group-line {
+        font-size: 6.2px;
+        line-height: 1.08;
         margin: 0 0 1px 0;
         white-space: normal;
         word-break: break-word;
       }
 
-      .group-athletes {
-        font-size: 7px;
-        font-style: italic;
-        color: #4b5563;
-        line-height: 1.2;
-        margin: 0 0 2px 0;
-        white-space: normal;
-        word-break: break-word;
+      .group-details {
+        font-weight: 700;
+        color: #111827;
       }
 
-      .group-athletes:last-child {
-        margin-bottom: 0;
+      .group-details::after {
+        content: " — ";
+        color: #64748b;
+        font-weight: 400;
+      }
+
+      .group-athletes {
+        font-style: italic;
+        color: #4b5563;
       }
 
       .off-line {
-        font-size: 7.5px;
+        font-size: 6.5px;
         font-style: italic;
         color: #4b5563;
-        line-height: 1.2;
-        padding: 1px 0;
+        line-height: 1.1;
+        padding: 0;
+      }
+
+      @media print {
+        .page.weekly-scale-target {
+          width: calc(100% / var(--weekly-print-scale, 1));
+          zoom: var(--weekly-print-scale, 1);
+        }
       }
     </style>
   </head>
   <body>
-    <div class="page">
-      <h1 class="title">Weekly Training Plan</h1>
-      <p class="subtitle">${escapePdfHtml(args.weekLabel)}${args.generatedAtLabel ? ` • Generated ${escapePdfHtml(args.generatedAtLabel)}` : ""}</p>
-      ${
-        weekAnnotationText
-          ? `<p class="subtitle" style="display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid ${escapePdfHtml(
-              weekAnnotationColors.border
-            )};background:${escapePdfHtml(weekAnnotationColors.bg)};color:${escapePdfHtml(weekAnnotationColors.text)};">${escapePdfHtml(
-              weekAnnotationText
-            )}</p>`
-          : ""
-      }
+    <div class="page weekly-scale-target">
+      <div class="page-header">
+        <h1 class="title">Weekly Training Plan · ${escapePdfHtml(args.weekLabel)}${
+          weekAnnotationText ? ` · ${escapePdfHtml(weekAnnotationText)}` : ""
+        }</h1>
+        ${args.generatedAtLabel ? `<p class="subtitle">Generated ${escapePdfHtml(args.generatedAtLabel)}</p>` : ""}
+      </div>
       <div class="week-grid">
         ${dayColumns}
       </div>
@@ -735,7 +741,28 @@ function buildVerticalAccentBackground(colors: string[]): string {
   return `linear-gradient(to bottom, ${stops.join(", ")})`;
 }
 
-function printHtmlInWebWindow(html: string) {
+function applyWeeklyPrintScaleToFit(printWindow: Window) {
+  const target = printWindow.document.querySelector<HTMLElement>(".weekly-scale-target");
+  if (!target) return;
+
+  const pageMarginInches = 0.16;
+  const printableLetterLandscapeHeightPx = (8.5 - pageMarginInches * 2) * 96;
+  const minReadableScale = 0.84;
+
+  target.style.width = "100%";
+  printWindow.document.documentElement.style.setProperty("--weekly-print-scale", "1");
+
+  const contentHeight = Math.max(target.scrollHeight, target.getBoundingClientRect().height);
+  if (!Number.isFinite(contentHeight) || contentHeight <= printableLetterLandscapeHeightPx) return;
+
+  // Scale only the weekly handout print sheet after measuring it in the print window.
+  // Below the minimum readable scale we still allow pagination instead of clipping content.
+  const scale = Math.max(minReadableScale, Math.min(1, printableLetterLandscapeHeightPx / contentHeight));
+  target.style.width = `${100 / scale}%`;
+  printWindow.document.documentElement.style.setProperty("--weekly-print-scale", scale.toFixed(3));
+}
+
+function printHtmlInWebWindow(html: string, options?: { scaleWeeklyToOnePage?: boolean }) {
   if (Platform.OS !== "web") return false;
 
   const printWindow = window.open("", "_blank", "width=1200,height=900");
@@ -750,13 +777,18 @@ function printHtmlInWebWindow(html: string) {
   const finalizePrint = () => {
     printWindow.focus();
     setTimeout(() => {
-      printWindow.print();
+      if (options?.scaleWeeklyToOnePage) {
+        applyWeeklyPrintScaleToFit(printWindow);
+      }
       setTimeout(() => {
-        try {
-          printWindow.close();
-        } catch {}
-      }, 300);
-    }, 250);
+        printWindow.print();
+        setTimeout(() => {
+          try {
+            printWindow.close();
+          } catch {}
+        }, 300);
+      }, 50);
+    }, 150);
   };
 
   if (printWindow.document.readyState === "complete") {
@@ -3113,7 +3145,7 @@ export default function CoachCalendarMonth() {
       debugCalendar("[weekly-pdf] html built", { length: html.length });
 
       if (Platform.OS === "web") {
-        printHtmlInWebWindow(html);
+        printHtmlInWebWindow(html, { scaleWeeklyToOnePage: true });
         debugCalendar("[weekly-pdf] web print window opened");
         Alert.alert("Export PDF", "Print dialog opened.");
       } else {
