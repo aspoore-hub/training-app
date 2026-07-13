@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Platform, Pressable, TextInput, View, type TextStyle, type ViewStyle } from "react-native";
 import { AppText } from "./AppText";
 import { useAppTheme } from "./useAppTheme";
@@ -26,39 +26,91 @@ export function DateField({
   inputStyle?: TextStyle;
 }) {
   const { theme, colors } = useAppTheme();
-  const dateValue = Platform.OS === "web" ? normalizeDateValue(value) : String(value ?? "");
+  const normalizedValue = normalizeDateValue(value);
+  const [webDraftValue, setWebDraftValue] = useState(normalizedValue);
+  const dateValue = Platform.OS === "web" ? webDraftValue : String(value ?? "");
   const canClear = editable && allowClear && !!String(value ?? "").trim();
+  const webInputStyle = useMemo<React.CSSProperties>(
+    () => ({
+      flex: 1,
+      height: 44,
+      minWidth: 0,
+      boxSizing: "border-box",
+      paddingLeft: theme.space.md,
+      paddingRight: theme.space.md,
+      borderRadius: theme.radius.md,
+      borderWidth: theme.border.hairline,
+      borderStyle: "solid",
+      borderColor: colors.border,
+      backgroundColor: colors.card,
+      color: colors.text,
+      fontSize: 16,
+      ...((inputStyle as React.CSSProperties | undefined) ?? {}),
+    }),
+    [colors.border, colors.card, colors.text, inputStyle, theme.border.hairline, theme.radius.md, theme.space.md]
+  );
+
+  useEffect(() => {
+    setWebDraftValue(normalizedValue);
+  }, [normalizedValue]);
+
+  function commitDateValue(next: string) {
+    const clean = normalizeDateValue(next);
+    if (clean) {
+      setWebDraftValue(clean);
+      onChangeText(clean);
+      return;
+    }
+    setWebDraftValue("");
+    onChangeText("");
+  }
 
   return (
     <View style={[{ gap: theme.space.sm }, style]}>
       {label ? <AppText variant="caption" color="mutedText">{label}</AppText> : null}
       <View style={{ flexDirection: "row", gap: theme.space.sm, alignItems: "center" }}>
-        <TextInput
-          value={dateValue}
-          onChangeText={(next) => onChangeText(String(next ?? "").slice(0, 10))}
-          editable={editable}
-          placeholder={Platform.OS === "web" ? undefined : "YYYY-MM-DD"}
-          placeholderTextColor={colors.mutedText}
-          autoCapitalize="none"
-          style={[
-            {
-              flex: 1,
-              height: 44,
-              paddingHorizontal: theme.space.md,
-              borderRadius: theme.radius.md,
-              borderWidth: theme.border.hairline,
-              borderColor: colors.border,
-              backgroundColor: colors.card,
-              color: colors.text,
-              fontSize: 16,
-            },
-            inputStyle,
-          ]}
-          {...(Platform.OS === "web" ? ({ type: "date" } as any) : {})}
-        />
+        {Platform.OS === "web" ? (
+          <input
+            type="date"
+            value={dateValue}
+            disabled={!editable}
+            onChange={(event) => {
+              const next = String((event.target as HTMLInputElement)?.value ?? "").trim();
+              if (next === "" && normalizedValue) {
+                setWebDraftValue(normalizedValue);
+                return;
+              }
+              commitDateValue(next);
+            }}
+            style={webInputStyle}
+          />
+        ) : (
+          <TextInput
+            value={dateValue}
+            onChangeText={(next) => onChangeText(String(next ?? "").slice(0, 10))}
+            editable={editable}
+            placeholder="YYYY-MM-DD"
+            placeholderTextColor={colors.mutedText}
+            autoCapitalize="none"
+            style={[
+              {
+                flex: 1,
+                height: 44,
+                paddingHorizontal: theme.space.md,
+                borderRadius: theme.radius.md,
+                borderWidth: theme.border.hairline,
+                borderColor: colors.border,
+                backgroundColor: colors.card,
+                color: colors.text,
+                fontSize: 16,
+              },
+              inputStyle,
+            ]}
+          />
+        )}
         {canClear ? (
           <Pressable
-            onPress={() => onChangeText("")}
+            onPress={() => commitDateValue("")}
             style={{
               height: 44,
               paddingHorizontal: theme.space.md,

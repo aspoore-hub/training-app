@@ -772,6 +772,10 @@ export default function CoachEditTeamAthlete() {
       Alert.alert("Invalid end date", "Use YYYY-MM-DD.");
       return;
     }
+    if (start && end && start > end) {
+      Alert.alert("Invalid date range", "Override start date must be on or before override end date.");
+      return;
+    }
 
     const resolved = teamDataStore.resolveAthleteSeasonWindow(season, {
       ...(existing ?? {}),
