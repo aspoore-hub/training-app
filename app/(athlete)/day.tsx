@@ -54,6 +54,7 @@ import {
 import { getWeekLabelTone, getWeekLabelToneColors } from "../../lib/weekLabelStyle";
 
 const ATHLETE_DAY_UI_STATE_KEY = "training_app_athlete_day_ui_state_v1";
+const DEBUG_ATHLETE_DAY = typeof __DEV__ !== "undefined" ? __DEV__ : false;
 
 type AthleteDayUiState = {
   dateISO?: string;
@@ -71,6 +72,25 @@ type FeedbackEditorState = {
   splitsText: string;
   additionalFeedbackText: string;
 };
+
+function debugAthleteDay(message: string, payload?: unknown) {
+  if (!DEBUG_ATHLETE_DAY) return;
+  console.log(message, payload);
+}
+
+function summarizeWorkoutCandidate(row: TeamWorkoutRow) {
+  return {
+    id: String(row.id ?? ""),
+    batch_id: row.batch_id ?? null,
+    athlete_profile_id: String(row.athlete_profile_id ?? ""),
+    date_iso: String(row.date_iso ?? ""),
+    session: row.session === "AM" ? "AM" : "PM",
+    title: String(row.title ?? ""),
+    athlete_visible: row.athlete_visible,
+    published_at: row.published_at ?? null,
+    updated_at: row.updated_at ?? null,
+  };
+}
 
 function normalizeGroupId(groupId?: string): string {
   const normalized = String(groupId ?? "").trim().toUpperCase();
@@ -206,8 +226,9 @@ export default function AthleteDayScreen() {
   const [editorError, setEditorError] = useState<string | null>(null);
   const [loadingContext, setLoadingContext] = useState(true);
   const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
-  const inFlightRef = useRef(false);
+  const renderedLoadKeyRef = useRef("");
   const activeLoadKeyRef = useRef("");
+  const loadRequestSeqRef = useRef(0);
 
   const dayPlan = useMemo(() => {
     if (!currentDateISO || !selectedAthleteId) return null;
@@ -333,14 +354,21 @@ export default function AthleteDayScreen() {
 
   const loadDayData = useCallback(
     async (force = false) => {
-      if (inFlightRef.current) return;
       const loadKey = String(currentDateISO);
       const now = Date.now();
-      if (!force && lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
+      if (
+        !force &&
+        lastLoadRef.current.key === loadKey &&
+        renderedLoadKeyRef.current === loadKey &&
+        now - lastLoadRef.current.ts < 12000
+      ) {
         return;
       }
+      const requestSeq = loadRequestSeqRef.current + 1;
+      loadRequestSeqRef.current = requestSeq;
       activeLoadKeyRef.current = loadKey;
-      inFlightRef.current = true;
+      const isLatestLoad = () =>
+        loadRequestSeqRef.current === requestSeq && activeLoadKeyRef.current === loadKey;
       setLoadingContext(true);
       try {
         const [ws, pace, unit, athleteSession, storedCategories, routines, weekLabels] = await Promise.all([
@@ -352,6 +380,7 @@ export default function AthleteDayScreen() {
           loadAuxiliaryRoutineDefinitions(),
           loadCoachWeekLabels(),
         ]);
+        if (!isLatestLoad()) return;
 
         const resolvedWeekStart: WeekStartDay = ws.normalized === "sunday" ? 0 : 1;
         setWeekStartsOn(resolvedWeekStart);
@@ -372,9 +401,12 @@ export default function AthleteDayScreen() {
         if (resolvedId) void teamDataStore.actions.loadVisibleMileageWeekForAthlete(resolvedId, weekStartISO);
 
         if (!currentDateISO || !resolvedId) {
-          setAllWorkouts([]);
-          setWorkouts([]);
-          setBatchNotesByWorkoutId(new Map());
+          if (isLatestLoad()) {
+            setAllWorkouts([]);
+            setWorkouts([]);
+            setBatchNotesByWorkoutId(new Map());
+            renderedLoadKeyRef.current = loadKey;
+          }
           return;
         }
 
@@ -384,7 +416,13 @@ export default function AthleteDayScreen() {
           loadMileageFeedback(),
           listTeamWorkoutBatchHeadersForDate(String(currentDateISO)),
         ]);
-        if (activeLoadKeyRef.current !== loadKey) return;
+        if (!isLatestLoad()) return;
+        debugAthleteDay("[athlete-day] workout candidates", {
+          screenDate: loadKey,
+          selectedAthleteId: resolvedId,
+          candidateCount: athleteRows.length,
+          candidates: athleteRows.map(summarizeWorkoutCandidate),
+        });
         const batchIds = Array.from(
           new Set(athleteRows.map((row) => cleanDisplayText(row.batch_id)).filter(Boolean))
         );
@@ -392,7 +430,13 @@ export default function AthleteDayScreen() {
           batchIds.length > 0
             ? (await Promise.all(batchIds.map((batchId) => listTeamWorkoutsByBatch(batchId).catch(() => [])))).flat()
             : [];
-        if (activeLoadKeyRef.current !== loadKey) return;
+        if (!isLatestLoad()) return;
+        debugAthleteDay("[athlete-day] batch context rows", {
+          screenDate: loadKey,
+          batchIds,
+          contextCount: batchContextRows.length,
+          contextRows: batchContextRows.map(summarizeWorkoutCandidate),
+        });
 
         const athleteMapped = athleteRows.map((row) => toAthleteWorkout(row, new Map()));
         const athleteFiltered = athleteMapped
@@ -402,6 +446,18 @@ export default function AthleteDayScreen() {
             if (sessionCompare !== 0) return sessionCompare;
             return String(a.title ?? "").localeCompare(String(b.title ?? ""));
           });
+        debugAthleteDay("[athlete-day] retained workouts", {
+          screenDate: loadKey,
+          retainedCount: athleteFiltered.length,
+          retained: athleteFiltered.map((workout) => ({
+            id: workout.id,
+            batchId: workout.batchId ?? null,
+            athleteId: workout.athleteId,
+            dateISO: workout.dateISO,
+            session: workout.session ?? "PM",
+            title: workout.title ?? "",
+          })),
+        });
 
         setAllWorkouts(athleteMapped);
         setWorkouts(athleteFiltered);
@@ -417,17 +473,19 @@ export default function AthleteDayScreen() {
             return (byId || byName) && String(entry.dateISO ?? "") === String(currentDateISO);
           })
         );
+        renderedLoadKeyRef.current = loadKey;
         lastLoadRef.current = { key: loadKey, ts: Date.now() };
 
         // Hydrate roster names in background without loading hidden team rows.
         void (async () => {
           const rosterMap = await loadRosterNameMapForTeam(athleteSession.teamId);
-          if (activeLoadKeyRef.current !== loadKey) return;
+          if (!isLatestLoad()) return;
           setRosterNameById(rosterMap);
         })();
       } finally {
-        setLoadingContext(false);
-        inFlightRef.current = false;
+        if (loadRequestSeqRef.current === requestSeq) {
+          setLoadingContext(false);
+        }
       }
     },
     [currentDateISO]

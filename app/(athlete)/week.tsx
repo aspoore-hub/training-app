@@ -333,8 +333,9 @@ export default function AthleteWeekView() {
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
   const [athletePaceOverrides, setAthletePaceOverrides] = useState<AthletePaceOverrides>({});
   const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
-  const inFlightRef = useRef(false);
+  const renderedLoadKeyRef = useRef("");
   const activeLoadKeyRef = useRef("");
+  const loadRequestSeqRef = useRef(0);
 
   // anchor is any date within the current week we’re viewing
   const [weekAnchorISO, setWeekAnchorISO] = useState(() => toISODate(new Date()));
@@ -351,62 +352,67 @@ export default function AthleteWeekView() {
   }, []);
 
   const loadData = useCallback(async () => {
-    if (inFlightRef.current) return;
     const loadKey = String(weekAnchorISO);
     const now = Date.now();
-    if (lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
+    if (
+      lastLoadRef.current.key === loadKey &&
+      renderedLoadKeyRef.current === loadKey &&
+      now - lastLoadRef.current.ts < 12000
+    ) {
       return;
     }
-    inFlightRef.current = true;
+    const requestSeq = loadRequestSeqRef.current + 1;
+    loadRequestSeqRef.current = requestSeq;
     activeLoadKeyRef.current = loadKey;
+    const isLatestLoad = () =>
+      loadRequestSeqRef.current === requestSeq && activeLoadKeyRef.current === loadKey;
     const ws = await loadWeekStartFromShared();
-    try {
-      const [selected, unit, pace, paceOverrides, storedCategories, weekLabels] = await Promise.all([
-        loadJSON<string | null>(SELECTED_KEY, null),
-        loadDistanceUnit(),
-        loadPaceSecondsPerMile(),
-        loadAthletePaceOverrides(),
-        loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
-        loadCoachWeekLabels(),
-      ]);
+    const [selected, unit, pace, paceOverrides, storedCategories, weekLabels] = await Promise.all([
+      loadJSON<string | null>(SELECTED_KEY, null),
+      loadDistanceUnit(),
+      loadPaceSecondsPerMile(),
+      loadAthletePaceOverrides(),
+      loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
+      loadCoachWeekLabels(),
+    ]);
 
-      const athleteSession = await resolveAthleteSessionContext();
-      const teamId = athleteSession.teamId;
-      const rosterMap = await loadRosterNameMapForTeam(teamId);
-      setRosterNameById(rosterMap);
-      const selectedId = String(athleteSession.athleteId ?? selected ?? "").trim();
-      setSelectedAthleteId(selectedId || null);
+    const athleteSession = await resolveAthleteSessionContext();
+    const teamId = athleteSession.teamId;
+    const rosterMap = await loadRosterNameMapForTeam(teamId);
+    if (!isLatestLoad()) return;
+    setRosterNameById(rosterMap);
+    const selectedId = String(athleteSession.athleteId ?? selected ?? "").trim();
+    setSelectedAthleteId(selectedId || null);
 
-      const selectedName = selectedId ? String(athleteSession.athleteName ?? "").trim() || null : null;
-      setSelectedAthleteLabel(selectedName);
+    const selectedName = selectedId ? String(athleteSession.athleteName ?? "").trim() || null : null;
+    setSelectedAthleteLabel(selectedName);
 
-      setDistanceUnit(unit);
-      setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
-      setAthletePaceOverrides(paceOverrides ?? {});
-      setCategories(normalizeCategories(storedCategories));
-      setWeekLabelsByStart(weekLabels ?? {});
+    setDistanceUnit(unit);
+    setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
+    setAthletePaceOverrides(paceOverrides ?? {});
+    setCategories(normalizeCategories(storedCategories));
+    setWeekLabelsByStart(weekLabels ?? {});
 
-      const weekStartForFetch = getWeekStartISO(weekAnchorISO, ws);
-      if (selectedId) void teamDataStore.actions.loadVisibleMileageWeekForAthlete(selectedId, weekStartForFetch);
+    const weekStartForFetch = getWeekStartISO(weekAnchorISO, ws);
+    if (selectedId) void teamDataStore.actions.loadVisibleMileageWeekForAthlete(selectedId, weekStartForFetch);
 
-      if (!selectedId) {
-        setAllWorkouts([]);
-        setTeamWeekRows([]);
-        return;
-      }
-
-      const weekEndForFetch = addDaysISO(weekStartForFetch, 6);
-      const rows = await listVisibleAthleteWorkoutsInRange(selectedId, weekStartForFetch, weekEndForFetch);
-      if (activeLoadKeyRef.current !== loadKey) return;
-      const athleteName = selectedName ?? "Athlete";
-      setAllWorkouts(rows.map((row) => toAthleteWorkout(row, athleteName)));
+    if (!selectedId) {
+      setAllWorkouts([]);
       setTeamWeekRows([]);
-      lastLoadRef.current = { key: loadKey, ts: Date.now() };
-
-      // Team-wide rows are not loaded in athlete views so hidden workouts stay private.
-    } finally {
-      inFlightRef.current = false;
+      renderedLoadKeyRef.current = loadKey;
+      return;
     }
+
+    const weekEndForFetch = addDaysISO(weekStartForFetch, 6);
+    const rows = await listVisibleAthleteWorkoutsInRange(selectedId, weekStartForFetch, weekEndForFetch);
+    if (!isLatestLoad()) return;
+    const athleteName = selectedName ?? "Athlete";
+    setAllWorkouts(rows.map((row) => toAthleteWorkout(row, athleteName)));
+    setTeamWeekRows([]);
+    renderedLoadKeyRef.current = loadKey;
+    lastLoadRef.current = { key: loadKey, ts: Date.now() };
+
+    // Team-wide rows are not loaded in athlete views so hidden workouts stay private.
   }, [loadWeekStartFromShared, weekAnchorISO]);
 
   useFocusEffect(

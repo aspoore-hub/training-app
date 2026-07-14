@@ -260,7 +260,9 @@ export default function AthleteMonthCalendar() {
   const [monthUiHydrated, setMonthUiHydrated] = useState(false);
   const [loading, setLoading] = useState(true);
   const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
-  const inFlightRef = useRef(false);
+  const renderedLoadKeyRef = useRef("");
+  const activeLoadKeyRef = useRef("");
+  const loadRequestSeqRef = useRef(0);
 
   const loadMonthWeekStartFromShared = useCallback(async () => {
     const weekStartResult = await loadWeekStartSetting();
@@ -274,13 +276,20 @@ export default function AthleteMonthCalendar() {
   }, []);
 
   const loadMonthData = useCallback(async () => {
-    if (inFlightRef.current) return;
     const loadKey = toISODate(monthStart(anchorMonth));
     const now = Date.now();
-    if (lastLoadRef.current.key === loadKey && now - lastLoadRef.current.ts < 12000) {
+    if (
+      lastLoadRef.current.key === loadKey &&
+      renderedLoadKeyRef.current === loadKey &&
+      now - lastLoadRef.current.ts < 12000
+    ) {
       return;
     }
-    inFlightRef.current = true;
+    const requestSeq = loadRequestSeqRef.current + 1;
+    loadRequestSeqRef.current = requestSeq;
+    activeLoadKeyRef.current = loadKey;
+    const isLatestLoad = () =>
+      loadRequestSeqRef.current === requestSeq && activeLoadKeyRef.current === loadKey;
     setLoading(true);
     try {
       const ws = await loadMonthWeekStartFromShared();
@@ -303,6 +312,7 @@ export default function AthleteMonthCalendar() {
       ]);
 
       const selectedId = String(athleteSession.athleteId ?? selected ?? "").trim();
+      if (!isLatestLoad()) return;
       setSelectedAthleteId(selectedId || null);
       const selectedName = selectedId ? String(athleteSession.athleteName ?? "").trim() || null : null;
       setSelectedAthleteLabel(selectedName);
@@ -317,6 +327,7 @@ export default function AthleteMonthCalendar() {
 
       if (!selectedId) {
         setAllWorkouts([]);
+        renderedLoadKeyRef.current = loadKey;
         return;
       }
 
@@ -330,12 +341,15 @@ export default function AthleteMonthCalendar() {
       const endISO = grid[grid.length - 1]?.dateISO ?? startISO;
       const rowsPromise = listVisibleAthleteWorkoutsInRange(selectedId, startISO, endISO);
       const [rows] = await Promise.all([rowsPromise, mileageLoadPromise]);
+      if (!isLatestLoad()) return;
       const resolvedAthleteName = selectedName ?? athleteName ?? "Athlete";
       setAllWorkouts(rows.map((row) => toAthleteWorkout(row, resolvedAthleteName)));
+      renderedLoadKeyRef.current = loadKey;
       lastLoadRef.current = { key: loadKey, ts: Date.now() };
     } finally {
-      setLoading(false);
-      inFlightRef.current = false;
+      if (loadRequestSeqRef.current === requestSeq) {
+        setLoading(false);
+      }
     }
   }, [anchorMonth, athleteName, loadMonthWeekStartFromShared]);
 
