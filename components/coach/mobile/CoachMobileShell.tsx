@@ -8,6 +8,8 @@ import { listTeamWorkoutBatchHeadersInRange, type TeamWorkoutBatchHeaderRow } fr
 import { teamDataStore } from "../../../lib/teamDataStore";
 import { parseISODate, toISODate } from "../../../lib/mileagePlan";
 import { getAthleteDisplayName } from "../../../lib/athleteName";
+import { clearActiveAccountContext } from "../../../lib/accountContexts";
+import { supabase } from "../../../lib/supabase";
 import {
   loadAuxiliaryRoutineDefinitionsWithStatus,
   type AuxiliaryRoutine,
@@ -271,6 +273,8 @@ export function CoachMobileShell() {
   const [workoutError, setWorkoutError] = useState<string | null>(null);
   const [rosterQuery, setRosterQuery] = useState("");
   const [selectedWorkout, setSelectedWorkout] = useState<CoachMobileWorkoutGroup | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
 
   useEffect(() => {
     void teamDataStore.actions.refreshRoster().catch(() => {});
@@ -349,6 +353,22 @@ export function CoachMobileShell() {
   );
 
   const navigate = (href: string) => router.replace(href as any);
+
+  async function signOut() {
+    if (signingOut) return;
+    setSigningOut(true);
+    setSignOutError(null);
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      await clearActiveAccountContext();
+      router.replace("/(auth)/login");
+    } catch (error: any) {
+      setSignOutError(String(error?.message ?? "Could not sign out. Please try again."));
+    } finally {
+      setSigningOut(false);
+    }
+  }
 
   const renderContent = () => {
     if (section === "home") {
@@ -493,6 +513,55 @@ export function CoachMobileShell() {
         <DesktopOnlyCard title="Workout Plan Builder" body="Plan Builder remains desktop-only while the mobile viewer is stabilized." />
         <DesktopOnlyCard title="Workout Catalog and Drill Routines" body="Library management tools are available on desktop." />
         <DesktopOnlyCard title="Training Groups, Categories, Settings" body="Administrative setup remains desktop-first for this first mobile coach shell." />
+        <View
+          style={{
+            marginTop: 8,
+            borderTopWidth: 1,
+            borderTopColor: "#e2e8f0",
+            paddingTop: 14,
+            paddingBottom: 18,
+            gap: 8,
+          }}
+        >
+          <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>ACCOUNT</Text>
+          {signOutError ? (
+            <View
+              style={{
+                borderWidth: 1,
+                borderColor: "#fecaca",
+                backgroundColor: "#fef2f2",
+                borderRadius: 12,
+                padding: 10,
+              }}
+            >
+              <Text style={{ color: "#991b1b", fontWeight: "800", lineHeight: 18 }}>{signOutError}</Text>
+            </View>
+          ) : null}
+          <Pressable
+            onPress={() => void signOut()}
+            disabled={signingOut}
+            style={({ pressed }) => ({
+              minHeight: 48,
+              borderWidth: 1,
+              borderColor: "#fecaca",
+              backgroundColor: pressed ? "#fee2e2" : "#fff",
+              borderRadius: 12,
+              paddingHorizontal: 14,
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              opacity: signingOut ? 0.65 : 1,
+            })}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexShrink: 1 }}>
+              <Ionicons name="log-out-outline" size={20} color="#b91c1c" />
+              <Text style={{ color: "#b91c1c", fontSize: 15, fontWeight: "900" }}>
+                {signingOut ? "Signing out..." : "Sign out"}
+              </Text>
+            </View>
+            {signingOut ? <ActivityIndicator color="#b91c1c" /> : null}
+          </Pressable>
+        </View>
       </>
     );
   };
