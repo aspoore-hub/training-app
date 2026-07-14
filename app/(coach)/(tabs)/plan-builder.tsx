@@ -311,9 +311,6 @@ function changedSnapshotPatch(
   if (!originalSnapshot || !snapshotFieldEqual("title", draftSnapshot, originalSnapshot)) {
     patch.title = String(draftSnapshot.title ?? "").trim() || "Workout";
   }
-  if (!originalSnapshot || !snapshotFieldEqual("details", draftSnapshot, originalSnapshot)) {
-    patch.details = String(draftSnapshot.details ?? "").trim() || null;
-  }
   if (!originalSnapshot || !snapshotFieldEqual("timeText", draftSnapshot, originalSnapshot)) {
     patch.time_text = String(draftSnapshot.timeText ?? "").trim() || null;
   }
@@ -321,6 +318,13 @@ function changedSnapshotPatch(
     patch.location = String(draftSnapshot.location ?? "").trim() || null;
   }
   return patch;
+}
+
+function snapshotDetailsChanged(
+  draftSnapshot: PlanBuilderSnapshot,
+  originalSnapshot: PlanBuilderSnapshot | null | undefined
+): boolean {
+  return !originalSnapshot || !snapshotFieldEqual("details", draftSnapshot, originalSnapshot);
 }
 
 function snapshotFromDraftCell(cell: WorkoutPlanBuilderCell | null | undefined): PlanBuilderSnapshot {
@@ -2420,7 +2424,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
           location: String(draftCell.location ?? "").trim() || null,
           time_text: String(draftCell.timeText ?? "").trim() || "",
           title: String(draftCell.title ?? "").trim() || "Workout",
-          details: details || null,
+          details: null,
           primary_category: categoryNames[0] ?? null,
           categories: categoryNames,
           plannedDistanceUnit: null,
@@ -2442,6 +2446,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
               date_iso: row.dateISO,
               session: row.session,
               header_notes: details,
+              propagate_to_rows: false,
             });
           } catch {
             headerNoteFailureCount += 1;
@@ -2511,6 +2516,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
             .filter(Boolean);
           const draftSnapshot = snapshotFromDraftCell(draftCell);
           const basePatch = changedSnapshotPatch(draftSnapshot, draftCell.originalSnapshot);
+          const headerNotesChanged = snapshotDetailsChanged(draftSnapshot, draftCell.originalSnapshot);
           if (!draftCell.originalSnapshot || !snapshotFieldEqual("categoryIds", draftSnapshot, draftCell.originalSnapshot)) {
             basePatch.primary_category = categoryNames[0] ?? null;
             basePatch.categories = categoryNames;
@@ -2525,17 +2531,27 @@ export default function WorkoutPlanBuilderDraftScreen() {
           const sourcesByAthlete = new Map(
             (existingCell?.sources ?? []).map((source) => [source.athleteId, source] as const)
           );
+          const headerNotesSavedByBatch = new Set<string>();
           let touched = 0;
           for (const athleteId of eligibleAthleteIds) {
             const source = sourcesByAthlete.get(athleteId);
             if (!source) continue;
-            if (Object.keys(basePatch).length === 0) {
+            const hasRowPatch = Object.keys(basePatch).length > 0;
+            if (!hasRowPatch && !headerNotesChanged) {
               touched += 1;
               continue;
             }
-            await updateTeamWorkoutById(String(source.row.id), basePatch);
             const batchId = String(source.row.batch_id ?? "").trim();
-            if (Object.prototype.hasOwnProperty.call(basePatch, "details") && batchId) {
+            if (headerNotesChanged && !batchId) {
+              unsafeSkipped += 1;
+              continue;
+            }
+            if (hasRowPatch) {
+              await updateTeamWorkoutById(String(source.row.id), basePatch);
+            }
+            const headerNotesKey = batchId ? `${batchId}::${row.dateISO}::${row.session}` : "";
+            if (headerNotesChanged && batchId && !headerNotesSavedByBatch.has(headerNotesKey)) {
+              headerNotesSavedByBatch.add(headerNotesKey);
               if (await canWriteHeaderForBatch(batchId)) {
                 try {
                   await saveTeamWorkoutBatchHeaderNotes({
@@ -2543,6 +2559,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
                     date_iso: row.dateISO,
                     session: row.session,
                     header_notes: String(draftCell.details ?? "").trim() || null,
+                    propagate_to_rows: false,
                   });
                 } catch {
                   headerNoteFailureCount += 1;
@@ -2565,7 +2582,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
               location: String(draftCell.location ?? "").trim() || null,
               time_text: String(draftCell.timeText ?? "").trim() || "",
               title: String(draftCell.title ?? "").trim() || "Workout",
-              details: details || null,
+              details: null,
               primary_category: categoryNames[0] ?? null,
               categories: categoryNames,
               plannedDistanceUnit: null,
@@ -2584,6 +2601,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
                   date_iso: row.dateISO,
                   session: row.session,
                   header_notes: details,
+                  propagate_to_rows: false,
                 });
               } catch {
                 headerNoteFailureCount += 1;
@@ -2644,10 +2662,15 @@ export default function WorkoutPlanBuilderDraftScreen() {
             return match ? categoryDisplayName(match) : id;
           })
           .filter(Boolean);
+        const draftSnapshot = snapshotFromDraftCell(draftCell);
+        const headerNotesChanged = snapshotDetailsChanged(draftSnapshot, draftCell.originalSnapshot);
         const details = String(draftCell.details ?? "").trim();
+        if (headerNotesChanged && !batchId) {
+          unsafeSkipped += 1;
+          continue;
+        }
         await updateTeamWorkoutById(sourceWorkoutId, {
           title: String(draftCell.title ?? "").trim() || "Workout",
-          details: details || null,
           time_text: String(draftCell.timeText ?? "").trim() || null,
           location: String(draftCell.location ?? "").trim() || null,
           primary_category: categoryNames[0] ?? null,
@@ -2656,13 +2679,14 @@ export default function WorkoutPlanBuilderDraftScreen() {
           post_routine_ids: normalizeStringList(draftCell.postRoutineIds).length > 0 ? normalizeStringList(draftCell.postRoutineIds) : null,
         });
 
-        if (batchId) {
+        if (batchId && headerNotesChanged) {
           try {
             await saveTeamWorkoutBatchHeaderNotes({
               batch_id: batchId,
               date_iso: row.dateISO,
               session: row.session,
               header_notes: details || null,
+              propagate_to_rows: false,
             });
           } catch {
             headerNoteFailureCount += 1;
@@ -2824,7 +2848,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       setApplyPreviewRows(refreshedRows);
       const skipped = Math.max(0, finalFreshRows.filter((row) => row.status !== "new").length + rowsToCreate.length - createResult.createdKeys.length);
       const errors = createResult.headerNoteFailureCount > 0
-        ? [`${createResult.headerNoteFailureCount} header note save${createResult.headerNoteFailureCount === 1 ? "" : "s"} failed, but row details were created.`]
+        ? [`${createResult.headerNoteFailureCount} header note save${createResult.headerNoteFailureCount === 1 ? "" : "s"} failed, but workout rows were created.`]
         : [];
       setLastApplySummary({
         title: "Import New Only",
@@ -3060,7 +3084,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
           rowsToDelete.length - deleteResult.deletedKeys.length
       );
       const errors: string[] = [];
-      if (createResult.headerNoteFailureCount > 0) errors.push(`${createResult.headerNoteFailureCount} header note save${createResult.headerNoteFailureCount === 1 ? "" : "s"} failed, but row details were created.`);
+      if (createResult.headerNoteFailureCount > 0) errors.push(`${createResult.headerNoteFailureCount} header note save${createResult.headerNoteFailureCount === 1 ? "" : "s"} failed, but workout rows were created.`);
       if (updateResult.sharedSkipped > 0) errors.push(`${updateResult.sharedSkipped} shared batch row${updateResult.sharedSkipped === 1 ? "" : "s"} skipped.`);
       if (updateResult.staleSkipped > 0) errors.push(`${updateResult.staleSkipped} stale/source-changed row${updateResult.staleSkipped === 1 ? "" : "s"} skipped.`);
       if (updateResult.unsafeSkipped > 0) errors.push(`${updateResult.unsafeSkipped} unsafe row${updateResult.unsafeSkipped === 1 ? "" : "s"} skipped.`);
