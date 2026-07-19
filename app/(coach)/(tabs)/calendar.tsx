@@ -56,6 +56,12 @@ import { getWeekLabelTone, getWeekLabelToneColors, getWeekLabelToneText, type We
 import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../../lib/teamDataStore";
 import { setSeasonWeekVisibilityByDateRange } from "../../../lib/seasonWeekVisibility";
 import { canEditTraining, canExport, canPublishTraining, getCurrentTeamRole, type TeamRole } from "../../../lib/teamPermissions";
+import { DateField } from "../../../components/ui/DateField";
+import {
+  buildBulkWorkoutDeletionPreview,
+  doesCalendarWorkoutMatchFilters,
+  type BulkWorkoutDeletionPreview,
+} from "../../../lib/calendarWorkoutScope";
 
 const SCREEN_W = Dimensions.get("window").width;
 const COACH_CALENDAR_VIEW_PREFS_KEY = "coach_calendar_view_prefs_v1";
@@ -159,6 +165,7 @@ type TrainingVisibilityAction = "publish" | "hide";
 type TrainingVisibilityContent = "workouts" | "mileage" | "both";
 type TrainingVisibilityRange = "week" | "custom" | "season";
 type WeekWorkoutVisibilityStatus = "empty" | "hidden" | "published" | "mixed";
+type BulkDeleteRangeMode = "week" | "custom";
 
 type ParsedWeeklyBatchKey = {
   isBatch: boolean;
@@ -1523,6 +1530,18 @@ export default function CoachCalendarMonth() {
   const [trainingVisibilityError, setTrainingVisibilityError] = useState<string | null>(null);
   const [visibilityMenuOpen, setVisibilityMenuOpen] = useState(false);
   const [weekActionsMenuOpen, setWeekActionsMenuOpen] = useState(false);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleteRangeMode, setBulkDeleteRangeMode] = useState<BulkDeleteRangeMode>("week");
+  const [bulkDeleteStartISO, setBulkDeleteStartISO] = useState(() => toISODate(startOfWeek(new Date(), 1)));
+  const [bulkDeleteEndISO, setBulkDeleteEndISO] = useState(() => toISODate(addDays(startOfWeek(new Date(), 1), 6)));
+  const [bulkDeleteStep, setBulkDeleteStep] = useState<"scope" | "preview">("scope");
+  const [bulkDeleteLoading, setBulkDeleteLoading] = useState(false);
+  const [bulkDeleteExecuting, setBulkDeleteExecuting] = useState(false);
+  const [bulkDeleteError, setBulkDeleteError] = useState<string | null>(null);
+  const [bulkDeleteExcludeProtected, setBulkDeleteExcludeProtected] = useState(true);
+  const [bulkDeleteLoggedAcknowledged, setBulkDeleteLoggedAcknowledged] = useState(false);
+  const [bulkDeletePermanentAcknowledged, setBulkDeletePermanentAcknowledged] = useState(false);
+  const [bulkDeleteSource, setBulkDeleteSource] = useState<{ allRows: TeamWorkoutRow[]; matchingRows: TeamWorkoutRow[] } | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [jumpToWeekOpen, setJumpToWeekOpen] = useState(false);
   const [jumpDateInput, setJumpDateInput] = useState(() => toISODate(new Date()));
@@ -1556,7 +1575,7 @@ export default function CoachCalendarMonth() {
   const inFlightCalendarFetchKeyRef = useRef<string | null>(null);
 
   const isWebDesktop = Platform.OS === "web";
-  const canEditCalendarTraining = currentTeamRoleLoaded ? canEditTraining(currentTeamRole) : true;
+  const canEditCalendarTraining = currentTeamRoleLoaded && canEditTraining(currentTeamRole);
   const canPublishCalendarTraining = currentTeamRoleLoaded ? canPublishTraining(currentTeamRole) : true;
   const canExportCalendar = canExport(currentTeamRole);
   const todayISO = useMemo(() => toISODate(new Date()), []);
@@ -1967,36 +1986,47 @@ export default function CoachCalendarMonth() {
     [selectedSeasonId, teamStore.teamSeasons]
   );
 
-  const filteredWorkouts = useMemo(() => {
-    const athleteSelectedSet = new Set(selectedAthleteIds);
-    return allWorkouts.filter((workout) => {
-      const athleteId = String(workout.athleteId ?? "").trim();
-      const athletePass =
-        selectedAthleteIds.length === 0 ? true : athleteSelectedSet.has(athleteId);
-      const groupPass =
-        selectedTrainingGroupIds.length === 0 ? true : selectedTrainingGroupAthleteIds.has(athleteId);
-      const workoutDateISO = getWorkoutDateISO(workout);
-      const seasonPass = (() => {
-        if (!selectedSeason) return true;
-        const override = athleteId
-          ? athleteSeasonOverridesBySeasonAndAthlete.get(`${String(selectedSeason.id ?? "").trim()}:${athleteId}`) ?? null
-          : null;
-        const resolvedWindow = teamDataStore.resolveAthleteSeasonWindow(selectedSeason, override);
-        return (
-          workoutDateISO >= String(resolvedWindow.start_date ?? "") &&
-          workoutDateISO <= String(resolvedWindow.end_date ?? "")
-        );
-      })();
-      return athletePass && groupPass && seasonPass;
-    });
-  }, [
-    athleteSeasonOverridesBySeasonAndAthlete,
-    allWorkouts,
-    selectedAthleteIds,
-    selectedSeason,
+  const selectedSeasonWindowForAthlete = useCallback((athleteId: string) => {
+    if (!selectedSeason) return null;
+    if (isAthleteExcludedFromSeason(
+      athleteId,
+      String(selectedSeason.id ?? ""),
+      teamStore.athleteSeasonOverrides
+    )) {
+      return { startISO: "9999-12-31", endISO: "0000-01-01" };
+    }
+    const override = athleteSeasonOverridesBySeasonAndAthlete.get(
+      `${String(selectedSeason.id ?? "").trim()}:${String(athleteId ?? "").trim()}`
+    ) ?? null;
+    const resolvedWindow = teamDataStore.resolveAthleteSeasonWindow(selectedSeason, override);
+    return {
+      startISO: String(resolvedWindow.start_date ?? ""),
+      endISO: String(resolvedWindow.end_date ?? ""),
+    };
+  }, [athleteSeasonOverridesBySeasonAndAthlete, selectedSeason, teamStore.athleteSeasonOverrides]);
+
+  const calendarWorkoutFilterScope = useMemo(() => ({
+    selectedAthleteIds: new Set(selectedAthleteIds),
+    selectedTrainingGroupIds: new Set(selectedTrainingGroupIds),
     selectedTrainingGroupAthleteIds,
-    selectedTrainingGroupIds.length,
+    rosterAthleteById,
+    selectedSeasonWindowForAthlete,
+    visibility: "all" as const,
+  }), [
+    rosterAthleteById,
+    selectedAthleteIds,
+    selectedSeasonWindowForAthlete,
+    selectedTrainingGroupAthleteIds,
+    selectedTrainingGroupIds,
   ]);
+
+  const filteredWorkouts = useMemo(() => {
+    return allWorkouts.filter((workout) => doesCalendarWorkoutMatchFilters({
+      athleteId: String(workout.athleteId ?? ""),
+      dateISO: getWorkoutDateISO(workout),
+      athleteVisible: workout.athleteVisible,
+    }, calendarWorkoutFilterScope));
+  }, [allWorkouts, calendarWorkoutFilterScope]);
 
   const selectedAthleteLabel = useMemo(() => {
     if (selectedAthleteIds.length === 0) return "Athletes: All";
@@ -3672,27 +3702,12 @@ export default function CoachCalendarMonth() {
   }, [currentWeekAnnotation, persistWeekLabelDraft, weekLabelDraft]);
 
   const rawWorkoutPassesCurrentFilters = useCallback(
-    (row: TeamWorkoutRow) => {
-      const athleteId = String(row.athlete_profile_id ?? "").trim();
-      if (selectedAthleteIds.length > 0 && !selectedAthleteIds.includes(athleteId)) return false;
-      if (selectedTrainingGroupIds.length > 0 && !selectedTrainingGroupAthleteIds.has(athleteId)) return false;
-      if (selectedSeason) {
-        const override = athleteId
-          ? athleteSeasonOverridesBySeasonAndAthlete.get(`${String(selectedSeason.id ?? "").trim()}:${athleteId}`) ?? null
-          : null;
-        const resolvedWindow = teamDataStore.resolveAthleteSeasonWindow(selectedSeason, override);
-        const dateISO = String(row.date_iso ?? "").trim();
-        if (dateISO < String(resolvedWindow.start_date ?? "") || dateISO > String(resolvedWindow.end_date ?? "")) return false;
-      }
-      return true;
-    },
-    [
-      athleteSeasonOverridesBySeasonAndAthlete,
-      selectedAthleteIds,
-      selectedSeason,
-      selectedTrainingGroupAthleteIds,
-      selectedTrainingGroupIds.length,
-    ]
+    (row: TeamWorkoutRow) => doesCalendarWorkoutMatchFilters({
+      athleteId: String(row.athlete_profile_id ?? ""),
+      dateISO: String(row.date_iso ?? ""),
+      athleteVisible: row.athlete_visible,
+    }, calendarWorkoutFilterScope),
+    [calendarWorkoutFilterScope]
   );
 
   const rawWorkoutCardKey = useCallback((row: TeamWorkoutRow) => {
@@ -3710,7 +3725,7 @@ export default function CoachCalendarMonth() {
       headerKeys.set(`${batchId}::${dateISO}::${session}`, { batchId, dateISO, session });
       dates.push(dateISO);
     });
-    if (headerKeys.size === 0 || dates.length === 0) return;
+    if (headerKeys.size === 0 || dates.length === 0) return 0;
 
     const sortedDates = [...dates].sort();
     const remainingRows = await listTeamWorkoutsInRange(sortedDates[0], sortedDates[sortedDates.length - 1]);
@@ -3727,7 +3742,7 @@ export default function CoachCalendarMonth() {
     const emptyHeaders = Array.from(headerKeys.entries())
       .filter(([key]) => !remainingHeaderKeys.has(key))
       .map(([, value]) => value);
-    if (emptyHeaders.length === 0) return;
+    if (emptyHeaders.length === 0) return 0;
     await Promise.all(
       emptyHeaders.map((item) =>
         deleteTeamWorkoutBatchHeader({
@@ -3737,7 +3752,173 @@ export default function CoachCalendarMonth() {
         })
       )
     );
+    return emptyHeaders.length;
   }, []);
+
+  const bulkDeletePreview = useMemo<BulkWorkoutDeletionPreview | null>(() => {
+    if (!bulkDeleteSource) return null;
+    return buildBulkWorkoutDeletionPreview(
+      bulkDeleteSource.allRows,
+      bulkDeleteSource.matchingRows,
+      bulkDeleteExcludeProtected
+    );
+  }, [bulkDeleteExcludeProtected, bulkDeleteSource]);
+
+  const bulkDeleteRangeDays = useMemo(() => {
+    if (!isValidISODate(bulkDeleteStartISO) || !isValidISODate(bulkDeleteEndISO)) return 0;
+    return diffISODateDays(bulkDeleteStartISO, bulkDeleteEndISO) + 1;
+  }, [bulkDeleteEndISO, bulkDeleteStartISO]);
+
+  const bulkDeleteFilterSummary = useMemo(() => {
+    const athleteNames = selectedAthleteIds
+      .map((id) => athleteFilterOptions.find((option) => option.id === id)?.label)
+      .filter(Boolean) as string[];
+    const groupNames = selectedTrainingGroupIds
+      .map((id) => trainingGroupFilterOptions.find((option) => option.id === id)?.label)
+      .filter(Boolean) as string[];
+    return [
+      `Date range: ${formatTrainingPlanRangeLabel(bulkDeleteStartISO, bulkDeleteEndISO)}`,
+      selectedSeasonLabel,
+      `Athletes: ${athleteNames.length > 0 ? athleteNames.join(", ") : "All"}`,
+      `Groups: ${groupNames.length > 0 ? groupNames.join(", ") : "All"}`,
+      "Visibility: All",
+      "Roster status: Active on workout date",
+    ];
+  }, [
+    athleteFilterOptions,
+    bulkDeleteEndISO,
+    bulkDeleteStartISO,
+    selectedAthleteIds,
+    selectedSeasonLabel,
+    selectedTrainingGroupIds,
+    trainingGroupFilterOptions,
+  ]);
+
+  const openBulkWorkoutDeletion = useCallback(() => {
+    setBulkDeleteRangeMode("week");
+    setBulkDeleteStartISO(currentWeekStartISO);
+    setBulkDeleteEndISO(currentWeekEndISO);
+    setBulkDeleteStep("scope");
+    setBulkDeleteError(null);
+    setBulkDeleteSource(null);
+    setBulkDeleteExcludeProtected(true);
+    setBulkDeleteLoggedAcknowledged(false);
+    setBulkDeletePermanentAcknowledged(false);
+    setBulkDeleteOpen(true);
+  }, [currentWeekEndISO, currentWeekStartISO]);
+
+  const previewBulkWorkoutDeletion = useCallback(async () => {
+    if (bulkDeleteLoading || bulkDeleteExecuting) return;
+    if (!isValidISODate(bulkDeleteStartISO) || !isValidISODate(bulkDeleteEndISO)) {
+      setBulkDeleteError("Choose valid start and end dates.");
+      return;
+    }
+    if (bulkDeleteStartISO > bulkDeleteEndISO) {
+      setBulkDeleteError("Start date must be on or before end date.");
+      return;
+    }
+    setBulkDeleteLoading(true);
+    setBulkDeleteError(null);
+    try {
+      const rows = await listTeamWorkoutsInRange(bulkDeleteStartISO, bulkDeleteEndISO);
+      const matchingRows = rows.filter(rawWorkoutPassesCurrentFilters);
+      setBulkDeleteSource({ allRows: rows, matchingRows });
+      setBulkDeleteStep("preview");
+      setBulkDeleteLoggedAcknowledged(false);
+      setBulkDeletePermanentAcknowledged(false);
+      if (__DEV__) {
+        console.log("[coach-calendar] bulk deletion preview", {
+          scope: {
+            startISO: bulkDeleteStartISO,
+            endISO: bulkDeleteEndISO,
+            selectedAthleteIds,
+            selectedTrainingGroupIds,
+            selectedSeasonId: String(selectedSeason?.id ?? "") || null,
+            visibility: "all",
+          },
+          candidateWorkoutIds: rows.map((row) => row.id),
+          matchingWorkoutIds: matchingRows.map((row) => row.id),
+        });
+      }
+    } catch (error: any) {
+      setBulkDeleteError(String(error?.message ?? error ?? "Could not preview deletion."));
+    } finally {
+      setBulkDeleteLoading(false);
+    }
+  }, [
+    bulkDeleteEndISO,
+    bulkDeleteExecuting,
+    bulkDeleteLoading,
+    bulkDeleteStartISO,
+    rawWorkoutPassesCurrentFilters,
+    selectedAthleteIds,
+    selectedSeason,
+    selectedTrainingGroupIds,
+  ]);
+
+  const executeBulkWorkoutDeletion = useCallback(async () => {
+    if (!bulkDeletePreview || bulkDeleteExecuting || !bulkDeletePermanentAcknowledged) return;
+    if (!bulkDeleteExcludeProtected && bulkDeletePreview.protectedRows.length > 0 && !bulkDeleteLoggedAcknowledged) return;
+    const rows = bulkDeletePreview.deletableRows;
+    if (rows.length === 0) return;
+    setBulkDeleteExecuting(true);
+    setBulkDeleteError(null);
+    let deletedCount = 0;
+    try {
+      const ids = Array.from(new Set(rows.map((row) => String(row.id ?? "").trim()).filter(Boolean)));
+      for (let index = 0; index < ids.length; index += 100) {
+        const chunk = ids.slice(index, index + 100);
+        const chunkDeletedCount = await deleteTeamWorkoutsByIds(chunk);
+        deletedCount += chunkDeletedCount;
+        if (chunkDeletedCount !== chunk.length) {
+          throw new Error(`The server deleted ${chunkDeletedCount} of ${chunk.length} rows in a deletion batch.`);
+        }
+      }
+      const deletedHeaderCount = await cleanupEmptyBatchHeadersForRows(rows);
+      await loadCalendarData({ force: true });
+      if (__DEV__) {
+        console.log("[coach-calendar] bulk deletion completed", {
+          deletedRowCount: deletedCount,
+          deletedHeaderCount,
+          partialBatchCount: bulkDeletePreview.partialBatchCount,
+          wholeBatchCount: bulkDeletePreview.wholeBatchCount,
+        });
+      }
+      setBulkDeleteOpen(false);
+      Alert.alert(
+        "Visible workouts deleted",
+        `Deleted ${deletedCount} workout assignment${deletedCount === 1 ? "" : "s"} across ${bulkDeletePreview.batchCount} batch${bulkDeletePreview.batchCount === 1 ? "" : "es"}.`
+      );
+    } catch (error: any) {
+      try {
+        await cleanupEmptyBatchHeadersForRows(rows);
+      } catch (headerError) {
+        if (__DEV__) console.warn("[coach-calendar] partial bulk deletion header cleanup failed", headerError);
+      }
+      await loadCalendarData({ force: true });
+      if (__DEV__) {
+        console.warn("[coach-calendar] bulk deletion stopped", {
+          deletedRowCount: deletedCount,
+          candidateWorkoutIds: rows.map((row) => row.id),
+          partialBatchCount: bulkDeletePreview.partialBatchCount,
+          wholeBatchCount: bulkDeletePreview.wholeBatchCount,
+        });
+      }
+      setBulkDeleteError(
+        `${deletedCount > 0 ? `${deletedCount} workout assignment${deletedCount === 1 ? " was" : "s were"} deleted before the operation stopped. ` : ""}${String(error?.message ?? error ?? "Could not complete deletion.")}`
+      );
+    } finally {
+      setBulkDeleteExecuting(false);
+    }
+  }, [
+    bulkDeleteExcludeProtected,
+    bulkDeleteExecuting,
+    bulkDeleteLoggedAcknowledged,
+    bulkDeletePermanentAcknowledged,
+    bulkDeletePreview,
+    cleanupEmptyBatchHeadersForRows,
+    loadCalendarData,
+  ]);
 
   const copyWorkoutRowsToWeek = useCallback(
     async (input: {
@@ -4044,54 +4225,6 @@ export default function CoachCalendarMonth() {
     selectedWorkoutCardCount,
   ]);
 
-  const runClearThisWeek = useCallback(async () => {
-    if (copyingWeek || clearingWeek) return;
-    debugCalendar("[coach-calendar] runClearThisWeek start");
-    setClearingWeek(true);
-    try {
-      const currentWeekStartISO = toISODate(anchorWeekStart);
-      const currentWeekEndISO = toISODate(addDays(anchorWeekStart, 6));
-      const currentWeekRows = await listTeamWorkoutsInRange(currentWeekStartISO, currentWeekEndISO);
-      const visibleCurrentWeekRows = (Array.isArray(currentWeekRows) ? currentWeekRows : []).filter(rawWorkoutPassesCurrentFilters);
-
-      if (visibleCurrentWeekRows.length === 0) {
-        Alert.alert("Clear This Week", "No visible workouts found in this week for the current filters.");
-        return;
-      }
-
-      const rowIds = Array.from(new Set(visibleCurrentWeekRows.map((row) => String(row.id ?? "").trim()).filter(Boolean)));
-      const deletedCount = await deleteTeamWorkoutsByIds(rowIds);
-      await cleanupEmptyBatchHeadersForRows(visibleCurrentWeekRows);
-
-      await loadCalendarData({ force: true });
-      Alert.alert("Clear This Week", `Removed ${deletedCount} visible workout row${deletedCount === 1 ? "" : "s"} from this week.`);
-    } catch (error: any) {
-      Alert.alert("Clear failed", String(error?.message ?? "Could not clear this week."));
-    } finally {
-      setClearingWeek(false);
-    }
-  }, [anchorWeekStart, clearingWeek, cleanupEmptyBatchHeadersForRows, copyingWeek, loadCalendarData, rawWorkoutPassesCurrentFilters]);
-
-  const handleClearThisWeek = useCallback(() => {
-    if (calendarMode !== "week" || copyingWeek || clearingWeek) return;
-    const message = "Delete all workout rows currently visible in this week? Current athlete, group, and season filters will be honored. This cannot be undone.";
-    if (Platform.OS === "web") {
-      const confirmed = window.confirm(message);
-      if (confirmed) {
-        void runClearThisWeek();
-      }
-      return;
-    }
-    Alert.alert(
-      "Clear This Week",
-      message,
-      [
-        { text: "Cancel", style: "cancel" },
-        { text: "Delete", style: "destructive", onPress: () => void runClearThisWeek() },
-      ]
-    );
-  }, [calendarMode, clearingWeek, copyingWeek, runClearThisWeek]);
-
   return (
     <View style={styles.container}>
       <View style={[styles.headerCard, calendarMode === "month" && isWebDesktop && styles.monthDesktopInset]}>
@@ -4312,12 +4445,12 @@ export default function CoachCalendarMonth() {
                       <Pressable
                         onPress={() => {
                           setWeekActionsMenuOpen(false);
-                          handleClearThisWeek();
+                          openBulkWorkoutDeletion();
                         }}
                         style={[styles.actionMenuItem, (copyingWeek || clearingWeek) && styles.actionMenuItemDisabled]}
                         disabled={copyingWeek || clearingWeek}
                       >
-                        <Text style={styles.actionMenuItemText}>{clearingWeek ? "Clearing..." : "Clear This Week"}</Text>
+                        <Text style={[styles.actionMenuItemText, { color: "#b91c1c" }]}>Delete visible workouts…</Text>
                       </Pressable>
                     </>
                   ) : null}
@@ -5350,6 +5483,240 @@ export default function CoachCalendarMonth() {
             </View>
           </Pressable>
         </Pressable>
+      </Modal>
+
+      <Modal
+        visible={bulkDeleteOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!bulkDeleteExecuting) setBulkDeleteOpen(false);
+        }}
+      >
+        <View style={styles.exportModalBackdrop}>
+          <View style={[styles.exportModalCard, styles.bulkDeleteModalCard]}>
+            <View style={styles.bulkDeleteHeaderRow}>
+              <View style={{ flex: 1, gap: 3 }}>
+                <Text style={styles.exportModalTitle}>Delete visible workouts</Text>
+                <Text style={styles.exportModalHint}>Only workouts matching the current Calendar filters will be deleted.</Text>
+              </View>
+              <Pressable
+                style={styles.todayBtn}
+                disabled={bulkDeleteExecuting}
+                onPress={() => setBulkDeleteOpen(false)}
+              >
+                <Text style={styles.todayBtnText}>Close</Text>
+              </Pressable>
+            </View>
+
+            <ScrollView style={styles.bulkDeleteScroll} contentContainerStyle={styles.bulkDeleteScrollContent}>
+              {bulkDeleteStep === "scope" ? (
+                <>
+                  <Text style={styles.bulkDeleteSectionTitle}>Deletion scope</Text>
+                  <View style={styles.bulkDeleteChoiceRow}>
+                    <Pressable
+                      style={[styles.bulkDeleteChoice, bulkDeleteRangeMode === "week" && styles.bulkDeleteChoiceSelected]}
+                      onPress={() => {
+                        setBulkDeleteRangeMode("week");
+                        setBulkDeleteStartISO(currentWeekStartISO);
+                        setBulkDeleteEndISO(currentWeekEndISO);
+                        setBulkDeleteError(null);
+                      }}
+                    >
+                      <Text style={styles.bulkDeleteChoiceText}>{bulkDeleteRangeMode === "week" ? "◉" : "○"} This week</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.bulkDeleteChoice, bulkDeleteRangeMode === "custom" && styles.bulkDeleteChoiceSelected]}
+                      onPress={() => {
+                        setBulkDeleteRangeMode("custom");
+                        setBulkDeleteError(null);
+                      }}
+                    >
+                      <Text style={styles.bulkDeleteChoiceText}>{bulkDeleteRangeMode === "custom" ? "◉" : "○"} Custom date range</Text>
+                    </Pressable>
+                  </View>
+                  {bulkDeleteRangeMode === "custom" ? (
+                    <View style={styles.bulkDeleteDateFields}>
+                      <DateField
+                        label="Start date"
+                        value={bulkDeleteStartISO}
+                        onChangeText={(value) => {
+                          setBulkDeleteStartISO(value);
+                          setBulkDeleteError(null);
+                        }}
+                      />
+                      <DateField
+                        label="End date"
+                        value={bulkDeleteEndISO}
+                        onChangeText={(value) => {
+                          setBulkDeleteEndISO(value);
+                          setBulkDeleteError(null);
+                        }}
+                      />
+                    </View>
+                  ) : null}
+                  {bulkDeleteRangeDays > MAX_TRAINING_PLAN_EXPORT_RANGE_DAYS ? (
+                    <Text style={styles.bulkDeleteWarning}>
+                      This is a large range ({bulkDeleteRangeDays} days). Preview it carefully before deleting.
+                    </Text>
+                  ) : null}
+                  <View style={styles.bulkDeleteSummaryCard}>
+                    <Text style={styles.bulkDeleteSectionTitle}>Filters limiting deletion</Text>
+                    {bulkDeleteFilterSummary.map((line) => (
+                      <Text key={line} style={styles.bulkDeleteSummaryLine}>• {line}</Text>
+                    ))}
+                  </View>
+                </>
+              ) : bulkDeletePreview ? (
+                <>
+                  <View style={styles.bulkDeleteSummaryCard}>
+                    <Text style={styles.bulkDeleteSectionTitle}>Filters used for this preview</Text>
+                    {bulkDeleteFilterSummary.map((line) => (
+                      <Text key={line} style={styles.bulkDeleteSummaryLine}>• {line}</Text>
+                    ))}
+                  </View>
+
+                  {bulkDeletePreview.protectedRows.length > 0 ? (
+                    <View style={[styles.bulkDeleteSummaryCard, styles.bulkDeleteRiskCard]}>
+                      <Text style={styles.bulkDeleteRiskTitle}>
+                        {bulkDeletePreview.protectedRows.length} matching workout{bulkDeletePreview.protectedRows.length === 1 ? " contains" : "s contain"} athlete logs or feedback.
+                      </Text>
+                      <Pressable
+                        style={styles.bulkDeleteCheckRow}
+                        disabled={bulkDeleteExecuting}
+                        onPress={() => {
+                          setBulkDeleteExcludeProtected((value) => !value);
+                          setBulkDeleteLoggedAcknowledged(false);
+                          setBulkDeletePermanentAcknowledged(false);
+                        }}
+                      >
+                        <Text style={styles.bulkDeleteCheckbox}>{bulkDeleteExcludeProtected ? "☑" : "☐"}</Text>
+                        <Text style={styles.bulkDeleteCheckText}>Exclude workouts with athlete logs or feedback (safer)</Text>
+                      </Pressable>
+                      {!bulkDeleteExcludeProtected ? (
+                        <Pressable
+                          style={styles.bulkDeleteCheckRow}
+                          disabled={bulkDeleteExecuting}
+                          onPress={() => setBulkDeleteLoggedAcknowledged((value) => !value)}
+                        >
+                          <Text style={styles.bulkDeleteCheckbox}>{bulkDeleteLoggedAcknowledged ? "☑" : "☐"}</Text>
+                          <Text style={styles.bulkDeleteCheckText}>I understand logged/completed workout history will also be permanently deleted.</Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  ) : null}
+
+                  <View style={styles.bulkDeleteMetricsGrid}>
+                    {[
+                      ["Assignments", bulkDeletePreview.deletableRows.length],
+                      ["Batches", bulkDeletePreview.batchCount],
+                      ["Athletes", bulkDeletePreview.uniqueAthleteCount],
+                      ["Dates", bulkDeletePreview.dateCount],
+                      ["Published", bulkDeletePreview.publishedCount],
+                      ["Draft", bulkDeletePreview.draftCount],
+                      ["Partial batches", bulkDeletePreview.partialBatchCount],
+                      ["Whole batches", bulkDeletePreview.wholeBatchCount],
+                    ].map(([label, value]) => (
+                      <View key={String(label)} style={styles.bulkDeleteMetric}>
+                        <Text style={styles.bulkDeleteMetricValue}>{value}</Text>
+                        <Text style={styles.bulkDeleteMetricLabel}>{label}</Text>
+                      </View>
+                    ))}
+                  </View>
+                  <Text style={styles.exportModalHint}>
+                    Date range: {formatTrainingPlanRangeLabel(bulkDeleteStartISO, bulkDeleteEndISO)}
+                  </Text>
+
+                  <Text style={styles.bulkDeleteSectionTitle}>Affected workouts</Text>
+                  {bulkDeletePreview.items.length === 0 ? (
+                    <Text style={styles.exportModalHint}>
+                      No workout assignments are eligible for deletion with the current filters and safety settings.
+                    </Text>
+                  ) : (
+                    bulkDeletePreview.items.map((item, index) => {
+                      const showDate = index === 0 || bulkDeletePreview.items[index - 1]?.dateISO !== item.dateISO;
+                      const outcome = item.outcome === "whole-batch"
+                        ? "Whole batch deleted"
+                        : item.outcome === "partial-batch"
+                          ? "Partial batch removal"
+                          : "Row-only deletion";
+                      return (
+                        <View key={item.key}>
+                          {showDate ? <Text style={styles.bulkDeleteDateHeading}>{item.dateISO}</Text> : null}
+                          <View style={styles.bulkDeleteItemRow}>
+                            <View style={{ flex: 1, minWidth: 0 }}>
+                              <Text style={styles.bulkDeleteItemTitle}>{item.session} · {item.title}</Text>
+                              <Text style={styles.bulkDeleteItemMeta}>
+                                Remove {item.matchingAthleteCount} of {item.totalAthleteCount} athlete{item.totalAthleteCount === 1 ? "" : "s"}
+                              </Text>
+                            </View>
+                            <Text style={[
+                              styles.bulkDeleteOutcome,
+                              item.outcome === "partial-batch" && styles.bulkDeleteOutcomePartial,
+                            ]}>{outcome}</Text>
+                          </View>
+                        </View>
+                      );
+                    })
+                  )}
+
+                  <View style={[styles.bulkDeleteSummaryCard, styles.bulkDeletePermanentCard]}>
+                    <Text style={styles.bulkDeleteConfirmTitle}>
+                      Delete {bulkDeletePreview.deletableRows.length} workout assignment{bulkDeletePreview.deletableRows.length === 1 ? "" : "s"} across {bulkDeletePreview.batchCount} batch{bulkDeletePreview.batchCount === 1 ? "" : "es"}?
+                    </Text>
+                    <Text style={styles.bulkDeleteWarning}>This deletion is permanent and cannot be undone.</Text>
+                    <Pressable
+                      style={styles.bulkDeleteCheckRow}
+                      disabled={bulkDeleteExecuting}
+                      onPress={() => setBulkDeletePermanentAcknowledged((value) => !value)}
+                    >
+                      <Text style={styles.bulkDeleteCheckbox}>{bulkDeletePermanentAcknowledged ? "☑" : "☐"}</Text>
+                      <Text style={styles.bulkDeleteCheckText}>I understand this deletion cannot be undone.</Text>
+                    </Pressable>
+                  </View>
+                </>
+              ) : null}
+
+              {bulkDeleteError ? <Text style={styles.exportModalError}>{bulkDeleteError}</Text> : null}
+            </ScrollView>
+
+            <View style={styles.bulkDeleteFooter}>
+              {bulkDeleteStep === "preview" ? (
+                <Pressable
+                  style={styles.todayBtn}
+                  disabled={bulkDeleteExecuting}
+                  onPress={() => {
+                    setBulkDeleteStep("scope");
+                    setBulkDeleteSource(null);
+                    setBulkDeleteError(null);
+                  }}
+                >
+                  <Text style={styles.todayBtnText}>Back</Text>
+                </Pressable>
+              ) : <View />}
+              {bulkDeleteStep === "scope" ? (
+                <Pressable
+                  style={[styles.bulkDeletePrimaryButton, bulkDeleteLoading && styles.actionMenuItemDisabled]}
+                  disabled={bulkDeleteLoading}
+                  onPress={() => void previewBulkWorkoutDeletion()}
+                >
+                  <Text style={styles.bulkDeletePrimaryButtonText}>{bulkDeleteLoading ? "Loading preview…" : "Preview deletion"}</Text>
+                </Pressable>
+              ) : (
+                <Pressable
+                  style={[
+                    styles.bulkDeleteDestructiveButton,
+                    (!bulkDeletePreview || bulkDeletePreview.deletableRows.length === 0 || !bulkDeletePermanentAcknowledged || (!bulkDeleteExcludeProtected && bulkDeletePreview.protectedRows.length > 0 && !bulkDeleteLoggedAcknowledged) || bulkDeleteExecuting) && styles.actionMenuItemDisabled,
+                  ]}
+                  disabled={!bulkDeletePreview || bulkDeletePreview.deletableRows.length === 0 || !bulkDeletePermanentAcknowledged || (!bulkDeleteExcludeProtected && bulkDeletePreview.protectedRows.length > 0 && !bulkDeleteLoggedAcknowledged) || bulkDeleteExecuting}
+                  onPress={() => void executeBulkWorkoutDeletion()}
+                >
+                  <Text style={styles.bulkDeleteDestructiveButtonText}>{bulkDeleteExecuting ? "Deleting…" : "Delete permanently"}</Text>
+                </Pressable>
+              )}
+            </View>
+          </View>
+        </View>
       </Modal>
 
       <Modal
@@ -6860,4 +7227,105 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
     gap: 8,
   },
+  bulkDeleteModalCard: {
+    maxWidth: 760,
+    maxHeight: "92%",
+    padding: 0,
+    overflow: "hidden",
+  },
+  bulkDeleteHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    padding: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: "#e2e8f0",
+  },
+  bulkDeleteScroll: { flexShrink: 1 },
+  bulkDeleteScrollContent: { padding: 14, gap: 12 },
+  bulkDeleteSectionTitle: { fontSize: 12, fontWeight: "900", color: "#0f172a" },
+  bulkDeleteChoiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  bulkDeleteChoice: {
+    minHeight: 38,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    borderRadius: 9,
+    backgroundColor: "#fff",
+    justifyContent: "center",
+  },
+  bulkDeleteChoiceSelected: { borderColor: "#2563eb", backgroundColor: "#eff6ff" },
+  bulkDeleteChoiceText: { fontSize: 12, fontWeight: "800", color: "#1e293b" },
+  bulkDeleteDateFields: { gap: 10 },
+  bulkDeleteSummaryCard: {
+    gap: 5,
+    borderWidth: 1,
+    borderColor: "#dbe3ee",
+    borderRadius: 10,
+    backgroundColor: "#f8fafc",
+    padding: 10,
+  },
+  bulkDeleteSummaryLine: { fontSize: 11, fontWeight: "700", color: "#475569" },
+  bulkDeleteWarning: { fontSize: 11, fontWeight: "800", color: "#b45309" },
+  bulkDeleteRiskCard: { borderColor: "#f59e0b", backgroundColor: "#fffbeb" },
+  bulkDeleteRiskTitle: { fontSize: 12, fontWeight: "900", color: "#92400e" },
+  bulkDeleteCheckRow: { flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 4 },
+  bulkDeleteCheckbox: { fontSize: 18, lineHeight: 20, fontWeight: "900", color: "#1d4ed8" },
+  bulkDeleteCheckText: { flex: 1, fontSize: 11, lineHeight: 17, fontWeight: "700", color: "#334155" },
+  bulkDeleteMetricsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
+  bulkDeleteMetric: {
+    minWidth: 92,
+    flexGrow: 1,
+    borderWidth: 1,
+    borderColor: "#dbe3ee",
+    borderRadius: 9,
+    backgroundColor: "#fff",
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+  },
+  bulkDeleteMetricValue: { fontSize: 17, fontWeight: "900", color: "#0f172a" },
+  bulkDeleteMetricLabel: { fontSize: 9, fontWeight: "800", color: "#64748b" },
+  bulkDeleteDateHeading: {
+    marginTop: 7,
+    paddingBottom: 3,
+    borderBottomWidth: 1,
+    borderBottomColor: "#e2e8f0",
+    fontSize: 11,
+    fontWeight: "900",
+    color: "#334155",
+  },
+  bulkDeleteItemRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 7 },
+  bulkDeleteItemTitle: { fontSize: 11, fontWeight: "900", color: "#0f172a" },
+  bulkDeleteItemMeta: { marginTop: 2, fontSize: 10, fontWeight: "700", color: "#64748b" },
+  bulkDeleteOutcome: { maxWidth: 150, fontSize: 9, fontWeight: "900", color: "#b91c1c", textAlign: "right" },
+  bulkDeleteOutcomePartial: { color: "#b45309" },
+  bulkDeletePermanentCard: { borderColor: "#fecaca", backgroundColor: "#fff7f7" },
+  bulkDeleteConfirmTitle: { fontSize: 14, fontWeight: "900", color: "#991b1b" },
+  bulkDeleteFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    padding: 12,
+    borderTopWidth: 1,
+    borderTopColor: "#e2e8f0",
+  },
+  bulkDeletePrimaryButton: {
+    minHeight: 38,
+    paddingHorizontal: 14,
+    borderRadius: 9,
+    backgroundColor: "#1d4ed8",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  bulkDeletePrimaryButtonText: { fontSize: 12, fontWeight: "900", color: "#fff" },
+  bulkDeleteDestructiveButton: {
+    minHeight: 38,
+    paddingHorizontal: 14,
+    borderRadius: 9,
+    backgroundColor: "#b91c1c",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  bulkDeleteDestructiveButtonText: { fontSize: 12, fontWeight: "900", color: "#fff" },
 });
