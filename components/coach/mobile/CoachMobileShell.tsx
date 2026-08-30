@@ -8,8 +8,10 @@ import { listTeamWorkoutBatchHeadersInRange, type TeamWorkoutBatchHeaderRow } fr
 import { teamDataStore } from "../../../lib/teamDataStore";
 import { parseISODate, toISODate } from "../../../lib/mileagePlan";
 import { getAthleteDisplayName } from "../../../lib/athleteName";
+import { hasWorkoutFeedback } from "../../../lib/feedbackParsing";
 import { clearActiveAccountContext } from "../../../lib/accountContexts";
 import { supabase } from "../../../lib/supabase";
+import { DateField } from "../../ui/DateField";
 import {
   loadAuxiliaryRoutineDefinitionsWithStatus,
   type AuxiliaryRoutine,
@@ -198,15 +200,6 @@ function groupWorkouts(
     .sort((a, b) => `${a.dateISO}-${a.session}`.localeCompare(`${b.dateISO}-${b.session}`));
 }
 
-function hasFeedback(row: TeamWorkoutRow) {
-  return (
-    row.completed_miles != null ||
-    !!String(row.completed_time_text ?? "").trim() ||
-    !!String(row.splits_or_pace ?? "").trim() ||
-    !!String(row.additional_feedback ?? "").trim()
-  );
-}
-
 function Pill({ children, tone = "neutral" }: { children: string; tone?: "neutral" | "success" | "warning" }) {
   const colors =
     tone === "success"
@@ -263,6 +256,8 @@ export function CoachMobileShell() {
   const teamStore = teamDataStore.use();
   const section = resolveSection(pathname);
   const selectedDateISO = getDateParam(params.date) ?? todayISO();
+  const [selectedLogDateISO, setSelectedLogDateISO] = useState(() => getDateParam(params.date) ?? todayISO());
+  const [selectedLogDateDraft, setSelectedLogDateDraft] = useState(() => getDateParam(params.date) ?? todayISO());
   const [workouts, setWorkouts] = useState<TeamWorkoutRow[]>([]);
   const [batchHeaders, setBatchHeaders] = useState<TeamWorkoutBatchHeaderRow[]>([]);
   const [routineById, setRoutineById] = useState<Map<string, AuxiliaryRoutine>>(new Map());
@@ -281,9 +276,16 @@ export function CoachMobileShell() {
   }, []);
 
   useEffect(() => {
+    if (section !== "logs") return;
+    const nextDateISO = getDateParam(params.date) ?? todayISO();
+    setSelectedLogDateISO(nextDateISO);
+    setSelectedLogDateDraft(nextDateISO);
+  }, [params.date, section]);
+
+  useEffect(() => {
     let cancelled = false;
-    const startISO = section === "logs" ? addDaysISO(todayISO(), -14) : selectedDateISO;
-    const endISO = section === "home" ? addDaysISO(todayISO(), 7) : section === "logs" ? todayISO() : addDaysISO(selectedDateISO, 6);
+    const startISO = section === "logs" ? selectedLogDateISO : selectedDateISO;
+    const endISO = section === "home" ? addDaysISO(todayISO(), 7) : section === "logs" ? selectedLogDateISO : addDaysISO(selectedDateISO, 6);
     setLoadingWorkouts(true);
     setWorkoutError(null);
     setRoutineDataError(null);
@@ -316,7 +318,7 @@ export function CoachMobileShell() {
     return () => {
       cancelled = true;
     };
-  }, [section, selectedDateISO]);
+  }, [section, selectedDateISO, selectedLogDateISO]);
 
   const batchNotesByWorkoutId = useMemo(() => buildBatchNotesByWorkoutId(workouts, batchHeaders), [batchHeaders, workouts]);
   const rosterById = useMemo(
@@ -343,16 +345,32 @@ export function CoachMobileShell() {
   }, [roster, rosterQuery]);
   const selectedRosterId = extractRosterId(pathname);
   const selectedAthlete = selectedRosterId ? teamStore.roster.find((athlete) => athlete.id === selectedRosterId) ?? null : null;
-  const recentLogs = useMemo(
-    () =>
-      workouts
-        .filter(hasFeedback)
-        .sort((a, b) => `${b.date_iso}-${b.session}`.localeCompare(`${a.date_iso}-${a.session}`))
-        .slice(0, 20),
-    [workouts]
-  );
+  const selectedDateLogs = useMemo(() => {
+    const athleteNameForRow = (row: TeamWorkoutRow) => {
+      const athleteId = cleanDisplayText(row.athlete_profile_id);
+      const athlete = rosterById.get(athleteId);
+      return athlete ? getAthleteDisplayName(athlete) : `Athlete (${athleteId.slice(-6)})`;
+    };
+    return [...workouts]
+      .filter((row) => cleanDisplayText(row.date_iso) === selectedLogDateISO && hasWorkoutFeedback(row))
+      .sort((a, b) => {
+        const sessionOrder = (a.session === "AM" ? 0 : 1) - (b.session === "AM" ? 0 : 1);
+        if (sessionOrder !== 0) return sessionOrder;
+        const athleteOrder = athleteNameForRow(a).localeCompare(athleteNameForRow(b));
+        if (athleteOrder !== 0) return athleteOrder;
+        return cleanDisplayText(a.title).localeCompare(cleanDisplayText(b.title));
+      });
+  }, [rosterById, selectedLogDateISO, workouts]);
 
   const navigate = (href: string) => router.replace(href as any);
+
+  const selectLogDate = (nextDateISO: string) => {
+    const validDateISO = getDateParam(nextDateISO);
+    if (!validDateISO) return;
+    setSelectedLogDateISO(validDateISO);
+    setSelectedLogDateDraft(validDateISO);
+    navigate(`/(coach)/(tabs)/training-logs?date=${validDateISO}`);
+  };
 
   async function signOut() {
     if (signingOut) return;
@@ -438,15 +456,50 @@ export function CoachMobileShell() {
     if (section === "logs") {
       return (
         <>
-          <SectionHeader title="Training Logs" subtitle="Recent athlete feedback from the last 14 days." />
+          <SectionHeader title="Training Logs" subtitle={formatDateLabel(selectedLogDateISO)} />
+          <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 8, width: "100%" }}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Previous day"
+              onPress={() => selectLogDate(addDaysISO(selectedLogDateISO, -1))}
+              style={logDateNavButtonStyle}
+            >
+              <Ionicons name="chevron-back" size={16} color="#172033" />
+              <Text numberOfLines={1} style={logDateNavButtonTextStyle}>Prev Day</Text>
+            </Pressable>
+            <DateField
+              value={selectedLogDateDraft}
+              onChangeText={(nextValue) => {
+                setSelectedLogDateDraft(nextValue);
+                const validDateISO = getDateParam(nextValue);
+                if (validDateISO) selectLogDate(validDateISO);
+              }}
+              style={{ flex: 1, minWidth: 0 }}
+              inputStyle={{ fontSize: 13, fontWeight: "800", textAlign: "center", paddingHorizontal: 6 }}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Next day"
+              onPress={() => selectLogDate(addDaysISO(selectedLogDateISO, 1))}
+              style={logDateNavButtonStyle}
+            >
+              <Text numberOfLines={1} style={logDateNavButtonTextStyle}>Next Day</Text>
+              <Ionicons name="chevron-forward" size={16} color="#172033" />
+            </Pressable>
+          </View>
           {loadingWorkouts ? <ActivityIndicator /> : null}
           {workoutError ? <Text style={{ color: "#b91c1c", fontWeight: "800" }}>{workoutError}</Text> : null}
-          {recentLogs.map((row) => {
-            const athlete = teamStore.roster.find((item) => item.id === row.athlete_profile_id);
+          {selectedDateLogs.map((row) => {
+            const athleteId = cleanDisplayText(row.athlete_profile_id);
+            const athlete = rosterById.get(athleteId);
             return (
               <Card key={row.id}>
-                <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>{formatDateLabel(row.date_iso)} · {row.session}</Text>
-                <Text style={{ fontSize: 16, fontWeight: "900", color: "#172033" }}>{athlete ? getAthleteDisplayName(athlete) : "Athlete"}</Text>
+                <Text style={{ fontSize: 12, fontWeight: "900", color: "#64748b" }}>
+                  {[formatDateLabel(row.date_iso), row.session, cleanDisplayText(row.time_text)].filter(Boolean).join(" · ")}
+                </Text>
+                <Text style={{ fontSize: 16, fontWeight: "900", color: "#172033" }}>
+                  {athlete ? getAthleteDisplayName(athlete) : `Athlete (${athleteId.slice(-6)})`}
+                </Text>
                 <Text style={{ color: "#334155", fontWeight: "700" }}>{row.title}</Text>
                 <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
                   {row.completed_miles != null ? <Pill>{`${row.completed_miles} mi`}</Pill> : null}
@@ -457,7 +510,12 @@ export function CoachMobileShell() {
               </Card>
             );
           })}
-          {!recentLogs.length && !loadingWorkouts ? <DesktopOnlyCard title="No recent feedback" body="Recent completed workout feedback will appear here." /> : null}
+          {!selectedDateLogs.length && !loadingWorkouts && !workoutError ? (
+            <DesktopOnlyCard
+              title="No logs submitted for this date."
+              body={`Athlete workout feedback for ${formatDateLabel(selectedLogDateISO)} will appear here.`}
+            />
+          ) : null}
         </>
       );
     }
@@ -655,3 +713,23 @@ const dateButtonStyle = {
 };
 
 const dateButtonTextStyle = { color: "#172033", fontWeight: "900" as const };
+
+const logDateNavButtonStyle = {
+  height: 44,
+  minWidth: 74,
+  borderWidth: 1,
+  borderColor: "#dbe3ef",
+  backgroundColor: "#fff",
+  borderRadius: 12,
+  paddingHorizontal: 7,
+  flexDirection: "row" as const,
+  alignItems: "center" as const,
+  justifyContent: "center" as const,
+  gap: 2,
+};
+
+const logDateNavButtonTextStyle = {
+  color: "#172033",
+  fontSize: 11,
+  fontWeight: "900" as const,
+};
