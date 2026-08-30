@@ -992,6 +992,32 @@ function toWorkoutBatchHeaderNotesBaseKey(dateISO: string, batchId: string): str
   return `${String(dateISO ?? "").trim()}::${String(batchId ?? "").trim()}`;
 }
 
+function resolveExportBatchHeaderNotes(args: {
+  dateISO: string;
+  batchId: string;
+  session: string;
+  headerByKey: Record<string, string>;
+  headerByBaseKey: Record<string, string>;
+  headerByBatchId: Record<string, string>;
+}): string {
+  const batchId = String(args.batchId ?? "").trim();
+  if (!batchId) return "";
+
+  const exactKey = toWorkoutBatchHeaderNotesKey(args.dateISO, batchId, args.session);
+  if (Object.prototype.hasOwnProperty.call(args.headerByKey, exactKey)) {
+    const exactHeaderNotes = String(args.headerByKey[exactKey] ?? "").trim();
+    return exactHeaderNotes.toLowerCase() === "no notes" ? "" : exactHeaderNotes;
+  }
+
+  const baseKey = toWorkoutBatchHeaderNotesBaseKey(args.dateISO, batchId);
+  const baseHeaderNotes = String(args.headerByBaseKey[baseKey] ?? "").trim();
+  if (baseHeaderNotes && baseHeaderNotes.toLowerCase() !== "no notes") return baseHeaderNotes;
+
+  const batchHeaderNotes = String(args.headerByBatchId[batchId] ?? "").trim();
+  if (batchHeaderNotes && batchHeaderNotes.toLowerCase() !== "no notes") return batchHeaderNotes;
+  return "";
+}
+
 function applyHeaderNotesToWeeklySections(
   days: WeeklyDaySection[],
   headerByKey: Record<string, string>,
@@ -1003,15 +1029,15 @@ function applyHeaderNotesToWeeklySections(
     workouts: (Array.isArray(day.workouts) ? day.workouts : []).map((workout) => {
       const parsed = parseWeeklyBatchKey(workout.saveKey);
       if (!parsed.isBatch) return workout;
-      const exactKey = toWorkoutBatchHeaderNotesKey(day.dateISO, parsed.id, String(workout.session ?? ""));
-      const exact = String(headerByKey[exactKey] ?? "").trim();
-      if (exact) return { ...workout, details: exact };
-      const baseKey = toWorkoutBatchHeaderNotesBaseKey(day.dateISO, parsed.id);
-      const base = String(headerByBaseKey[baseKey] ?? "").trim();
-      if (base) return { ...workout, details: base };
-      const byBatch = String(headerByBatchId[parsed.id] ?? "").trim();
-      if (byBatch) return { ...workout, details: byBatch };
-      return workout;
+      const batchHeaderNotes = resolveExportBatchHeaderNotes({
+        dateISO: day.dateISO,
+        batchId: parsed.id,
+        session: String(workout.session ?? ""),
+        headerByKey,
+        headerByBaseKey,
+        headerByBatchId,
+      });
+      return { ...workout, details: batchHeaderNotes || undefined };
     }),
   }));
 }
@@ -2582,24 +2608,15 @@ export default function CoachCalendarMonth() {
           });
 
           const batchIdForNotes = String(first.batchId ?? "").trim();
-          const mainBatchNotes = (() => {
-            if (batchIdForNotes) {
-              const headerKey = toWorkoutBatchHeaderNotesKey(dateISO, batchIdForNotes, String(first.session ?? ""));
-              const headerNotes = String(headerByKey[headerKey] ?? "").trim();
-              if (headerNotes && headerNotes.toLowerCase() !== "no notes") return headerNotes;
-              const baseKey = toWorkoutBatchHeaderNotesBaseKey(dateISO, batchIdForNotes);
-              const baseHeaderNotes = String(headerByBaseKey[baseKey] ?? "").trim();
-              if (baseHeaderNotes && baseHeaderNotes.toLowerCase() !== "no notes") return baseHeaderNotes;
-              const batchHeaderNotes = String(headerByBatchId[batchIdForNotes] ?? "").trim();
-              if (batchHeaderNotes && batchHeaderNotes.toLowerCase() !== "no notes") return batchHeaderNotes;
-            }
-            const rowNotes = rows
-              .map((row) => normalizeDetailsText(row.details))
-              .filter((note) => !!note && note.toLowerCase() !== "no notes");
-            if (rowNotes.length === 0) return "";
-            return rowNotes.reduce((longest, current) => (current.length > longest.length ? current : longest), "");
-          })();
-          const normalizedMainBatchNotes = normalizeDetailsText(mainBatchNotes).toLowerCase();
+          const batchHeaderNotes = resolveExportBatchHeaderNotes({
+            dateISO,
+            batchId: batchIdForNotes,
+            session: String(first.session ?? ""),
+            headerByKey,
+            headerByBaseKey,
+            headerByBatchId,
+          });
+          const normalizedBatchHeaderNotes = normalizeDetailsText(batchHeaderNotes).toLowerCase();
 
           const groups = Array.from(groupsMap.entries())
             .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
@@ -2615,11 +2632,11 @@ export default function CoachCalendarMonth() {
               groupRows.forEach((r) => {
                 const rawDetails = normalizeDetailsText(r.details);
                 const hasRawDetails = !!rawDetails && rawDetails.toLowerCase() !== "no notes";
-                const matchesMain =
+                const matchesBatchHeader =
                   hasRawDetails &&
-                  rawDetails.toLowerCase() === normalizedMainBatchNotes &&
-                  normalizedMainBatchNotes.length > 0;
-                const individualNotes = !hasRawDetails || matchesMain
+                  rawDetails.toLowerCase() === normalizedBatchHeaderNotes &&
+                  normalizedBatchHeaderNotes.length > 0;
+                const individualNotes = !hasRawDetails || matchesBatchHeader
                   ? ""
                   : showGroupTimePrefix
                     ? `${groupTimeLabel} • ${rawDetails}`
@@ -2662,7 +2679,7 @@ export default function CoachCalendarMonth() {
             session: String(first.session ?? ""),
             time: String(first.time ?? "").trim() || undefined,
             location: getWorkoutLocation(first) || undefined,
-            details: mainBatchNotes || undefined,
+            details: batchHeaderNotes || undefined,
             categories: categoriesForWorkout,
             preRoutineIds: sanitizeRoutineIds(first.preRoutineIds),
             postRoutineIds: sanitizeRoutineIds(first.postRoutineIds),
