@@ -233,9 +233,12 @@ function renderWeeklyExportGroups(workout: WeeklyWorkoutSection): string {
           const details = String(line.individualNotes ?? "").trim();
           const names = (Array.isArray(line.athleteNames) ? line.athleteNames : []).join(", ");
           return `
-            <div class="group-line">
-              ${details ? `<span class="group-details">${escapePdfHtml(details)}</span>` : ""}
-              <span class="group-athletes">${escapePdfHtml(names || "Unknown athlete")}</span>
+            <div class="export-adjustment-line">
+              ${showGroupLabels ? `<span class="export-adjustment-bullet">-</span>` : ""}
+              <span class="export-adjustment-content">
+                ${details ? `<span class="group-details">${escapePdfHtml(details)}</span>` : ""}
+                <span class="group-athletes">${escapePdfHtml(names || "Unknown athlete")}</span>
+              </span>
             </div>
           `;
         })
@@ -244,9 +247,9 @@ function renderWeeklyExportGroups(workout: WeeklyWorkoutSection): string {
 
       const label = String(group.label ?? "").trim() || `Group ${groupIndex + 1}`;
       return `
-        <div class="workout-group${showGroupLabels ? " workout-group--labeled" : ""}">
-          ${showGroupLabels ? `<div class="workout-group-label">${escapePdfHtml(label)}:</div>` : ""}
-          ${linesHtml}
+        <div class="export-group${showGroupLabels ? " export-group--labeled" : ""}">
+          ${showGroupLabels ? `<div class="export-group-label">${escapePdfHtml(label)}</div>` : ""}
+          <div class="export-adjustment-list">${linesHtml}</div>
         </div>
       `;
     })
@@ -530,28 +533,51 @@ function buildWeeklyHandoutHtml(args: {
         color: #1f2937;
       }
 
-      .workout-group--labeled + .workout-group--labeled {
-        margin-top: 1px;
+      .export-group--labeled {
+        margin-top: 2px;
       }
 
-      .workout-group-label {
-        font-size: 6.2px;
+      .export-group-label {
+        font-size: 6px;
         font-weight: 800;
-        line-height: 1.08;
-        margin: 0;
-        color: #334155;
+        line-height: 1.05;
+        margin: 0 0 1px 0;
+        color: #1f2937;
+        letter-spacing: 0.2px;
+        text-transform: uppercase;
       }
 
-      .group-line {
-        font-size: 6.2px;
-        line-height: 1.08;
+      .export-group--labeled .export-adjustment-list {
+        margin-left: 4px;
+      }
+
+      .export-adjustment-line {
+        display: flex;
+        align-items: baseline;
+        gap: 2px;
+        font-size: 6.1px;
+        line-height: 1.06;
         margin: 0 0 1px 0;
         white-space: normal;
         word-break: break-word;
       }
 
-      .group-details {
+      .export-adjustment-line:last-child {
+        margin-bottom: 0;
+      }
+
+      .export-adjustment-bullet {
+        flex: 0 0 auto;
+        color: #64748b;
         font-weight: 700;
+      }
+
+      .export-adjustment-content {
+        min-width: 0;
+      }
+
+      .group-details {
+        font-weight: 400;
         color: #111827;
       }
 
@@ -731,13 +757,16 @@ function buildTrainingPlanRangeHtml(args: {
       .workout-title { font-size: 8px; font-weight: 700; line-height: 1.2; margin: 0 0 2px 0; white-space: normal; word-break: break-word; }
       .workout-mileage { font-size: 7.5px; font-weight: 800; line-height: 1.2; margin: 0 0 2px 0; color: #0f766e; white-space: normal; word-break: break-word; }
       .workout-batch-notes { font-size: 7.5px; line-height: 1.2; margin: 0 0 2px 0; color: #334155; white-space: normal; word-break: break-word; }
-      .workout-group--labeled + .workout-group--labeled { margin-top: 2px; }
-      .workout-group-label { font-size: 7.5px; font-weight: 800; line-height: 1.2; margin: 0; color: #334155; }
-      .group-line { font-size: 7.5px; line-height: 1.2; margin: 0 0 2px 0; white-space: normal; word-break: break-word; }
-      .group-details { font-size: 7.5px; font-weight: 700; line-height: 1.2; margin: 0 0 1px 0; color: #111827; white-space: normal; word-break: break-word; }
+      .export-group--labeled { margin-top: 3px; }
+      .export-group-label { font-size: 7.2px; font-weight: 800; line-height: 1.1; margin: 0 0 1px 0; color: #1f2937; letter-spacing: 0.25px; text-transform: uppercase; }
+      .export-group--labeled .export-adjustment-list { margin-left: 6px; }
+      .export-adjustment-line { display: flex; align-items: baseline; gap: 3px; font-size: 7.2px; line-height: 1.12; margin: 0 0 1px 0; white-space: normal; word-break: break-word; }
+      .export-adjustment-line:last-child { margin-bottom: 0; }
+      .export-adjustment-bullet { flex: 0 0 auto; color: #64748b; font-weight: 700; }
+      .export-adjustment-content { min-width: 0; }
+      .group-details { font-size: 7.2px; font-weight: 400; line-height: 1.12; color: #111827; white-space: normal; word-break: break-word; }
       .group-details::after { content: " - "; color: #64748b; font-weight: 400; }
       .group-athletes { font-size: 7px; font-style: italic; color: #4b5563; }
-      .group-line:last-child { margin-bottom: 0; }
       .off-line { font-size: 7.5px; font-style: italic; color: #4b5563; line-height: 1.2; padding: 1px 0; }
     </style>
   </head>
