@@ -8,6 +8,8 @@ type GridChange<RowId extends string, ColKey extends string> = {
   colKey: ColKey;
   prev: string;
   next: string;
+  prevState?: unknown;
+  nextState?: unknown;
 };
 
 type EditStartMode = "replace" | "append" | "preserve";
@@ -28,6 +30,9 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
     getValue,
     setValue,
     setValuesBatch,
+    getCellState,
+    getClearedCellState,
+    restoreCellStates,
     isEditorHandlingKeys,
     onFillDown,
     onSelectionChange,
@@ -170,19 +175,31 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
 
   const applyChanges = useCallback(
     (changes: Array<GridChange<RowId, ColKey>>, pushHistory = true) => {
-      const filtered = changes.filter((c) => c.prev !== c.next);
+      const prepared = changes.map((change) => {
+        if (!("nextState" in change)) return change;
+        return {
+          ...change,
+          prevState: "prevState" in change ? change.prevState : getCellState?.(change.rowId, change.colKey),
+        };
+      });
+      const filtered = prepared.filter((c) => c.prev !== c.next || "nextState" in c);
       if (filtered.length === 0) return;
-      if (setValuesBatch && filtered.length > 1) {
-        setValuesBatch(filtered.map((c) => ({ rowId: c.rowId, colKey: c.colKey, value: c.next })));
+      const valueChanges = filtered.filter((c) => c.prev !== c.next);
+      if (setValuesBatch && valueChanges.length > 1) {
+        setValuesBatch(valueChanges.map((c) => ({ rowId: c.rowId, colKey: c.colKey, value: c.next })));
       } else {
-        filtered.forEach((c) => setValue(c.rowId, c.colKey, c.next));
+        valueChanges.forEach((c) => setValue(c.rowId, c.colKey, c.next));
+      }
+      const stateChanges = filtered.filter((c) => "nextState" in c);
+      if (stateChanges.length > 0) {
+        restoreCellStates?.(stateChanges.map((c) => ({ rowId: c.rowId, colKey: c.colKey, state: c.nextState })));
       }
       if (pushHistory) historyRef.current.push(filtered);
       if (historyRef.current.length > 60) {
         historyRef.current = historyRef.current.slice(historyRef.current.length - 60);
       }
     },
-    [setValue, setValuesBatch]
+    [getCellState, restoreCellStates, setValue, setValuesBatch]
   );
 
   const applyCellValue = useCallback(
@@ -230,10 +247,12 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
       if (c < 0 || c >= colKeys.length) return;
       const rowId = rowIds[r];
       const colKey = colKeys[c];
-      changes.push({ rowId, colKey, prev: getValue(rowId, colKey), next: "" });
+      const change: GridChange<RowId, ColKey> = { rowId, colKey, prev: getValue(rowId, colKey), next: "" };
+      if (getClearedCellState) change.nextState = getClearedCellState(rowId, colKey);
+      changes.push(change);
     });
     applyChanges(changes);
-  }, [applyChanges, colKeys, getSelectedCellCoords, getValue, rowIds]);
+  }, [applyChanges, colKeys, getClearedCellState, getSelectedCellCoords, getValue, rowIds]);
 
   const selectionRect = useMemo(() => {
     if (selection) return selection;
@@ -395,12 +414,17 @@ export function useGridEngine<RowId extends string, ColKey extends string>(
   const undo = useCallback(() => {
     const changes = historyRef.current.pop();
     if (!changes || changes.length === 0) return;
-    if (setValuesBatch && changes.length > 1) {
-      setValuesBatch(changes.map((c) => ({ rowId: c.rowId, colKey: c.colKey, value: c.prev })));
-      return;
+    const valueChanges = changes.filter((c) => c.prev !== c.next);
+    if (setValuesBatch && valueChanges.length > 1) {
+      setValuesBatch(valueChanges.map((c) => ({ rowId: c.rowId, colKey: c.colKey, value: c.prev })));
+    } else {
+      valueChanges.forEach((c) => setValue(c.rowId, c.colKey, c.prev));
     }
-    changes.forEach((c) => setValue(c.rowId, c.colKey, c.prev));
-  }, [setValue, setValuesBatch]);
+    const stateChanges = changes.filter((c) => "nextState" in c);
+    if (stateChanges.length > 0) {
+      restoreCellStates?.(stateChanges.map((c) => ({ rowId: c.rowId, colKey: c.colKey, state: c.prevState })));
+    }
+  }, [restoreCellStates, setValue, setValuesBatch]);
 
   const handleKeyDown = useCallback(
     (e: any) => {

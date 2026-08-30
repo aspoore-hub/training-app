@@ -80,6 +80,22 @@ type PlanBuilderTargetType = "athlete" | "trainingGroup";
 type PlanBuilderDraftField = "title" | "details" | "timeText" | "location" | "categoryIds" | "preRoutineIds" | "postRoutineIds";
 type MetadataPickerField = "categoryIds" | "preRoutineIds" | "postRoutineIds";
 
+type PlanBuilderClipboardCell = {
+  title: string;
+  details: string;
+  timeText: string;
+  location: string;
+  categoryIds: string[];
+  preRoutineIds: string[];
+  postRoutineIds: string[];
+};
+
+type PlanBuilderClipboardPayload = {
+  version: 2;
+  text: string;
+  cells: PlanBuilderClipboardCell[][];
+};
+
 type ApplyPreviewScope = "entire" | "range";
 
 type ApplyPreviewStatus = "new" | "update" | "unchanged" | "conflict" | "cleared";
@@ -690,7 +706,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
   const commitEditingFieldsRef = useRef<((keys?: string[]) => Promise<WorkoutPlanBuilderDraft | null>) | null>(null);
   const existingLoadSeqRef = useRef(0);
   const autoPreviewRequestKeyRef = useRef<string | null>(null);
-  const planBuilderClipboardRef = useRef("");
+  const planBuilderClipboardRef = useRef<PlanBuilderClipboardPayload | string | null>(null);
   const pendingPasteDebugRef = useRef<{
     rowCount: number;
     colCount: number;
@@ -1627,6 +1643,73 @@ export default function WorkoutPlanBuilderDraftScreen() {
     [existingCellsByKey, scheduleSave, selectedPlanTargetId]
   );
 
+  const getPlanBuilderClipboardCell = useCallback(
+    (dateISO: string, colKey: PlanBuilderColKey): PlanBuilderClipboardCell => {
+      const session = normalizePlanBuilderSession(colKey);
+      const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
+      const draftCell = getDraftCell(activeDraftRef.current, targetId, dateISO, session);
+      const existing = existingCellsRef.current[cellKey(dateISO, session)] ?? null;
+      const cell = draftCell
+        ? mergeDraftCellWithCommittedBase(draftCell)
+        : existing?.source
+          ? existing.source.snapshot
+          : null;
+      return {
+        title: String(cell?.title ?? "").trim(),
+        details: String(cell?.details ?? "").trim(),
+        timeText: String(cell?.timeText ?? "").trim(),
+        location: String(cell?.location ?? "").trim(),
+        categoryIds: [...normalizeStringList(cell?.categoryIds)],
+        preRoutineIds: [...normalizeStringList(cell?.preRoutineIds)],
+        postRoutineIds: [...normalizeStringList(cell?.postRoutineIds)],
+      };
+    },
+    []
+  );
+
+  const restorePlanBuilderCellStates = useCallback(
+    (changes: Array<{ rowId: string; colKey: PlanBuilderColKey; state: unknown }>) => {
+      const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
+      let next = activeDraftRef.current;
+      if (!next || !targetId) return;
+      for (const change of changes) {
+        const session = normalizePlanBuilderSession(change.colKey);
+        const raw = (change.state && typeof change.state === "object" ? change.state : {}) as Partial<PlanBuilderClipboardCell>;
+        const previous = getDraftCell(next, targetId, change.rowId, session);
+        const existing = existingCellsRef.current[cellKey(change.rowId, session)] ?? null;
+        const metadataPatch: Partial<WorkoutPlanBuilderCell> = {
+          timeText: String(raw.timeText ?? "").trim(),
+          location: String(raw.location ?? "").trim(),
+          categoryIds: [...normalizeStringList(raw.categoryIds)],
+          preRoutineIds: [...normalizeStringList(raw.preRoutineIds)],
+          postRoutineIds: [...normalizeStringList(raw.postRoutineIds)],
+        };
+        const editedMetadataFields: PlanBuilderDraftField[] = [
+          "timeText",
+          "location",
+          "categoryIds",
+          "preRoutineIds",
+          "postRoutineIds",
+        ];
+        const patch = !previous && existing?.source
+          ? {
+              ...existingSnapshotPatch(existing),
+              ...metadataPatch,
+              editedFields: mergeEditedFields([], editedMetadataFields),
+            }
+          : {
+              ...metadataPatch,
+              editedFields: mergeEditedFields(previous?.editedFields, editedMetadataFields),
+            };
+        next = patchDraftCell(next, targetId, change.rowId, session, patch);
+      }
+      setActiveDraft(next);
+      activeDraftRef.current = next;
+      void saveDraftNow(next);
+    },
+    [saveDraftNow]
+  );
+
   const patchSessionCell = useCallback(
     (dateISO: string, session: "AM" | "PM", patch: Partial<WorkoutPlanBuilderCell>) => {
       const base = activeDraftRef.current;
@@ -1711,6 +1794,15 @@ export default function WorkoutPlanBuilderDraftScreen() {
         details: hasDetailsEdit ? editingFieldsRef.current[detailsEditKey] : String(baseCell?.details ?? ""),
       });
     },
+    getCellState: (dateISO, colKey) => getPlanBuilderClipboardCell(dateISO, colKey),
+    getClearedCellState: () => ({
+      timeText: "",
+      location: "",
+      categoryIds: [],
+      preRoutineIds: [],
+      postRoutineIds: [],
+    }),
+    restoreCellStates: (changes) => restorePlanBuilderCellStates(changes as Array<{ rowId: string; colKey: PlanBuilderColKey; state: unknown }>),
     setValuesBatch: (changes) => {
       const targetId = String(selectedPlanTargetIdRef.current ?? "").trim();
       let next = activeDraftRef.current;
@@ -1768,54 +1860,89 @@ export default function WorkoutPlanBuilderDraftScreen() {
 
   const copyPlanBuilderSelection = useCallback(async () => {
     await commitEditingFields();
-    planBuilderClipboardRef.current = await grid.copySelectionToClipboard();
-  }, [commitEditingFields, grid]);
+    const text = await grid.copySelectionToClipboard();
+    const rect = grid.getSelectionRect();
+    if (!rect) {
+      planBuilderClipboardRef.current = { version: 2, text, cells: [] };
+      return;
+    }
+    const cells: PlanBuilderClipboardCell[][] = [];
+    for (let r = rect.r1; r <= rect.r2; r += 1) {
+      const row: PlanBuilderClipboardCell[] = [];
+      for (let c = rect.c1; c <= rect.c2; c += 1) {
+        const dateISO = dateRows[r];
+        const colKey = colKeys[c];
+        if (dateISO && colKey) row.push(getPlanBuilderClipboardCell(dateISO, colKey));
+      }
+      cells.push(row);
+    }
+    planBuilderClipboardRef.current = { version: 2, text, cells };
+  }, [colKeys, commitEditingFields, dateRows, getPlanBuilderClipboardCell, grid]);
 
   const applyPlanBuilderPasteText = useCallback(
-    (rawText: string) => {
+    (rawText: string, clipboardCells?: PlanBuilderClipboardCell[][]) => {
       const raw = String(rawText ?? "").trimEnd();
-      if (!raw) return;
-      const matrix = parseTsv(raw);
+      const hasRichClipboard = Array.isArray(clipboardCells) && clipboardCells.length > 0;
+      if (!raw && !hasRichClipboard) return;
+      const matrix = hasRichClipboard
+        ? clipboardCells.map((row) => row.map((cell) => cellToCombinedText(cell as WorkoutPlanBuilderCell)))
+        : parseTsv(raw);
       if (matrix.length === 0) return;
       const rect = grid.getSelectionRect();
       const startRow = rect?.r1 ?? 0;
       const startCol = rect?.c1 ?? 0;
       const isSingleValuePaste = matrix.length <= 1 && (matrix[0]?.length ?? 0) <= 1;
-      const changes: Array<{ rowId: string; colKey: PlanBuilderColKey; prev: string; next: string }> = [];
+      const changes: Array<{
+        rowId: string;
+        colKey: PlanBuilderColKey;
+        prev: string;
+        next: string;
+        nextState?: PlanBuilderClipboardCell;
+      }> = [];
       const targets: Array<{ dateISO: string; session: "AM" | "PM" }> = [];
 
-      const pushChange = (rowIndex: number, colIndex: number, value: string) => {
+      const pushChange = (rowIndex: number, colIndex: number, value: string, sourceCell?: PlanBuilderClipboardCell) => {
         if (rowIndex < 0 || rowIndex >= dateRows.length) return;
         if (colIndex < 0 || colIndex >= colKeys.length) return;
         const rowId = dateRows[rowIndex];
         const colKey = colKeys[colIndex];
         const session = normalizePlanBuilderSession(colKey);
-        changes.push({
+        const change: { rowId: string; colKey: PlanBuilderColKey; prev: string; next: string; nextState?: PlanBuilderClipboardCell } = {
           rowId,
           colKey,
           prev: "",
           next: String(value ?? ""),
-        });
+        };
+        if (sourceCell) {
+          change.nextState = {
+            ...sourceCell,
+            categoryIds: [...normalizeStringList(sourceCell.categoryIds)],
+            preRoutineIds: [...normalizeStringList(sourceCell.preRoutineIds)],
+            postRoutineIds: [...normalizeStringList(sourceCell.postRoutineIds)],
+          };
+        }
+        changes.push(change);
         targets.push({ dateISO: rowId, session });
       };
 
       if (isSingleValuePaste && rect) {
         const single = matrix[0]?.[0] ?? raw;
+        const sourceCell = clipboardCells?.[0]?.[0];
         for (let r = rect.r1; r <= rect.r2; r += 1) {
           for (let c = rect.c1; c <= rect.c2; c += 1) {
-            pushChange(r, c, single);
+            pushChange(r, c, single, sourceCell);
           }
         }
       } else {
         matrix.forEach((row, rOffset) => {
           row.forEach((value, cOffset) => {
-            pushChange(startRow + rOffset, startCol + cOffset, value);
+            pushChange(startRow + rOffset, startCol + cOffset, value, clipboardCells?.[rOffset]?.[cOffset]);
           });
         });
       }
 
       if (!rect && isSingleValuePaste) {
-        pushChange(startRow, startCol, matrix[0]?.[0] ?? raw);
+        pushChange(startRow, startCol, matrix[0]?.[0] ?? raw, clipboardCells?.[0]?.[0]);
       }
 
       if (changes.length === 0) return;
@@ -1832,6 +1959,7 @@ export default function WorkoutPlanBuilderDraftScreen() {
       };
       debugPlanBuilderPaste("parsed clipboard", pendingPasteDebugRef.current);
       grid.applyChanges(normalizedChanges as any);
+      pendingPasteDebugRef.current = null;
     },
     [colKeys, dateRows, grid]
   );
@@ -1845,8 +1973,27 @@ export default function WorkoutPlanBuilderDraftScreen() {
         raw = String(await navigator.clipboard.readText());
       } catch {}
     }
-    if (!raw) raw = planBuilderClipboardRef.current;
-    applyPlanBuilderPasteText(raw);
+    const internalClipboard = planBuilderClipboardRef.current;
+    const internalText = typeof internalClipboard === "string" ? internalClipboard : internalClipboard?.text ?? "";
+    if (!raw) raw = internalText;
+    const legacyCells = typeof internalClipboard === "string" && raw === internalText
+      ? parseTsv(internalText).map((row) => row.map((value) => {
+          const parsed = combinedTextToTitleDetails(value);
+          return {
+            title: parsed.title,
+            details: parsed.details,
+            timeText: "",
+            location: "",
+            categoryIds: [],
+            preRoutineIds: [],
+            postRoutineIds: [],
+          } satisfies PlanBuilderClipboardCell;
+        }))
+      : undefined;
+    const richCells = typeof internalClipboard === "object" && internalClipboard && raw === internalText
+      ? internalClipboard.cells
+      : legacyCells;
+    applyPlanBuilderPasteText(raw, richCells);
   }, [applyPlanBuilderPasteText, commitEditingFields]);
 
   useEffect(() => {

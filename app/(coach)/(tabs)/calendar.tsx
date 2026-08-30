@@ -222,6 +222,37 @@ function getWeeklyRoutineNames(
     .filter(Boolean);
 }
 
+function renderWeeklyExportGroups(workout: WeeklyWorkoutSection): string {
+  const groups = Array.isArray(workout.groups) ? workout.groups : [];
+  const showGroupLabels = Math.max(workout.groupCount, groups.length) > 1;
+
+  return groups
+    .map((group, groupIndex) => {
+      const linesHtml = (Array.isArray(group.lines) ? group.lines : [])
+        .map((line) => {
+          const details = String(line.individualNotes ?? "").trim();
+          const names = (Array.isArray(line.athleteNames) ? line.athleteNames : []).join(", ");
+          return `
+            <div class="group-line">
+              ${details ? `<span class="group-details">${escapePdfHtml(details)}</span>` : ""}
+              <span class="group-athletes">${escapePdfHtml(names || "Unknown athlete")}</span>
+            </div>
+          `;
+        })
+        .join("");
+      if (!linesHtml) return "";
+
+      const label = String(group.label ?? "").trim() || `Group ${groupIndex + 1}`;
+      return `
+        <div class="workout-group${showGroupLabels ? " workout-group--labeled" : ""}">
+          ${showGroupLabels ? `<div class="workout-group-label">${escapePdfHtml(label)}:</div>` : ""}
+          ${linesHtml}
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function buildWeeklyHandoutHtml(args: {
   weekLabel: string;
   weekAnnotation?: string;
@@ -273,23 +304,7 @@ function buildWeeklyHandoutHtml(args: {
                     return `<span class="workout-dot" style="background:${escapePdfHtml(color)};"></span>`;
                   })
                   .join("");
-                const groups = (Array.isArray(workout.groups) ? workout.groups : [])
-                  .map((group) =>
-                    (Array.isArray(group.lines) ? group.lines : [])
-                      .map((line) => {
-                        const details = String(line.individualNotes ?? "").trim();
-                        const names = (Array.isArray(line.athleteNames) ? line.athleteNames : []).join(", ");
-                        const showDetails = !!details;
-                        return `
-                          <div class="group-line">
-                            ${showDetails ? `<span class="group-details">${escapePdfHtml(details)}</span>` : ""}
-                            <span class="group-athletes">${escapePdfHtml(names || "Unknown athlete")}</span>
-                          </div>
-                        `;
-                      })
-                      .join("")
-                  )
-                  .join("");
+                const groups = renderWeeklyExportGroups(workout);
 
                 return `
                   <div class="workout-block">
@@ -515,6 +530,18 @@ function buildWeeklyHandoutHtml(args: {
         color: #1f2937;
       }
 
+      .workout-group--labeled + .workout-group--labeled {
+        margin-top: 1px;
+      }
+
+      .workout-group-label {
+        font-size: 6.2px;
+        font-weight: 800;
+        line-height: 1.08;
+        margin: 0;
+        color: #334155;
+      }
+
       .group-line {
         font-size: 6.2px;
         line-height: 1.08;
@@ -529,7 +556,7 @@ function buildWeeklyHandoutHtml(args: {
       }
 
       .group-details::after {
-        content: " — ";
+        content: " - ";
         color: #64748b;
         font-weight: 400;
       }
@@ -625,21 +652,7 @@ function buildTrainingPlanRangeHtml(args: {
                         `;
                       })
                       .join("");
-                    const groups = (Array.isArray(workout.groups) ? workout.groups : [])
-                      .map((group) =>
-                        (Array.isArray(group.lines) ? group.lines : [])
-                          .map((line) => {
-                            const details = String(line.individualNotes ?? "").trim();
-                            const names = (Array.isArray(line.athleteNames) ? line.athleteNames : []).join(", ");
-                            const showDetails = !!details;
-                            return `
-                              ${showDetails ? `<div class="group-details">${escapePdfHtml(details)}</div>` : ""}
-                              <div class="group-athletes">${escapePdfHtml(names || "Unknown athlete")}</div>
-                            `;
-                          })
-                          .join("")
-                      )
-                      .join("");
+                    const groups = renderWeeklyExportGroups(workout);
 
                     return `
                       <div class="workout-block">
@@ -718,9 +731,13 @@ function buildTrainingPlanRangeHtml(args: {
       .workout-title { font-size: 8px; font-weight: 700; line-height: 1.2; margin: 0 0 2px 0; white-space: normal; word-break: break-word; }
       .workout-mileage { font-size: 7.5px; font-weight: 800; line-height: 1.2; margin: 0 0 2px 0; color: #0f766e; white-space: normal; word-break: break-word; }
       .workout-batch-notes { font-size: 7.5px; line-height: 1.2; margin: 0 0 2px 0; color: #334155; white-space: normal; word-break: break-word; }
-      .group-details { font-size: 7.5px; line-height: 1.2; margin: 0 0 1px 0; white-space: normal; word-break: break-word; }
-      .group-athletes { font-size: 7px; font-style: italic; color: #4b5563; line-height: 1.2; margin: 0 0 2px 0; white-space: normal; word-break: break-word; }
-      .group-athletes:last-child { margin-bottom: 0; }
+      .workout-group--labeled + .workout-group--labeled { margin-top: 2px; }
+      .workout-group-label { font-size: 7.5px; font-weight: 800; line-height: 1.2; margin: 0; color: #334155; }
+      .group-line { font-size: 7.5px; line-height: 1.2; margin: 0 0 2px 0; white-space: normal; word-break: break-word; }
+      .group-details { font-size: 7.5px; font-weight: 700; line-height: 1.2; margin: 0 0 1px 0; color: #111827; white-space: normal; word-break: break-word; }
+      .group-details::after { content: " - "; color: #64748b; font-weight: 400; }
+      .group-athletes { font-size: 7px; font-style: italic; color: #4b5563; }
+      .group-line:last-child { margin-bottom: 0; }
       .off-line { font-size: 7.5px; font-style: italic; color: #4b5563; line-height: 1.2; padding: 1px 0; }
     </style>
   </head>
