@@ -18,7 +18,9 @@ import {
 } from "../../../lib/auxiliaryRoutines";
 import {
   loadDrillLibraryDefinitionsWithStatus,
+  loadRoutineFoldersWithStatus,
   type DrillLibraryItem,
+  type RoutineFolder,
 } from "../../../lib/drillLibrary";
 import { CATEGORIES_KEY, normalizeCategories } from "../../../lib/categories";
 import { loadJSON } from "../../../lib/storage";
@@ -31,6 +33,7 @@ import {
 } from "../../../lib/athleteWorkoutDisplay";
 import { CoachMobileWorkoutCard, type CoachMobileWorkoutGroup } from "./CoachMobileWorkoutCard";
 import { CoachMobileWorkoutDetail } from "./CoachMobileWorkoutDetail";
+import { CoachMobileRoutineBrowser } from "./coach-mobile-routine-browser";
 
 type MobileSection = "home" | "calendar" | "logs" | "roster" | "more";
 
@@ -262,12 +265,15 @@ export function CoachMobileShell() {
   const [batchHeaders, setBatchHeaders] = useState<TeamWorkoutBatchHeaderRow[]>([]);
   const [routineById, setRoutineById] = useState<Map<string, AuxiliaryRoutine>>(new Map());
   const [drillById, setDrillById] = useState<Map<string, DrillLibraryItem>>(new Map());
+  const [routineFolders, setRoutineFolders] = useState<RoutineFolder[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
   const [routineDataError, setRoutineDataError] = useState<string | null>(null);
+  const [loadingRoutineData, setLoadingRoutineData] = useState(false);
   const [loadingWorkouts, setLoadingWorkouts] = useState(false);
   const [workoutError, setWorkoutError] = useState<string | null>(null);
   const [rosterQuery, setRosterQuery] = useState("");
   const [selectedWorkout, setSelectedWorkout] = useState<CoachMobileWorkoutGroup | null>(null);
+  const [routineBrowserOpen, setRoutineBrowserOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
 
@@ -283,31 +289,25 @@ export function CoachMobileShell() {
   }, [params.date, section]);
 
   useEffect(() => {
+    if (section !== "more") setRoutineBrowserOpen(false);
+  }, [section]);
+
+  useEffect(() => {
     let cancelled = false;
     const startISO = section === "logs" ? selectedLogDateISO : selectedDateISO;
     const endISO = section === "home" ? addDaysISO(todayISO(), 7) : section === "logs" ? selectedLogDateISO : addDaysISO(selectedDateISO, 6);
     setLoadingWorkouts(true);
     setWorkoutError(null);
-    setRoutineDataError(null);
     Promise.all([
       listTeamWorkoutsInRange(startISO, endISO),
       listTeamWorkoutBatchHeadersInRange(startISO, endISO),
-      loadAuxiliaryRoutineDefinitionsWithStatus(),
-      loadDrillLibraryDefinitionsWithStatus(),
       loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
     ])
-      .then(([rows, headers, routineResult, drillResult, storedCategories]) => {
+      .then(([rows, headers, storedCategories]) => {
         if (cancelled) return;
         setWorkouts(rows);
         setBatchHeaders(headers);
-        setRoutineById(new Map(routineResult.items.map((routine) => [routine.id, routine] as const)));
-        setDrillById(new Map(drillResult.items.map((drill) => [drill.id, drill] as const)));
         setCategories(normalizeCategories(storedCategories));
-        const readErrors = [
-          !routineResult.loadedFromCloud ? `routines: ${routineResult.cloudError ?? "cloud read failed"}` : "",
-          !drillResult.loadedFromCloud ? `drill library: ${drillResult.cloudError ?? "cloud read failed"}` : "",
-        ].filter(Boolean);
-        setRoutineDataError(readErrors.length ? `Could not load latest drill routine details. ${readErrors.join("; ")}` : null);
       })
       .catch((error) => {
         if (!cancelled) setWorkoutError(error instanceof Error ? error.message : "Could not load workouts.");
@@ -319,6 +319,40 @@ export function CoachMobileShell() {
       cancelled = true;
     };
   }, [section, selectedDateISO, selectedLogDateISO]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingRoutineData(true);
+    setRoutineDataError(null);
+    Promise.all([
+      loadAuxiliaryRoutineDefinitionsWithStatus(),
+      loadRoutineFoldersWithStatus(),
+      loadDrillLibraryDefinitionsWithStatus(),
+    ])
+      .then(([routineResult, folderResult, drillResult]) => {
+        if (cancelled) return;
+        setRoutineById(new Map(routineResult.items.map((routine) => [routine.id, routine] as const)));
+        setRoutineFolders(folderResult.items);
+        setDrillById(new Map(drillResult.items.map((drill) => [drill.id, drill] as const)));
+        const readErrors = [
+          !routineResult.loadedFromCloud ? `routines: ${routineResult.cloudError ?? "cloud read failed"}` : "",
+          !folderResult.loadedFromCloud ? `routine folders: ${folderResult.cloudError ?? "cloud read failed"}` : "",
+          !drillResult.loadedFromCloud ? `drill library: ${drillResult.cloudError ?? "cloud read failed"}` : "",
+        ].filter(Boolean);
+        setRoutineDataError(readErrors.length ? `Could not load latest drill routine details. ${readErrors.join("; ")}` : null);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setRoutineDataError(error instanceof Error ? error.message : "Could not load drill routines.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingRoutineData(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [section]);
 
   const batchNotesByWorkoutId = useMemo(() => buildBatchNotesByWorkoutId(workouts, batchHeaders), [batchHeaders, workouts]);
   const rosterById = useMemo(
@@ -564,12 +598,71 @@ export function CoachMobileShell() {
       );
     }
 
+    if (routineBrowserOpen) {
+      return (
+        <>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10, width: "100%" }}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Back to More"
+              onPress={() => setRoutineBrowserOpen(false)}
+              style={{
+                minHeight: 40,
+                borderWidth: 1,
+                borderColor: "#dbe3ef",
+                backgroundColor: "#fff",
+                borderRadius: 999,
+                paddingHorizontal: 12,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Text style={{ color: "#172033", fontWeight: "900" }}>Back</Text>
+            </Pressable>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <SectionHeader title="Drill Routines" subtitle="Browse your team's routines and drill details." />
+            </View>
+          </View>
+          <CoachMobileRoutineBrowser
+            routines={Array.from(routineById.values())}
+            folders={routineFolders}
+            drillById={drillById}
+            loading={loadingRoutineData}
+            error={routineDataError}
+          />
+        </>
+      );
+    }
+
     return (
       <>
         <SectionHeader title="More" subtitle="Mobile-safe links and desktop-only tools." />
+        <Card>
+          <Text style={{ fontSize: 15, fontWeight: "900", color: "#172033" }}>Drill Routines</Text>
+          <Text style={{ color: "#64748b", fontWeight: "700", lineHeight: 19 }}>
+            View warmups, drills, mobility, plyos, and strength routines.
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setRoutineBrowserOpen(true)}
+            style={({ pressed }) => ({
+              minHeight: 44,
+              borderRadius: 12,
+              paddingHorizontal: 12,
+              backgroundColor: pressed ? "#334155" : "#172033",
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+            })}
+          >
+            <Text style={{ color: "#fff", fontWeight: "900" }}>Open Routines</Text>
+            <Ionicons name="chevron-forward" size={18} color="#fff" />
+          </Pressable>
+        </Card>
         <DesktopOnlyCard title="Mileage" body="The full team mileage grid is best on desktop for now." />
         <DesktopOnlyCard title="Workout Plan Builder" body="Plan Builder remains desktop-only while the mobile viewer is stabilized." />
-        <DesktopOnlyCard title="Workout Catalog and Drill Routines" body="Library management tools are available on desktop." />
+        <DesktopOnlyCard title="Workout Catalog" body="Workout catalog management tools are available on desktop." />
         <DesktopOnlyCard title="Training Groups, Categories, Settings" body="Administrative setup remains desktop-first for this first mobile coach shell." />
         <View
           style={{
