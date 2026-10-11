@@ -259,8 +259,8 @@ export function CoachMobileShell() {
   const teamStore = teamDataStore.use();
   const section = resolveSection(pathname);
   const selectedDateISO = getDateParam(params.date) ?? todayISO();
-  const [selectedLogDateISO, setSelectedLogDateISO] = useState(() => getDateParam(params.date) ?? todayISO());
-  const [selectedLogDateDraft, setSelectedLogDateDraft] = useState(() => getDateParam(params.date) ?? todayISO());
+  const [selectedLogDateISO, setSelectedLogDateISO] = useState(() => todayISO());
+  const [selectedLogDateDraft, setSelectedLogDateDraft] = useState(() => todayISO());
   const [workouts, setWorkouts] = useState<TeamWorkoutRow[]>([]);
   const [batchHeaders, setBatchHeaders] = useState<TeamWorkoutBatchHeaderRow[]>([]);
   const [routineById, setRoutineById] = useState<Map<string, AuxiliaryRoutine>>(new Map());
@@ -282,11 +282,8 @@ export function CoachMobileShell() {
   }, []);
 
   useEffect(() => {
-    if (section !== "logs") return;
-    const nextDateISO = getDateParam(params.date) ?? todayISO();
-    setSelectedLogDateISO(nextDateISO);
-    setSelectedLogDateDraft(nextDateISO);
-  }, [params.date, section]);
+    setSelectedLogDateDraft(selectedLogDateISO);
+  }, [selectedLogDateISO]);
 
   useEffect(() => {
     if (section !== "more") setRoutineBrowserOpen(false);
@@ -398,12 +395,15 @@ export function CoachMobileShell() {
 
   const navigate = (href: string) => router.replace(href as any);
 
-  const selectLogDate = (nextDateISO: string) => {
+  const commitLogDate = (nextDateISO: string) => {
     const validDateISO = getDateParam(nextDateISO);
     if (!validDateISO) return;
     setSelectedLogDateISO(validDateISO);
     setSelectedLogDateDraft(validDateISO);
-    navigate(`/(coach)/(tabs)/training-logs?date=${validDateISO}`);
+  };
+
+  const shiftLogDate = (days: number) => {
+    setSelectedLogDateISO((current) => addDaysISO(getDateParam(current) ?? todayISO(), days));
   };
 
   async function signOut() {
@@ -495,7 +495,7 @@ export function CoachMobileShell() {
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Previous day"
-              onPress={() => selectLogDate(addDaysISO(selectedLogDateISO, -1))}
+              onPress={() => shiftLogDate(-1)}
               style={logDateNavButtonStyle}
             >
               <Ionicons name="chevron-back" size={16} color="#172033" />
@@ -506,7 +506,7 @@ export function CoachMobileShell() {
               onChangeText={(nextValue) => {
                 setSelectedLogDateDraft(nextValue);
                 const validDateISO = getDateParam(nextValue);
-                if (validDateISO) selectLogDate(validDateISO);
+                if (validDateISO) commitLogDate(validDateISO);
               }}
               style={{ flex: 1, minWidth: 0 }}
               inputStyle={{ fontSize: 13, fontWeight: "800", textAlign: "center", paddingHorizontal: 6 }}
@@ -514,7 +514,7 @@ export function CoachMobileShell() {
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Next day"
-              onPress={() => selectLogDate(addDaysISO(selectedLogDateISO, 1))}
+              onPress={() => shiftLogDate(1)}
               style={logDateNavButtonStyle}
             >
               <Text numberOfLines={1} style={logDateNavButtonTextStyle}>Next Day</Text>
