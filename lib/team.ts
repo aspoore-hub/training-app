@@ -210,15 +210,36 @@ export async function createTeamAthlete(
   email?: string | null,
   options?: { team_start_date?: string | null }
 ) {
-  // IMPORTANT: ensure team exists on *this device/session*
-  const teamId = (await ensureCoachTeam("My Team")) ?? (await getCurrentTeamId());
+  const teamId = await getCurrentTeamId();
   if (!teamId) throw new Error("No current team");
   await requireTeamPermission("roster.edit", teamId);
 
-  const fn = first_name.trim();
-  const ln = last_name.trim();
+  const fn = first_name.trim().replace(/\s+/g, " ");
+  const ln = last_name.trim().replace(/\s+/g, " ");
   const display_name = `${fn} ${ln}`.trim();
+  const normalizedEmail = String(email ?? "").trim().toLowerCase() || null;
   const teamStartDate = String(options?.team_start_date ?? "").trim() || toISODate(new Date());
+
+  if (!fn || !ln) throw new Error("Enter both a first and last name.");
+
+  if (normalizedEmail) {
+    const { data: existingAthlete, error: emailLookupError } = await supabase
+      .from("team_athletes")
+      .select("id,display_name")
+      .eq("team_id", teamId)
+      .ilike("email", normalizedEmail)
+      .limit(1)
+      .maybeSingle();
+    if (emailLookupError) throw emailLookupError;
+    if (existingAthlete?.id) {
+      const existingName = String(existingAthlete.display_name ?? "").trim();
+      throw new Error(
+        existingName
+          ? `That email is already used by ${existingName}.`
+          : "That email is already used by another athlete on this team."
+      );
+    }
+  }
 
   const { data, error } = await supabase
     .from("team_athletes")
@@ -227,13 +248,22 @@ export async function createTeamAthlete(
       first_name: fn,
       last_name: ln,
       display_name,
-      email: email?.trim() || null,
+      email: normalizedEmail,
+      roster_status: "active",
       team_start_date: teamStartDate,
+      team_end_date: null,
+      left_at: null,
     })
     .select("id,team_id,first_name,last_name,display_name,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,created_at,updated_at")
     .single();
 
-  if (error) throw error;
+  if (error) {
+    const errorText = [error.message, error.details, error.hint].filter(Boolean).join(" ");
+    if (String(error.code ?? "") === "23505" && /email/i.test(errorText)) {
+      throw new Error("That email is already used by another athlete on this team.");
+    }
+    throw error;
+  }
   return data as TeamAthlete;
 }
 

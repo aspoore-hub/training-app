@@ -44,6 +44,8 @@ export function RosterListPane() {
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("");
+  const [createError, setCreateError] = useState("");
+  const [createWarning, setCreateWarning] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
@@ -180,7 +182,9 @@ export function RosterListPane() {
     const ln = lastName.trim();
     const nextEmail = email.trim();
     if (!fn || !ln) {
-      Alert.alert("Name required", "Enter both a first and last name.");
+      const message = "Enter both a first and last name.";
+      setCreateError(`Could not add athlete: ${message}`);
+      Alert.alert("Name required", message);
       return;
     }
 
@@ -189,46 +193,63 @@ export function RosterListPane() {
     const actuallyCreate = async () => {
       setBusy(true);
       setStatus("");
+      setCreateError("");
+      setCreateWarning("");
       try {
         const created = await createTeamAthlete(fn, ln, nextEmail || null);
+        const warnings: string[] = [];
+
+        try {
+          await teamDataStore.actions.refreshRoster({ force: true, throwOnError: true });
+        } catch (refreshError) {
+          console.warn("Created athlete roster refresh failed", refreshError);
+          warnings.push("The athlete was created, but the roster could not refresh automatically. Use Refresh to reload it.");
+        }
+
         if (created?.id && created?.team_start_date) {
           try {
             await teamDataStore.actions.applyDefaultPriorSeasonExclusionsForAthlete(created.id, created.team_start_date);
           } catch (seasonError) {
             console.warn("Create athlete season defaults failed", seasonError);
+            warnings.push("Prior-season exclusions could not be applied; review season eligibility from the athlete profile.");
             Alert.alert(
               "Season defaults not applied",
               "Athlete profile was created, but prior season exclusions could not be applied. You can review season eligibility from the roster profile."
             );
           }
         }
+        let successMessage = "Athlete profile created.";
         if (nextEmail && created?.id) {
           try {
             const teamId = await getCurrentTeamId();
             const linkResult = await linkTeamAthleteToExistingUserEmail(teamId, created.id, nextEmail);
             if (linkResult.status === "linked") {
-              setStatus(`Athlete profile created. Login linked to ${linkResult.linked_email ?? nextEmail}.`);
+              successMessage = `Athlete profile created. Login linked to ${linkResult.linked_email ?? nextEmail}.`;
             } else if (linkResult.status === "no_user_found") {
-              setStatus("Athlete profile created. Email saved, but no login account exists yet.");
+              successMessage = "Athlete profile created. Email saved, but no login account exists yet.";
             } else if (linkResult.status === "duplicate_claim") {
-              setStatus("Athlete profile created. That login is already linked to another athlete on this team.");
+              successMessage = "Athlete profile created. That login is already linked to another athlete on this team.";
             } else {
-              setStatus("Athlete profile created. Login access was not linked.");
+              successMessage = "Athlete profile created. Login access was not linked.";
             }
           } catch (linkError) {
             console.warn("Create athlete login link failed", linkError);
-            setStatus("Athlete profile created. Login access was not linked.");
+            successMessage = "Athlete profile created. Login access was not linked.";
           }
         }
-        await teamDataStore.actions.refreshRoster();
+        setStatus(successMessage);
+        setCreateWarning(warnings.join(" "));
         setFirstName("");
         setLastName("");
         setEmail("");
-        if (!nextEmail && Platform.OS === "web") setStatus("Athlete profile created.");
-        else if (Platform.OS !== "web") Alert.alert("Created", "Athlete profile created.");
+        if (Platform.OS !== "web") {
+          Alert.alert("Created", warnings.length > 0 ? `${successMessage}\n\n${warnings.join(" ")}` : successMessage);
+        }
       } catch (e: any) {
         console.warn("Create athlete failed", e);
-        Alert.alert("Create failed", e?.message ?? "Could not create athlete profile.");
+        const detail = String(e?.message ?? e?.details ?? e?.hint ?? "Could not create athlete profile.");
+        setCreateError(`Could not add athlete: ${detail}`);
+        Alert.alert("Could not add athlete", detail);
       } finally {
         setBusy(false);
       }
@@ -323,7 +344,7 @@ export function RosterListPane() {
           </View>
         </Card>
 
-        {(status || s.lastError) ? (
+        {(status || createError || createWarning || s.lastError) ? (
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
             {status ? (
               <View
@@ -337,6 +358,34 @@ export function RosterListPane() {
                 }}
               >
                 <AppText variant="caption" color="success">{status}</AppText>
+              </View>
+            ) : null}
+            {createWarning ? (
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#fed7aa",
+                  backgroundColor: "#fff7ed",
+                  borderRadius: 12,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                }}
+              >
+                <AppText variant="caption" style={{ color: "#9a3412", fontWeight: "800" }}>{createWarning}</AppText>
+              </View>
+            ) : null}
+            {createError ? (
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderColor: "#f4c1c1",
+                  backgroundColor: "#fff1f1",
+                  borderRadius: 12,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                }}
+              >
+                <AppText variant="caption" color="danger">{createError}</AppText>
               </View>
             ) : null}
             {s.lastError ? (
