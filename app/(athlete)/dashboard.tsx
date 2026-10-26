@@ -32,7 +32,7 @@ import {
 } from "../../lib/teamWorkoutsCloud";
 import { listTeamWorkoutBatchHeadersForDate } from "../../lib/teamWorkoutBatchHeadersCloud";
 import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
-import { formatMileage, getWeekIndex, getWeekStartISO, parseISODate, parseMileageInput, toISODate } from "../../lib/mileagePlan";
+import { getWeekIndex, getWeekStartISO, parseISODate, parseMileageInput, toISODate } from "../../lib/mileagePlan";
 import { CATEGORIES_KEY, normalizeCategories } from "../../lib/categories";
 import { AthleteQuickFeedbackSheet } from "../../components/athlete/AthleteQuickFeedbackSheet";
 import { AthleteSessionCard } from "../../components/athlete/AthleteSessionCard";
@@ -41,11 +41,22 @@ import {
   buildBatchNotesByWorkoutId,
   cleanDisplayText,
   formatPlannedDistanceLabel,
+  formatMileageValueForUnit,
   formatPrescribedLabel,
   getRoutineTitles,
 } from "../../lib/athleteWorkoutDisplay";
 import type { MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
 import { getWeekLabelTone, getWeekLabelToneColors } from "../../lib/weekLabelStyle";
+import {
+  convertDistance,
+  distanceInputFromMiles,
+  distanceInputToMiles,
+  distanceUnitLabel,
+  formatDistanceForUnit,
+  getAthleteDistanceUnit,
+  loadDistanceUnit,
+  type DistanceUnit,
+} from "../../lib/units";
 
 type TodaySessionCard = {
   key: string;
@@ -112,9 +123,14 @@ function workoutCategoryNames(row: TeamWorkoutRow): string[] {
   return cleaned.length > 0 ? cleaned : ["Other"];
 }
 
-function feedbackSummaryFromWorkout(row: TeamWorkoutRow): string {
+function formatCompletedDistance(value: unknown, unit: DistanceUnit): string {
+  const miles = parseNumericLike(value);
+  return miles == null ? "" : formatDistanceForUnit(convertDistance(miles, "mi", unit), unit);
+}
+
+function feedbackSummaryFromWorkout(row: TeamWorkoutRow, unit: DistanceUnit): string {
   const parts = [
-    row.completed_miles != null ? `${row.completed_miles} mi` : "",
+    formatCompletedDistance(row.completed_miles, unit),
     String(row.completed_time_text ?? "").trim(),
     String(row.splits_or_pace ?? "").trim(),
     String(row.additional_feedback ?? "").trim(),
@@ -122,10 +138,10 @@ function feedbackSummaryFromWorkout(row: TeamWorkoutRow): string {
   return parts.join(" • ");
 }
 
-function feedbackSummaryFromMileage(entry?: MileageSessionFeedback): string {
+function feedbackSummaryFromMileage(entry: MileageSessionFeedback | undefined, unit: DistanceUnit): string {
   if (!entry) return "";
   const parts = [
-    entry.completedMiles != null ? `${entry.completedMiles} mi` : "",
+    formatCompletedDistance(entry.completedMiles, unit),
     String(entry.completedTime ?? "").trim(),
     String(entry.splitsOrPace ?? "").trim(),
     String(entry.additionalFeedback ?? "").trim(),
@@ -142,12 +158,12 @@ function formatDailyLogActivityKind(kind?: AthleteDailyLogActivityKind) {
   return "";
 }
 
-function formatDailyLogEntrySummary(entry: AthleteDailyLogEntry) {
+function formatDailyLogEntrySummary(entry: AthleteDailyLogEntry, unit: DistanceUnit) {
   const title = String(entry.title ?? "").trim();
   const notes = String(entry.notes ?? "").trim();
   const parts = [
     entry.entryType === "extra_activity" ? formatDailyLogActivityKind(entry.activityKind) : "Daily note",
-    entry.completedMiles != null && String(entry.completedMiles).trim() ? `${entry.completedMiles} mi` : "",
+    formatCompletedDistance(entry.completedMiles, unit),
     String(entry.completedTime ?? "").trim(),
   ].filter(Boolean);
   const detail = title || notes;
@@ -162,6 +178,8 @@ export default function AthleteDashboardScreen() {
   const [selectedAthleteId, setSelectedAthleteId] = useState<string | null>(null);
   const [selectedAthleteName, setSelectedAthleteName] = useState<string | null>(null);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
+  const [teamDistanceUnit, setTeamDistanceUnit] = useState<DistanceUnit>("mi");
+  const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [weekLabelsByStart, setWeekLabelsByStart] = useState<CoachWeekLabels>({});
   const [todayRows, setTodayRows] = useState<TeamWorkoutRow[]>([]);
   const [todayMileageFeedbackEntries, setTodayMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
@@ -193,12 +211,13 @@ export default function AthleteDashboardScreen() {
     activeLoadKeyRef.current = loadKey;
     setLoading(true);
     try {
-      const [weekStartResult, athleteSession, storedCategories, routines, weekLabels] = await Promise.all([
+      const [weekStartResult, athleteSession, storedCategories, routines, weekLabels, loadedTeamDistanceUnit] = await Promise.all([
         loadWeekStartSetting(),
-        resolveAthleteSessionContext(),
+        resolveAthleteSessionContext(true),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
         loadAuxiliaryRoutineDefinitions(),
         loadCoachWeekLabels(),
+        loadDistanceUnit(),
       ]);
 
       const resolvedWeekStart: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
@@ -206,6 +225,8 @@ export default function AthleteDashboardScreen() {
       setWeekLabelsByStart(weekLabels ?? {});
       setCategories(normalizeCategories(storedCategories));
       setRoutineById(new Map(routines.map((routine) => [routine.id, routine] as const)));
+      setTeamDistanceUnit(loadedTeamDistanceUnit);
+      setDistanceUnit(getAthleteDistanceUnit(athleteSession, loadedTeamDistanceUnit));
 
       const resolvedAthleteId = String(athleteSession.athleteId ?? "").trim();
       const athleteName = String(athleteSession.athleteName ?? "").trim() || null;
@@ -319,12 +340,12 @@ export default function AthleteDashboardScreen() {
       )?.ncaa_off ?? false;
 
     return {
-      amLabel: String(formatMileage(am) ?? "").trim(),
-      pmLabel: String(formatMileage(pm) ?? "").trim(),
+      amLabel: String(formatMileageValueForUnit(am, teamDistanceUnit, distanceUnit) ?? "").trim(),
+      pmLabel: String(formatMileageValueForUnit(pm, teamDistanceUnit, distanceUnit) ?? "").trim(),
       ncaaOff,
       hasPlan: Boolean(am || pm || ncaaOff),
     };
-  }, [currentWeekStartISO, selectedAthleteId, store.visibleMileageCellsByAthleteWeek, store.visibleMileageFlagsByAthleteWeek, todayISO]);
+  }, [currentWeekStartISO, distanceUnit, selectedAthleteId, store.visibleMileageCellsByAthleteWeek, store.visibleMileageFlagsByAthleteWeek, teamDistanceUnit, todayISO]);
 
   const todaySessionCards = useMemo<TodaySessionCard[]>(() => {
     const workoutBySession = new Map<"AM" | "PM", TeamWorkoutRow[]>();
@@ -360,8 +381,8 @@ export default function AthleteDashboardScreen() {
             : prescribed
               ? `${session} Planned Session`
               : "No planned session";
-      const planSummary = prescribed ? `Mileage: ${formatPrescribedLabel(prescribed)}` : "";
-      const submittedSummary = topWorkout ? feedbackSummaryFromWorkout(topWorkout) : feedbackSummaryFromMileage(mileageFeedback);
+      const planSummary = prescribed ? `Mileage: ${formatPrescribedLabel(prescribed, distanceUnit)}` : "";
+      const submittedSummary = topWorkout ? feedbackSummaryFromWorkout(topWorkout, distanceUnit) : feedbackSummaryFromMileage(mileageFeedback, distanceUnit);
       const summary =
         status === "submitted"
           ? submittedSummary || "Log submitted."
@@ -370,7 +391,7 @@ export default function AthleteDashboardScreen() {
             : topWorkout
               ? "Workout log needed."
               : prescribed
-                ? `Prescribed mileage: ${formatPrescribedLabel(prescribed)}`
+                ? `Prescribed mileage: ${formatPrescribedLabel(prescribed, distanceUnit)}`
                 : "Nothing planned for this session.";
 
       return {
@@ -385,7 +406,7 @@ export default function AthleteDashboardScreen() {
         planSummary,
       };
     }).filter((card) => card.workouts.length > 0 || Boolean(card.prescribed));
-  }, [todayAssignment, todayISO, todayMileageFeedbackEntries, todayRows]);
+  }, [distanceUnit, todayAssignment, todayISO, todayMileageFeedbackEntries, todayRows]);
 
   const openDetailForCard = useCallback((card: TodaySessionCard) => {
     if (card.status === "none") return;
@@ -444,15 +465,15 @@ export default function AthleteDashboardScreen() {
       card,
       completedMilesText:
         workout?.completed_miles != null
-          ? String(workout.completed_miles)
+          ? distanceInputFromMiles(workout.completed_miles, distanceUnit)
           : mileage?.completedMiles != null
-            ? String(mileage.completedMiles)
+            ? distanceInputFromMiles(mileage.completedMiles, distanceUnit)
             : "",
       completedTimeText: String(workout?.completed_time_text ?? mileage?.completedTime ?? ""),
       splitsText: String(workout?.splits_or_pace ?? mileage?.splitsOrPace ?? ""),
       additionalFeedbackText: String(workout?.additional_feedback ?? mileage?.additionalFeedback ?? ""),
     });
-  }, [router, todayISO]);
+  }, [distanceUnit, router, todayISO]);
 
   const saveEditor = useCallback(async () => {
     if (!editor) return;
@@ -461,6 +482,7 @@ export default function AthleteDashboardScreen() {
     const splitsText = editor.splitsText.trim();
     const additionalFeedbackText = editor.additionalFeedbackText.trim();
     const parsedCompletedMiles = completedMilesRaw ? parseNumericLike(completedMilesRaw) : undefined;
+    const storedCompletedMiles = distanceInputToMiles(parsedCompletedMiles, distanceUnit);
 
     if (completedMilesRaw && parsedCompletedMiles == null) {
       setEditorError("Distance must be a number, like 5 or 5.25.");
@@ -483,7 +505,7 @@ export default function AthleteDashboardScreen() {
 
       if (workout) {
         await updateOwnWorkoutFeedbackById(workout.id, workout.athlete_profile_id, {
-          completed_miles: parsedCompletedMiles ?? null,
+          completed_miles: storedCompletedMiles,
           completed_time_text: completedTimeText || null,
           splits_or_pace: splitsText || null,
           additional_feedback: additionalFeedbackText || null,
@@ -493,7 +515,7 @@ export default function AthleteDashboardScreen() {
             row.id === workout.id
               ? {
                   ...row,
-                  completed_miles: parsedCompletedMiles ?? null,
+                  completed_miles: storedCompletedMiles,
                   completed_time_text: completedTimeText || null,
                   splits_or_pace: splitsText || null,
                   additional_feedback: additionalFeedbackText || null,
@@ -515,7 +537,7 @@ export default function AthleteDashboardScreen() {
           dateISO: todayISO,
           session: card.session,
           prescribed: card.prescribed || undefined,
-          completedMiles: parsedCompletedMiles,
+          completedMiles: storedCompletedMiles ?? undefined,
           completedTime: completedTimeText || undefined,
           splitsOrPace: splitsText || undefined,
           additionalFeedback: additionalFeedbackText || undefined,
@@ -533,7 +555,7 @@ export default function AthleteDashboardScreen() {
     } finally {
       setEditorSaving(false);
     }
-  }, [editor, selectedAthleteId, selectedAthleteName, todayISO]);
+  }, [distanceUnit, editor, selectedAthleteId, selectedAthleteName, todayISO]);
 
   const openDailyLogEditor = useCallback((entryType: AthleteDailyLogEntryType) => {
     setDailyLogError(null);
@@ -561,6 +583,7 @@ export default function AthleteDashboardScreen() {
     const completedMilesRaw = isExtraActivity ? dailyLogEditor.completedMilesText.trim() : "";
     const completedTime = isExtraActivity ? dailyLogEditor.completedTimeText.trim() : "";
     const parsedCompletedMiles = completedMilesRaw ? parseNumericLike(completedMilesRaw) : undefined;
+    const storedCompletedMiles = distanceInputToMiles(parsedCompletedMiles, distanceUnit);
 
     if (completedMilesRaw && parsedCompletedMiles == null) {
       setDailyLogError("Distance must be a number, like 3 or 3.5.");
@@ -586,7 +609,7 @@ export default function AthleteDashboardScreen() {
       entryType: dailyLogEditor.entryType,
       activityKind: isExtraActivity ? dailyLogEditor.activityKind ?? "other" : null,
       title: title || null,
-      completedMiles: completedMilesRaw || null,
+      completedMiles: storedCompletedMiles,
       completedTime: completedTime || null,
       notes: notes || null,
       createdAt: now,
@@ -606,7 +629,7 @@ export default function AthleteDashboardScreen() {
     } finally {
       setDailyLogSaving(false);
     }
-  }, [dailyLogEditor, selectedAthleteId, selectedAthleteName, todayISO]);
+  }, [dailyLogEditor, distanceUnit, selectedAthleteId, selectedAthleteName, todayISO]);
 
   return (
     <ScrollView
@@ -738,8 +761,10 @@ export default function AthleteDashboardScreen() {
             const categoriesForCard = workout ? workoutCategoryNames(workout) : [];
             const actionLabel = card.status === "submitted" ? "Edit log" : card.status === "none" ? "No log needed" : "Enter log";
             const prescribedLabel =
-              (workout ? formatPlannedDistanceLabel(workout.planned_distance, workout.planned_distance_unit) : "") ||
-              formatPrescribedLabel(card.prescribed);
+              (workout
+                ? formatPlannedDistanceLabel(workout.planned_distance, workout.planned_distance_unit, distanceUnit, teamDistanceUnit)
+                : "") ||
+              formatPrescribedLabel(card.prescribed, distanceUnit);
             return (
               <AthleteSessionCard
                 key={card.key}
@@ -815,7 +840,7 @@ export default function AthleteDashboardScreen() {
               .sort((a, b) => Number(a.createdAt ?? 0) - Number(b.createdAt ?? 0))
               .map((entry) => (
                 <Text key={entry.id} style={{ color: "#334155", fontWeight: "700", lineHeight: 18 }}>
-                  {formatDailyLogEntrySummary(entry)}
+                  {formatDailyLogEntrySummary(entry, distanceUnit)}
                 </Text>
               ))}
           </View>
@@ -827,6 +852,7 @@ export default function AthleteDashboardScreen() {
         title={editor ? `${editor.card.session} Log` : "Log"}
         subtitle={formatCompactDate(todayISO)}
         planSummary={editor ? editor.card.planSummary || (editor.card.prescribed ? `Mileage: ${editor.card.prescribed}` : "") : ""}
+        distanceUnit={distanceUnit}
         completedMilesText={editor?.completedMilesText ?? ""}
         completedTimeText={editor?.completedTimeText ?? ""}
         splitsText={editor?.splitsText ?? ""}
@@ -920,7 +946,9 @@ export default function AthleteDashboardScreen() {
                   {dailyLogEditor.entryType === "extra_activity" ? (
                     <View style={{ flexDirection: "row", gap: 10 }}>
                       <View style={{ flex: 1 }}>
-                        <Text style={{ fontWeight: "900", color: "#334155" }}>Completed miles</Text>
+                        <Text style={{ fontWeight: "900", color: "#334155" }}>
+                          Completed distance ({distanceUnitLabel(distanceUnit)})
+                        </Text>
                         <TextInput
                           value={dailyLogEditor.completedMilesText}
                           onChangeText={(text) => setDailyLogEditor((prev) => (prev ? { ...prev, completedMilesText: text } : prev))}

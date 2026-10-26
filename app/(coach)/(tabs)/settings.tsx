@@ -28,6 +28,7 @@ import {
   convertDistance,
   convertPaceSecondsPerUnit,
   distanceUnitLabel,
+  normalizeOptionalDistanceUnit,
   paceUnitLongLabel,
   type DistanceUnit,
 } from "../../../lib/units";
@@ -158,7 +159,8 @@ function convertWorkoutDistances(rawWorkouts: any[], from: DistanceUnit, to: Dis
   return (rawWorkouts ?? []).map((w: any) => {
     const next: any = { ...w };
     if (typeof next.planned_distance === "number") {
-      next.planned_distance = round2(convertDistance(next.planned_distance, from, to));
+      const sourceUnit = normalizeOptionalDistanceUnit(next.planned_distance_unit) ?? from;
+      next.planned_distance = round2(convertDistance(next.planned_distance, sourceUnit, to));
       next.planned_distance_unit = to;
     }
     return next;

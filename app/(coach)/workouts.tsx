@@ -54,6 +54,12 @@ import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataS
 import type { WorkoutCategory } from "../../lib/types";
 import { canEditTraining, getCurrentTeamRole, type TeamRole } from "../../lib/teamPermissions";
 import { loadCoachDateCursor, saveCoachDateCursorForDate } from "../../lib/coachDateCursor";
+import {
+  convertDistance,
+  formatDistanceForUnit,
+  loadDistanceUnit,
+  type DistanceUnit,
+} from "../../lib/units";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 const DEBUG_WORKOUTS = false;
@@ -376,17 +382,15 @@ function areGroupAthleteSlicesUnchanged(
   return true;
 }
 
-function formatFeedbackDistance(value: number): string {
-  const rounded = Math.round(value * 100) / 100;
-  if (Number.isInteger(rounded)) return String(rounded);
-  return String(rounded).replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "");
+function formatFeedbackDistance(value: number, unit: DistanceUnit): string {
+  return formatDistanceForUnit(convertDistance(value, "mi", unit), unit);
 }
 
 function hasRealWorkoutFeedback(row: TeamWorkoutRow): boolean {
   return hasWorkoutFeedbackRow(row);
 }
 
-function buildCoachFeedbackSummary(row: TeamWorkoutRow): { hasFeedback: boolean; label: string } {
+function buildCoachFeedbackSummary(row: TeamWorkoutRow, unit: DistanceUnit): { hasFeedback: boolean; label: string } {
   const completedMilesRaw = parseNumericLike(row.completed_miles);
   const hasDistance = completedMilesRaw != null;
   const completedTime = String(row.completed_time_text ?? "").trim();
@@ -395,7 +399,7 @@ function buildCoachFeedbackSummary(row: TeamWorkoutRow): { hasFeedback: boolean;
   const hasNote = splitsOrPace.length > 0 || additionalFeedback.length > 0;
 
   const parts: string[] = [];
-  if (hasDistance) parts.push(`${formatFeedbackDistance(completedMilesRaw)} mi`);
+  if (hasDistance) parts.push(formatFeedbackDistance(completedMilesRaw, unit));
   if (completedTime) parts.push(completedTime);
   if (hasNote) parts.push("note");
 
@@ -430,6 +434,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
   onSelectionMetaChange,
   onRegisterGridApi,
   onOpenFeedbackDetail,
+  distanceUnit,
   batchHeaderActiveRef,
   readOnly,
 }: {
@@ -459,6 +464,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
   onSelectionMetaChange: (groupKey: string, meta: GroupSelectionMeta) => void;
   onRegisterGridApi: (groupKey: string, api: GroupGridApi | null) => void;
   onOpenFeedbackDetail: (row: TeamWorkoutRow, athleteName: string) => void;
+  distanceUnit: DistanceUnit;
   batchHeaderActiveRef: MutableRefObject<boolean>;
   readOnly: boolean;
 }) {
@@ -639,7 +645,7 @@ const GroupAthleteRows = memo(function GroupAthleteRows({
               .map((c) => String(c ?? "").trim())
               .filter(Boolean),
           };
-        const feedbackSummary = buildCoachFeedbackSummary(workout);
+        const feedbackSummary = buildCoachFeedbackSummary(workout, distanceUnit);
         const athleteState = athleteSaveState[workoutId];
         const locationSelected = groupGrid.isCellSelected(workoutId, "location");
         const rowSelected = groupGrid.isRowSelected(workoutId);
@@ -1521,6 +1527,7 @@ export default function CoachWorkoutsDay() {
   const [selectedByGroup, setSelectedByGroup] = useState<Record<string, GroupSelectionMeta>>({});
   const [groupGridApis, setGroupGridApis] = useState<Record<string, GroupGridApi>>({});
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
+  const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const categoryNames = useMemo(
     () =>
       (Array.isArray(categories) ? categories : [])
@@ -2372,15 +2379,17 @@ export default function CoachWorkoutsDay() {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const [stored, routines, defaults] = await Promise.all([
+      const [stored, routines, defaults, loadedDistanceUnit] = await Promise.all([
         loadCoachCategories(),
         loadAuxiliaryRoutines(),
         loadPracticeTimeDefaults(),
+        loadDistanceUnit(),
       ]);
       if (!mounted) return;
       setCategories(stored);
       setAuxiliaryRoutines(Array.isArray(routines) ? routines : []);
       setPracticeDefaults(defaults);
+      setDistanceUnit(loadedDistanceUnit);
     })();
     return () => {
       mounted = false;
@@ -6369,6 +6378,7 @@ export default function CoachWorkoutsDay() {
                               onSelectionMetaChange={handleGroupSelectionMetaChange}
                               onRegisterGridApi={handleRegisterGroupGridApi}
                               onOpenFeedbackDetail={openFeedbackDetail}
+                              distanceUnit={distanceUnit}
                               batchHeaderActiveRef={batchHeaderActiveRef}
                               readOnly={readOnlyTraining}
                             />
@@ -7302,7 +7312,7 @@ export default function CoachWorkoutsDay() {
                 <View style={{ gap: 2 }}>
                   <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>Completed distance</Text>
                   <Text style={{ fontSize: 13, fontWeight: "700", color: "#0f172a" }}>
-                    {formatFeedbackDistance(feedbackModal.completedMiles)} mi
+                    {formatFeedbackDistance(feedbackModal.completedMiles, distanceUnit)}
                   </Text>
                 </View>
               ) : null}

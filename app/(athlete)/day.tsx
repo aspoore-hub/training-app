@@ -6,7 +6,6 @@ import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from "react-native-reanimated";
 import { loadJSON, saveJSON } from "../../lib/storage";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../lib/pace";
-import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../lib/units";
 import type { AthleteWorkout, MileageValue, WeekStartDay } from "../../lib/types";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import { ATHLETE_CALENDAR_VIEW_STATE_KEY, type AthleteCalendarViewState } from "../../lib/athleteCalendarView";
@@ -32,7 +31,6 @@ import {
   getWeekIndex,
   sumMileage,
   formatSum,
-  formatMileage,
   parseMileageInput,
   parseISODate,
   toISODate,
@@ -47,10 +45,21 @@ import { loadAuxiliaryRoutineDefinitions, type AuxiliaryRoutine } from "../../li
 import {
   buildBatchNotesByWorkoutId,
   cleanDisplayText,
+  formatMileageValueForUnit,
   formatPlannedDistanceLabel,
   formatPrescribedLabel,
   getRoutineTitles,
 } from "../../lib/athleteWorkoutDisplay";
+import {
+  convertDistance,
+  distanceInputFromMiles,
+  distanceInputToMiles,
+  distanceUnitLabel,
+  formatDistanceForUnit,
+  getAthleteDistanceUnit,
+  loadDistanceUnit,
+  type DistanceUnit,
+} from "../../lib/units";
 import { getWeekLabelTone, getWeekLabelToneColors } from "../../lib/weekLabelStyle";
 
 const ATHLETE_DAY_UI_STATE_KEY = "training_app_athlete_day_ui_state_v1";
@@ -131,7 +140,10 @@ function toAthleteWorkout(row: TeamWorkoutRow, nameByAthleteId: Map<string, stri
     title: row.title ?? "Workout",
     details: row.details ?? undefined,
     plannedMiles: parseNumericLike(row.planned_distance),
-    plannedDistanceUnit: row.planned_distance_unit === "km" ? "km" : "mi",
+    plannedDistanceUnit:
+      row.planned_distance_unit === "mi" || row.planned_distance_unit === "km"
+        ? row.planned_distance_unit
+        : undefined,
     completedMiles: typeof (row as any).completed_miles === "number" ? (row as any).completed_miles : undefined,
     completedTime: String((row as any).completed_time_text ?? "").trim() || undefined,
     splitsOrPace: String((row as any).splits_or_pace ?? "").trim() || undefined,
@@ -177,9 +189,14 @@ function workoutCategoryNames(workout: AthleteWorkout): string[] {
   return cleaned.length > 0 ? cleaned : ["Other"];
 }
 
-function feedbackSummaryFromWorkout(workout: AthleteWorkout): string {
+function formatCompletedDistance(value: unknown, unit: DistanceUnit): string {
+  const miles = parseNumericLike(value);
+  return miles == null ? "" : formatDistanceForUnit(convertDistance(miles, "mi", unit), unit);
+}
+
+function feedbackSummaryFromWorkout(workout: AthleteWorkout, unit: DistanceUnit): string {
   const parts = [
-    workout.completedMiles != null ? `${workout.completedMiles} mi` : "",
+    formatCompletedDistance(workout.completedMiles, unit),
     String(workout.completedTime ?? "").trim(),
     String(workout.splitsOrPace ?? "").trim(),
     String(workout.additionalFeedback ?? workout.feedback ?? "").trim(),
@@ -187,10 +204,10 @@ function feedbackSummaryFromWorkout(workout: AthleteWorkout): string {
   return parts.join(" • ");
 }
 
-function feedbackSummaryFromMileage(entry?: MileageSessionFeedback): string {
+function feedbackSummaryFromMileage(entry: MileageSessionFeedback | undefined, unit: DistanceUnit): string {
   if (!entry) return "";
   const parts = [
-    entry.completedMiles != null ? `${entry.completedMiles} mi` : "",
+    formatCompletedDistance(entry.completedMiles, unit),
     String(entry.completedTime ?? "").trim(),
     String(entry.splitsOrPace ?? "").trim(),
     String(entry.additionalFeedback ?? "").trim(),
@@ -216,6 +233,7 @@ export default function AthleteDayScreen() {
   const [weekLabelsByStart, setWeekLabelsByStart] = useState<CoachWeekLabels>({});
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
+  const [teamDistanceUnit, setTeamDistanceUnit] = useState<DistanceUnit>("mi");
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
   const [mileageFeedbackEntries, setMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
@@ -325,15 +343,24 @@ export default function AthleteDayScreen() {
   const amWorkouts = useMemo(() => workouts.filter((w) => (w.session ?? "PM") === "AM"), [workouts]);
   const pmWorkouts = useMemo(() => workouts.filter((w) => (w.session ?? "PM") === "PM"), [workouts]);
 
-  const plannedAm = useMemo(() => (dayPlan ? formatMileage(dayPlan.am) : ""), [dayPlan]);
-  const plannedPm = useMemo(() => (dayPlan ? formatMileage(dayPlan.pm) : ""), [dayPlan]);
+  const plannedAm = useMemo(
+    () => (dayPlan ? formatMileageValueForUnit(dayPlan.am, teamDistanceUnit, distanceUnit) : ""),
+    [dayPlan, distanceUnit, teamDistanceUnit]
+  );
+  const plannedPm = useMemo(
+    () => (dayPlan ? formatMileageValueForUnit(dayPlan.pm, teamDistanceUnit, distanceUnit) : ""),
+    [dayPlan, distanceUnit, teamDistanceUnit]
+  );
 
   const plannedTotal = useMemo(() => {
     if (!dayPlan) return "";
-    const label = formatSum(dayPlan.total);
+    const label = formatSum({
+      min: convertDistance(dayPlan.total.min, teamDistanceUnit, distanceUnit),
+      max: convertDistance(dayPlan.total.max, teamDistanceUnit, distanceUnit),
+    });
     if (!label) return "";
     return `${label} ${distanceUnitLabel(distanceUnit)}`;
-  }, [dayPlan, distanceUnit]);
+  }, [dayPlan, distanceUnit, teamDistanceUnit]);
 
   const sessionCards = useMemo(
     () =>
@@ -375,7 +402,7 @@ export default function AthleteDayScreen() {
           loadWeekStartSetting(),
           loadPaceSecondsPerMile(),
           loadDistanceUnit(),
-          resolveAthleteSessionContext(),
+          resolveAthleteSessionContext(true),
           loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
           loadAuxiliaryRoutineDefinitions(),
           loadCoachWeekLabels(),
@@ -385,7 +412,8 @@ export default function AthleteDayScreen() {
         const resolvedWeekStart: WeekStartDay = ws.normalized === "sunday" ? 0 : 1;
         setWeekStartsOn(resolvedWeekStart);
         setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
-        setDistanceUnit(unit);
+        setTeamDistanceUnit(unit);
+        setDistanceUnit(getAthleteDistanceUnit(athleteSession, unit));
         setCategories(normalizeCategories(storedCategories));
         setWeekLabelsByStart(weekLabels ?? {});
         setRoutineById(new Map(routines.map((routine) => [routine.id, routine] as const)));
@@ -600,12 +628,12 @@ export default function AthleteDayScreen() {
       prescribed: input.prescribed,
       workout,
       mileageFeedback,
-      planSummary: input.prescribed ? `Mileage: ${formatPrescribedLabel(input.prescribed)}` : "",
+      planSummary: input.prescribed ? `Mileage: ${formatPrescribedLabel(input.prescribed, distanceUnit)}` : "",
       completedMilesText:
         workout?.completedMiles != null
-          ? String(workout.completedMiles)
+          ? distanceInputFromMiles(workout.completedMiles, distanceUnit)
           : mileageFeedback?.completedMiles != null
-            ? String(mileageFeedback.completedMiles)
+            ? distanceInputFromMiles(mileageFeedback.completedMiles, distanceUnit)
             : "",
       completedTimeText: String(workout?.completedTime ?? mileageFeedback?.completedTime ?? ""),
       splitsText: String(workout?.splitsOrPace ?? mileageFeedback?.splitsOrPace ?? ""),
@@ -620,6 +648,7 @@ export default function AthleteDayScreen() {
     const splitsText = editor.splitsText.trim();
     const additionalFeedbackText = editor.additionalFeedbackText.trim();
     const parsedCompletedMiles = completedMilesRaw ? parseNumericLike(completedMilesRaw) : undefined;
+    const storedCompletedMiles = distanceInputToMiles(parsedCompletedMiles, distanceUnit);
 
     if (completedMilesRaw && parsedCompletedMiles == null) {
       setEditorError("Distance must be a number, like 5 or 5.25.");
@@ -640,7 +669,7 @@ export default function AthleteDayScreen() {
       const workout = editor.workout;
       if (workout) {
         await updateOwnWorkoutFeedbackById(workout.id, String(workout.athleteId ?? selectedAthleteId ?? ""), {
-          completed_miles: parsedCompletedMiles ?? null,
+          completed_miles: storedCompletedMiles,
           completed_time_text: completedTimeText || null,
           splits_or_pace: splitsText || null,
           additional_feedback: additionalFeedbackText || null,
@@ -649,7 +678,7 @@ export default function AthleteDayScreen() {
           item.id === workout.id
             ? {
                 ...item,
-                completedMiles: parsedCompletedMiles,
+                completedMiles: storedCompletedMiles ?? undefined,
                 completedTime: completedTimeText || undefined,
                 splitsOrPace: splitsText || undefined,
                 additionalFeedback: additionalFeedbackText || undefined,
@@ -671,7 +700,7 @@ export default function AthleteDayScreen() {
           dateISO: editor.dateISO,
           session: editor.session,
           prescribed: editor.prescribed || undefined,
-          completedMiles: parsedCompletedMiles,
+          completedMiles: storedCompletedMiles ?? undefined,
           completedTime: completedTimeText || undefined,
           splitsOrPace: splitsText || undefined,
           additionalFeedback: additionalFeedbackText || undefined,
@@ -853,8 +882,8 @@ export default function AthleteDayScreen() {
               <AthleteSessionCard
                 session={item.session}
                 title={`${item.session} Planned Session`}
-                summary={`Prescribed mileage: ${formatPrescribedLabel(item.prescribed)}`}
-                prescribed={formatPrescribedLabel(item.prescribed)}
+                summary={`Prescribed mileage: ${formatPrescribedLabel(item.prescribed, distanceUnit)}`}
+                prescribed={formatPrescribedLabel(item.prescribed, distanceUnit)}
                 status={hasMileageFeedback(mileageFeedbackForSession(item.session) ?? {}) ? "submitted" : "missing"}
                 actionLabel={hasMileageFeedback(mileageFeedbackForSession(item.session) ?? {}) ? "Edit log" : "Enter log"}
                 onOpen={() =>
@@ -880,8 +909,11 @@ export default function AthleteDayScreen() {
               const peers = groupMatesByWorkoutId.get(workout.id) ?? [];
               const prescribed = item.session === "AM" ? dayPlan?.am : dayPlan?.pm;
               const prescribedLabel =
-                formatPlannedDistanceLabel(workout.plannedMiles, workout.plannedDistanceUnit) ||
-                formatPrescribedLabel(formatMileage(prescribed) || item.prescribed);
+                formatPlannedDistanceLabel(workout.plannedMiles, workout.plannedDistanceUnit, distanceUnit, teamDistanceUnit) ||
+                formatPrescribedLabel(
+                  formatMileageValueForUnit(prescribed, teamDistanceUnit, distanceUnit) || item.prescribed,
+                  distanceUnit
+                );
               const logged = hasWorkoutFeedback({
                 completed_miles: workout.completedMiles,
                 completed_time_text: workout.completedTime,
@@ -889,7 +921,7 @@ export default function AthleteDayScreen() {
                 additional_feedback: workout.additionalFeedback ?? workout.feedback,
               });
               const status: AthleteSessionCardStatus = logged ? "submitted" : "missing";
-              const feedbackSummary = feedbackSummaryFromWorkout(workout);
+              const feedbackSummary = feedbackSummaryFromWorkout(workout, distanceUnit);
               const peerSummary = peers.length > 0 ? `With ${peers.length} teammate${peers.length === 1 ? "" : "s"}.` : "";
               return (
                 <AthleteSessionCard
@@ -950,6 +982,7 @@ export default function AthleteDayScreen() {
         title={editor ? `${editor.session} Log` : "Log"}
         subtitle={formatDisplayDate(String(currentDateISO))}
         planSummary={editor?.planSummary ?? ""}
+        distanceUnit={distanceUnit}
         completedMilesText={editor?.completedMilesText ?? ""}
         completedTimeText={editor?.completedTimeText ?? ""}
         splitsText={editor?.splitsText ?? ""}

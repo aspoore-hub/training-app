@@ -47,6 +47,7 @@ import { teamDataStore, visibleMileageAthleteWeekKey } from "../../../lib/teamDa
 import {
   getWeekIndex,
   getWeekStartISO,
+  parseMileageInput,
 } from "../../../lib/mileagePlan";
 import { formatParsedWorkoutEntry, parseWorkoutEntryValue } from "../../../lib/workoutEntryParser";
 import { loadWeekStartSetting } from "../../../lib/settings";
@@ -54,12 +55,20 @@ import { loadJSON } from "../../../lib/storage";
 import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../../lib/categories";
 import type { WorkoutCategory } from "../../../lib/types";
 import {
+  formatMileageValueForUnit,
   buildBatchNotesByWorkoutId,
   buildWorkoutFlowSections,
   cleanDisplayText,
   formatPlannedDistanceLabel,
   formatPrescribedLabel,
 } from "../../../lib/athleteWorkoutDisplay";
+import {
+  distanceInputFromMiles,
+  distanceInputToMiles,
+  getAthleteDistanceUnit,
+  loadDistanceUnit,
+  type DistanceUnit,
+} from "../../../lib/units";
 
 function normalizeGroupId(groupId?: string): string {
   const normalized = String(groupId ?? "").trim().toUpperCase();
@@ -138,7 +147,10 @@ function toAthleteWorkout(row: TeamWorkoutRow, rosterMap: Map<string, string>): 
     title: row.title ?? "Workout",
     details: row.details ?? undefined,
     plannedMiles: parseNumericLike(row.planned_distance),
-    plannedDistanceUnit: row.planned_distance_unit === "km" ? "km" : "mi",
+    plannedDistanceUnit:
+      row.planned_distance_unit === "mi" || row.planned_distance_unit === "km"
+        ? row.planned_distance_unit
+        : undefined,
     completedMiles: parseNumericLike(row.completed_miles),
     completedTime: String(row.completed_time_text ?? "").trim() || undefined,
     splitsOrPace: String(row.splits_or_pace ?? "").trim() || undefined,
@@ -154,7 +166,9 @@ function resolvePrescribedText(
   athleteId: string,
   dateISO: string,
   session: "AM" | "PM",
-  weekStartsOn: WeekStartDay
+  weekStartsOn: WeekStartDay,
+  sourceUnit: DistanceUnit,
+  targetUnit: DistanceUnit
 ) {
   const athlete = String(athleteId ?? "").trim();
   if (!athlete || !dateISO) return "";
@@ -171,7 +185,23 @@ function resolvePrescribedText(
 
   if (!cell) return "";
 
-  const parsed = parseWorkoutEntryValue(cell.value);
+  const rawValue = (cell as any).value;
+  const mileageValue =
+    typeof rawValue === "number"
+      ? ({ kind: "exact", value: rawValue } as const)
+      : rawValue && typeof rawValue === "object"
+        ? rawValue
+        : null;
+  if (mileageValue) {
+    return formatMileageValueForUnit(mileageValue, sourceUnit, targetUnit);
+  }
+
+  if (typeof rawValue === "string") {
+    const parsedMileage = parseMileageInput(rawValue);
+    if (parsedMileage) return formatMileageValueForUnit(parsedMileage, sourceUnit, targetUnit);
+  }
+
+  const parsed = parseWorkoutEntryValue(rawValue);
   if (parsed) {
     return formatParsedWorkoutEntry(parsed);
   }
@@ -225,6 +255,8 @@ export default function AthleteWorkoutDetail() {
   const [logSheetOpen, setLogSheetOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
+  const [teamDistanceUnit, setTeamDistanceUnit] = useState<DistanceUnit>("mi");
+  const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [submitStatus, setSubmitStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [rosterMap, setRosterMap] = useState<Map<string, string>>(new Map());
@@ -262,9 +294,9 @@ export default function AthleteWorkoutDetail() {
       setLoading(true);
       setRoutineDataLoadError(null);
       try {
-        const athleteSession = await resolveAthleteSessionContext();
+        const athleteSession = await resolveAthleteSessionContext(true);
         const visibleAthleteId = String(athleteSession.athleteId ?? athleteId ?? "").trim();
-        const [rosterMap, routineLoadResult, drillLoadResult, drillFolderResult, routineFolderResult, weekStartResult, storedCategories] = await Promise.all([
+        const [rosterMap, routineLoadResult, drillLoadResult, drillFolderResult, routineFolderResult, weekStartResult, storedCategories, loadedTeamDistanceUnit] = await Promise.all([
           loadRosterAny(),
           loadAuxiliaryRoutineDefinitionsWithStatus(),
           loadDrillLibraryDefinitionsWithStatus(),
@@ -272,7 +304,11 @@ export default function AthleteWorkoutDetail() {
           loadRoutineFoldersWithStatus(),
           loadWeekStartSetting(),
           loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
+          loadDistanceUnit(),
         ]);
+        const resolvedDistanceUnit = getAthleteDistanceUnit(athleteSession, loadedTeamDistanceUnit);
+        setTeamDistanceUnit(loadedTeamDistanceUnit);
+        setDistanceUnit(resolvedDistanceUnit);
         setRoutineLoadStatus(routineLoadResult);
         setDrillLibraryLoadStatus(drillLoadResult);
         setDrillFolderLoadStatus(drillFolderResult);
@@ -312,7 +348,7 @@ export default function AthleteWorkoutDetail() {
 
         if (!isSynthetic && found) {
           setWorkout(found);
-          setCompletedMilesText(found.completedMiles != null ? String(found.completedMiles) : "");
+          setCompletedMilesText(found.completedMiles != null ? distanceInputFromMiles(found.completedMiles, resolvedDistanceUnit) : "");
           setCompletedTimeText(String(found.completedTime ?? ""));
           setSplitsText(String(found.splitsOrPace ?? ""));
           setAdditionalFeedbackText(String(found.additionalFeedback ?? found.feedback ?? ""));
@@ -361,7 +397,7 @@ export default function AthleteWorkoutDetail() {
           });
           const existing = await getMileageFeedbackById(feedbackId);
           if (existing) {
-            setCompletedMilesText(existing.completedMiles != null ? String(existing.completedMiles) : "");
+            setCompletedMilesText(existing.completedMiles != null ? distanceInputFromMiles(existing.completedMiles, resolvedDistanceUnit) : "");
             setCompletedTimeText(String(existing.completedTime ?? ""));
             setSplitsText(String(existing.splitsOrPace ?? ""));
             setAdditionalFeedbackText(String(existing.additionalFeedback ?? ""));
@@ -392,6 +428,7 @@ export default function AthleteWorkoutDetail() {
   async function submitFeedback() {
     if (submitStatus === "saving") return;
     const parsedCompletedMiles = parseCompletedMiles(completedMilesText);
+    const storedCompletedMiles = distanceInputToMiles(parsedCompletedMiles, distanceUnit);
     const hasMilesInput = completedMilesText.trim().length > 0;
 
     if (hasMilesInput && parsedCompletedMiles === undefined) {
@@ -424,7 +461,7 @@ export default function AthleteWorkoutDetail() {
           dateISO: String(date ?? ""),
           session: normalizeSession(session),
           prescribed: String(prescribed ?? "") || undefined,
-          completedMiles: parsedCompletedMiles,
+          completedMiles: storedCompletedMiles ?? undefined,
           completedTime: completedTimeText.trim() || undefined,
           splitsOrPace: splitsText.trim() || undefined,
           additionalFeedback: additionalFeedbackText.trim() || undefined,
@@ -435,7 +472,7 @@ export default function AthleteWorkoutDetail() {
         if (!workout) return;
 
         await updateOwnWorkoutFeedbackById(workout.id, String(workout.athleteId ?? athleteId ?? ""), {
-          completed_miles: parsedCompletedMiles ?? null,
+          completed_miles: storedCompletedMiles,
           completed_time_text: completedTimeText.trim() || null,
           splits_or_pace: splitsText.trim() || null,
           additional_feedback: additionalFeedbackText.trim() || null,
@@ -448,7 +485,7 @@ export default function AthleteWorkoutDetail() {
         const refreshedWorkout = toAthleteWorkout(refreshedRow, rosterMap);
         setWorkout(refreshedWorkout);
         setCompletedMilesText(
-          refreshedWorkout.completedMiles != null ? String(refreshedWorkout.completedMiles) : ""
+          refreshedWorkout.completedMiles != null ? distanceInputFromMiles(refreshedWorkout.completedMiles, distanceUnit) : ""
         );
         setCompletedTimeText(String(refreshedWorkout.completedTime ?? ""));
         setSplitsText(String(refreshedWorkout.splitsOrPace ?? ""));
@@ -532,10 +569,23 @@ export default function AthleteWorkoutDetail() {
   const groupMatePreview = groupMateNames.slice(0, 4).join(", ");
   const hiddenGroupMateCount = Math.max(0, groupMateNames.length - 4);
   const prescribedFromMileage = workout
-    ? resolvePrescribedText(store, String(workout.athleteId ?? ""), String(workout.dateISO), String(workout.session ?? "PM") as "AM" | "PM", weekStartsOn)
+    ? resolvePrescribedText(
+        store,
+        String(workout.athleteId ?? ""),
+        String(workout.dateISO),
+        String(workout.session ?? "PM") as "AM" | "PM",
+        weekStartsOn,
+        teamDistanceUnit,
+        distanceUnit
+      )
     : "";
-  const prescribedFromWorkout = workout ? formatPlannedDistanceLabel(workout.plannedMiles, workout.plannedDistanceUnit) : "";
-  const prescribedLabel = formatPrescribedLabel(isSynthetic ? String(prescribed ?? "") : prescribedFromWorkout || prescribedFromMileage);
+  const prescribedFromWorkout = workout
+    ? formatPlannedDistanceLabel(workout.plannedMiles, workout.plannedDistanceUnit, distanceUnit, teamDistanceUnit)
+    : "";
+  const prescribedLabel = formatPrescribedLabel(
+    isSynthetic ? String(prescribed ?? "") : prescribedFromWorkout || prescribedFromMileage,
+    distanceUnit
+  );
   const workoutCategoryNames = Array.from(
     new Set(
       (Array.isArray(workout?.categories) ? workout?.categories : [workout?.category ?? "Other"])
@@ -747,6 +797,7 @@ export default function AthleteWorkoutDetail() {
         title={`${displaySession} Log`}
         subtitle={formatDisplayDate(displayDate)}
         planSummary={prescribedLabel ? `${prescribedPrefix}: ${prescribedLabel}` : ""}
+        distanceUnit={distanceUnit}
         completedMilesText={completedMilesText}
         completedTimeText={completedTimeText}
         splitsText={splitsText}

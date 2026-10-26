@@ -26,6 +26,7 @@ export type TeamRosterAthlete = {
   leftAt: string | null;
   teamStartDate: string | null;
   teamEndDate: string | null;
+  preferredDistanceUnit: "mi" | "km" | null;
 };
 
 export type AthleteSeasonTenureStatus = "applies" | "before_team_start" | "after_team_end";
@@ -85,6 +86,10 @@ export function normalizeTeamRosterAthlete(raw: Partial<TeamAthlete> & { active?
     leftAt: String(raw.left_at ?? "").trim() || null,
     teamStartDate: String(raw.team_start_date ?? "").trim() || null,
     teamEndDate: String(raw.team_end_date ?? "").trim() || null,
+    preferredDistanceUnit:
+      raw.preferred_distance_unit === "mi" || raw.preferred_distance_unit === "km"
+        ? raw.preferred_distance_unit
+        : null,
   };
 }
 
@@ -471,7 +476,7 @@ export function resolveAthleteDisplayName(
 async function listTeamAthletesForTeam(teamId: string): Promise<TeamAthlete[]> {
   const { data, error } = await supabase
     .from("team_athletes")
-    .select("id,team_id,first_name,last_name,display_name,grad_year,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,created_at,updated_at")
+    .select("id,team_id,first_name,last_name,display_name,grad_year,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,preferred_distance_unit,created_at,updated_at")
     .eq("team_id", teamId)
     .order("last_name", { ascending: true, nullsFirst: false })
     .order("first_name", { ascending: true, nullsFirst: false })

@@ -1,10 +1,12 @@
 import { Modal, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { distanceUnitLabel, type DistanceUnit } from "../../lib/units";
 
 type Props = {
   visible: boolean;
   title: string;
   subtitle?: string;
   planSummary?: string;
+  distanceUnit: DistanceUnit;
   completedMilesText: string;
   completedTimeText: string;
   splitsText: string;
@@ -24,6 +26,7 @@ export function AthleteQuickFeedbackSheet({
   title,
   subtitle,
   planSummary,
+  distanceUnit,
   completedMilesText,
   completedTimeText,
   splitsText,
@@ -78,7 +81,9 @@ export function AthleteQuickFeedbackSheet({
 
             <View style={{ marginTop: 14, gap: 12 }}>
               <View>
-                <Text style={{ fontWeight: "900", color: "#334155" }}>Completed distance</Text>
+                <Text style={{ fontWeight: "900", color: "#334155" }}>
+                  Completed distance ({distanceUnitLabel(distanceUnit)})
+                </Text>
                 <TextInput
                   value={completedMilesText}
                   onChangeText={onChangeCompletedMiles}

@@ -3,6 +3,15 @@ import type { TeamWorkoutBatchHeaderRow } from "./teamWorkoutBatchHeadersCloud";
 import type { TeamWorkoutRow } from "./teamWorkoutsCloud";
 import type { MileageValue } from "./types";
 import { formatMileage } from "./mileagePlan";
+import {
+  convertDistance,
+  convertMileageValue,
+  distanceUnitLabel,
+  formatDistanceForUnit,
+  normalizeOptionalDistanceUnit,
+  roundDistance,
+  type DistanceUnit,
+} from "./units";
 
 export function cleanDisplayText(value: unknown): string {
   return String(value ?? "").trim();
@@ -210,16 +219,51 @@ export function buildWorkoutFlowSections({
   return sections;
 }
 
-export function formatPrescribedLabel(value?: MileageValue | string | null): string {
+export function formatPrescribedLabel(
+  value?: MileageValue | string | null,
+  unit: DistanceUnit = "mi"
+): string {
   const raw = typeof value === "string" ? cleanDisplayText(value) : formatMileage(value ?? undefined);
   if (!raw) return "";
   if (/(:|\bmi\b|\bmile\b|\bmiles\b|\bkm\b|\bkilometer\b|\bkilometers\b|\bxt\b|\bmin\b)/i.test(raw)) return raw;
-  return `${raw} mi`;
+  return `${raw} ${distanceUnitLabel(unit)}`;
 }
 
-export function formatPlannedDistanceLabel(value: unknown, unit: unknown): string {
+export function formatPlannedDistanceLabel(
+  value: unknown,
+  unit: unknown,
+  targetUnit?: DistanceUnit | null,
+  fallbackSourceUnit: DistanceUnit = "mi"
+): string {
   const numeric = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(numeric)) return "";
-  const normalizedUnit = cleanDisplayText(unit).toLowerCase() === "km" ? "km" : "mi";
-  return `${Number.isInteger(numeric) ? numeric : Number(numeric.toFixed(2))} ${normalizedUnit}`;
+  const normalizedUnit = normalizeOptionalDistanceUnit(cleanDisplayText(unit).toLowerCase()) ?? fallbackSourceUnit;
+  const displayUnit = targetUnit ?? normalizedUnit;
+  return formatDistanceForUnit(convertDistance(numeric, normalizedUnit, displayUnit), displayUnit);
+}
+
+export function formatMileageValueForUnit(
+  value: MileageValue | undefined,
+  sourceUnit: DistanceUnit,
+  targetUnit: DistanceUnit
+): string {
+  const roundForDisplay = (next: MileageValue | undefined): MileageValue | undefined => {
+    if (!next) return next;
+    if (next.kind === "exact") return { ...next, value: roundDistance(next.value, 2) };
+    if (next.kind === "range") {
+      return {
+        ...next,
+        min: roundDistance(next.min, 2),
+        max: roundDistance(next.max, 2),
+      };
+    }
+    if (next.kind === "choice") {
+      return {
+        ...next,
+        options: next.options.map((option) => roundForDisplay(option) ?? option) as [MileageValue, MileageValue],
+      };
+    }
+    return next;
+  };
+  return formatMileage(roundForDisplay(convertMileageValue(value, sourceUnit, targetUnit)));
 }

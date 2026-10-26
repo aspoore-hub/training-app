@@ -114,6 +114,7 @@ export type TeamAthlete = {
   left_at?: string | null;
   team_start_date?: string | null;
   team_end_date?: string | null;
+  preferred_distance_unit?: "mi" | "km" | null;
   created_at?: string;
   updated_at?: string;
 };
@@ -125,7 +126,7 @@ export async function listTeamAthletes(): Promise<TeamAthlete[]> {
 
   const { data, error } = await supabase
     .from("team_athletes")
-    .select("id,team_id,first_name,last_name,display_name,grad_year,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,created_at,updated_at")
+    .select("id,team_id,first_name,last_name,display_name,grad_year,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,preferred_distance_unit,created_at,updated_at")
     .eq("team_id", teamId)
     .order("last_name", { ascending: true, nullsFirst: false })
     .order("first_name", { ascending: true, nullsFirst: false })
@@ -141,7 +142,7 @@ export async function getTeamAthlete(id: string): Promise<TeamAthlete | null> {
 
   const { data, error } = await supabase
     .from("team_athletes")
-    .select("id,team_id,first_name,last_name,display_name,grad_year,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,created_at,updated_at")
+    .select("id,team_id,first_name,last_name,display_name,grad_year,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,preferred_distance_unit,created_at,updated_at")
     .eq("team_id", teamId)
     .eq("id", id)
     .maybeSingle();
@@ -152,7 +153,7 @@ export async function getTeamAthlete(id: string): Promise<TeamAthlete | null> {
 
 export async function updateTeamAthlete(
   id: string,
-  patch: Partial<Pick<TeamAthlete, "first_name" | "last_name" | "display_name" | "email" | "team_start_date" | "team_end_date">>
+  patch: Partial<Pick<TeamAthlete, "first_name" | "last_name" | "display_name" | "email" | "team_start_date" | "team_end_date" | "preferred_distance_unit">>
 ) {
   const teamId = await getCurrentTeamId();
   if (!teamId) throw new Error("No current team");
@@ -166,6 +167,7 @@ export async function updateTeamAthlete(
     email?: string | null;
     team_start_date?: string | null;
     team_end_date?: string | null;
+    preferred_distance_unit?: "mi" | "km" | null;
   } = {
     updated_at: new Date().toISOString(),
   };
@@ -176,13 +178,18 @@ export async function updateTeamAthlete(
   if (patch.email !== undefined) payload.email = patch.email?.trim() || null;
   if (patch.team_start_date !== undefined) payload.team_start_date = patch.team_start_date?.trim() || null;
   if (patch.team_end_date !== undefined) payload.team_end_date = patch.team_end_date?.trim() || null;
+  if (patch.preferred_distance_unit !== undefined) {
+    payload.preferred_distance_unit = patch.preferred_distance_unit === "mi" || patch.preferred_distance_unit === "km"
+      ? patch.preferred_distance_unit
+      : null;
+  }
 
   const { data, error } = await supabase
     .from("team_athletes")
     .update(payload)
     .eq("team_id", teamId)
     .eq("id", id)
-    .select("id,team_id,first_name,last_name,display_name,grad_year,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,created_at,updated_at")
+    .select("id,team_id,first_name,last_name,display_name,grad_year,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,preferred_distance_unit,created_at,updated_at")
     .single();
 
   if (error) throw error;
@@ -253,8 +260,9 @@ export async function createTeamAthlete(
       team_start_date: teamStartDate,
       team_end_date: null,
       left_at: null,
+      preferred_distance_unit: null,
     })
-    .select("id,team_id,first_name,last_name,display_name,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,created_at,updated_at")
+    .select("id,team_id,first_name,last_name,display_name,email,claimed_user_id,roster_status,left_at,team_start_date,team_end_date,preferred_distance_unit,created_at,updated_at")
     .single();
 
   if (error) {

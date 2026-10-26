@@ -31,6 +31,13 @@ import { listVisibleAthleteWorkoutsInRange, type TeamWorkoutRow } from "../../li
 import { teamDataStore, visibleMileageAthleteWeekKey } from "../../lib/teamDataStore";
 import { loadWeekStartSetting } from "../../lib/settings";
 import { SegmentedViewToggle } from "../../components/shared/SegmentedViewToggle";
+import {
+  convertDistance,
+  distanceUnitLabel,
+  getAthleteDistanceUnit,
+  loadDistanceUnit,
+  type DistanceUnit,
+} from "../../lib/units";
 
 const SELECTED_KEY = "training_app_selected_athlete_v1";
 const ATHLETE_MONTH_UI_STATE_KEY = "training_app_athlete_month_ui_state_v1";
@@ -252,6 +259,8 @@ export default function AthleteMonthCalendar() {
   const [anchorMonth, setAnchorMonth] = useState(() => monthStart(new Date()));
   const [selectedDateISO, setSelectedDateISO] = useState<string>(toISODate(new Date()));
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
+  const [teamDistanceUnit, setTeamDistanceUnit] = useState<DistanceUnit>("mi");
+  const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [athletePaceOverrides, setAthletePaceOverrides] = useState<AthletePaceOverrides>({});
   const [mileageFeedbackEntries, setMileageFeedbackEntries] = useState<MileageSessionFeedback[]>([]);
   const [feedbackFlagsEnabled, setFeedbackFlagsEnabled] = useState(false);
@@ -301,6 +310,7 @@ export default function AthleteMonthCalendar() {
         feedbackEntries,
         flagSettings,
         athleteSession,
+        loadedTeamDistanceUnit,
       ] = await Promise.all([
         loadJSON<string | null>(SELECTED_KEY, null),
         loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
@@ -308,7 +318,8 @@ export default function AthleteMonthCalendar() {
         loadAthletePaceOverrides(),
         loadMileageFeedback(),
         loadFeedbackFlagSettings(),
-        resolveAthleteSessionContext(),
+        resolveAthleteSessionContext(true),
+        loadDistanceUnit(),
       ]);
 
       const selectedId = String(athleteSession.athleteId ?? selected ?? "").trim();
@@ -316,6 +327,8 @@ export default function AthleteMonthCalendar() {
       setSelectedAthleteId(selectedId || null);
       const selectedName = selectedId ? String(athleteSession.athleteName ?? "").trim() || null : null;
       setSelectedAthleteLabel(selectedName);
+      setTeamDistanceUnit(loadedTeamDistanceUnit);
+      setDistanceUnit(getAthleteDistanceUnit(athleteSession, loadedTeamDistanceUnit));
 
       setCategories(normalizeCategories(storedCategories));
       setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
@@ -552,7 +565,10 @@ export default function AthleteMonthCalendar() {
       const pm = day?.pm;
 
       const milesSum = sumMileage([am, pm], effectivePaceSecPerMile);
-      const distanceLabel = formatRoundedRange(milesSum.min, milesSum.max);
+      const distanceLabel = formatRoundedRange(
+        convertDistance(milesSum.min, teamDistanceUnit, distanceUnit),
+        convertDistance(milesSum.max, teamDistanceUnit, distanceUnit)
+      );
 
       const amXt = xtRangeForValue(am);
       const pmXt = xtRangeForValue(pm);
@@ -564,7 +580,7 @@ export default function AthleteMonthCalendar() {
       map.set(cell.dateISO, { distanceLabel, xtLabel });
     }
     return map;
-  }, [monthCells, visibleDayPlanByDate, effectivePaceSecPerMile]);
+  }, [distanceUnit, effectivePaceSecPerMile, monthCells, teamDistanceUnit, visibleDayPlanByDate]);
 
   const workoutCountByDate = useMemo(() => {
     const map = new Map<string, number>();
@@ -748,6 +764,8 @@ export default function AthleteMonthCalendar() {
       </View>
       <Text style={styles.browseHint}>Tap any day to open the daily view</Text>
       <View style={styles.xtLegendRow}>
+        <MaterialIcons name="directions-run" size={12} color="#6b7280" />
+        <Text style={styles.xtLegendText}>Running distance ({distanceUnitLabel(distanceUnit)})</Text>
         <Ionicons name="bicycle-outline" size={12} color="#6b7280" />
         <Text style={styles.xtLegendText}>Cross-training minutes</Text>
       </View>
@@ -763,7 +781,7 @@ export default function AthleteMonthCalendar() {
 
                         // Monthly-only compact display:
                         // - XT session => "XT"
-                        // - Otherwise show miles only (time converted via coach pace)
+                        // - Otherwise show distance in the athlete's unit (time converted via coach pace)
                         const needsFeedback = missingFeedbackByDate.has(iso);
                         const isToday = iso === todayISO;
                         const isOffWorkoutDay = offWorkoutDates.has(iso);

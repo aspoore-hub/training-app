@@ -34,6 +34,12 @@ import {
 import { CoachMobileWorkoutCard, type CoachMobileWorkoutGroup } from "./CoachMobileWorkoutCard";
 import { CoachMobileWorkoutDetail } from "./CoachMobileWorkoutDetail";
 import { CoachMobileRoutineBrowser } from "./coach-mobile-routine-browser";
+import {
+  convertDistance,
+  formatDistanceForUnit,
+  loadDistanceUnit,
+  type DistanceUnit,
+} from "../../../lib/units";
 
 type MobileSection = "home" | "calendar" | "logs" | "roster" | "more";
 
@@ -135,6 +141,7 @@ function groupWorkouts(
     batchNotesByWorkoutId: Map<string, string>;
     routineById: Map<string, AuxiliaryRoutine>;
     rosterById: Map<string, ReturnType<typeof teamDataStore.use>["roster"][number]>;
+    distanceUnit: DistanceUnit;
   }
 ): CoachMobileWorkoutGroup[] {
   const map = new Map<string, TeamWorkoutRow[]>();
@@ -192,7 +199,9 @@ function groupWorkouts(
         time: firstCleanValue(groupedRows, "time_text"),
         location: firstCleanValue(groupedRows, "location"),
         plannedDistanceLabels: uniqueClean(
-          groupedRows.map((row) => formatPlannedDistanceLabel(row.planned_distance, row.planned_distance_unit))
+          groupedRows.map((row) =>
+            formatPlannedDistanceLabel(row.planned_distance, row.planned_distance_unit, options.distanceUnit, options.distanceUnit)
+          )
         ),
         preRoutineIds,
         postRoutineIds,
@@ -267,6 +276,7 @@ export function CoachMobileShell() {
   const [drillById, setDrillById] = useState<Map<string, DrillLibraryItem>>(new Map());
   const [routineFolders, setRoutineFolders] = useState<RoutineFolder[]>([]);
   const [categories, setCategories] = useState<WorkoutCategory[]>([]);
+  const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [routineDataError, setRoutineDataError] = useState<string | null>(null);
   const [loadingRoutineData, setLoadingRoutineData] = useState(false);
   const [loadingWorkouts, setLoadingWorkouts] = useState(false);
@@ -299,12 +309,14 @@ export function CoachMobileShell() {
       listTeamWorkoutsInRange(startISO, endISO),
       listTeamWorkoutBatchHeadersInRange(startISO, endISO),
       loadJSON<WorkoutCategory[]>(CATEGORIES_KEY, []),
+      loadDistanceUnit(),
     ])
-      .then(([rows, headers, storedCategories]) => {
+      .then(([rows, headers, storedCategories, loadedDistanceUnit]) => {
         if (cancelled) return;
         setWorkouts(rows);
         setBatchHeaders(headers);
         setCategories(normalizeCategories(storedCategories));
+        setDistanceUnit(loadedDistanceUnit);
       })
       .catch((error) => {
         if (!cancelled) setWorkoutError(error instanceof Error ? error.message : "Could not load workouts.");
@@ -357,8 +369,8 @@ export function CoachMobileShell() {
     [teamStore.roster]
   );
   const groupedWorkouts = useMemo(
-    () => groupWorkouts(workouts, { batchNotesByWorkoutId, routineById, rosterById }),
-    [batchNotesByWorkoutId, rosterById, routineById, workouts]
+    () => groupWorkouts(workouts, { batchNotesByWorkoutId, routineById, rosterById, distanceUnit }),
+    [batchNotesByWorkoutId, distanceUnit, rosterById, routineById, workouts]
   );
   const todayWorkouts = useMemo(() => groupedWorkouts.filter((item) => item.dateISO === todayISO()), [groupedWorkouts]);
   const upcomingWorkouts = useMemo(() => groupedWorkouts.filter((item) => item.dateISO >= todayISO()).slice(0, 8), [groupedWorkouts]);
@@ -536,7 +548,9 @@ export function CoachMobileShell() {
                 </Text>
                 <Text style={{ color: "#334155", fontWeight: "700" }}>{row.title}</Text>
                 <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
-                  {row.completed_miles != null ? <Pill>{`${row.completed_miles} mi`}</Pill> : null}
+                  {row.completed_miles != null ? (
+                    <Pill>{formatDistanceForUnit(convertDistance(row.completed_miles, "mi", distanceUnit), distanceUnit)}</Pill>
+                  ) : null}
                   {row.completed_time_text ? <Pill>{row.completed_time_text}</Pill> : null}
                   {row.splits_or_pace ? <Pill>{row.splits_or_pace}</Pill> : null}
                 </View>

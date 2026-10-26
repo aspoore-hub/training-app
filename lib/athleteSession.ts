@@ -1,6 +1,7 @@
 import { loadJSON } from "./storage";
 import { getActiveAccountContext } from "./accountContexts";
 import { getCurrentTeamId, getMyClaimedAthleteProfileId, getTeamAthlete } from "./team";
+import { normalizeOptionalDistanceUnit, type DistanceUnit } from "./units";
 
 const SELECTED_KEY = "training_app_selected_athlete_v1";
 
@@ -8,6 +9,7 @@ export type AthleteSessionContext = {
   teamId: string;
   athleteId: string | null;
   athleteName: string | null;
+  preferredDistanceUnit: DistanceUnit | null;
 };
 
 let cached: AthleteSessionContext | null = null;
@@ -18,15 +20,17 @@ async function resolveFresh(): Promise<AthleteSessionContext> {
   if (activeContext?.kind === "athlete" && activeContext.teamId) {
     const athleteId = String(activeContext.athleteId ?? "").trim() || null;
     let athleteName = String(activeContext.athleteName ?? "").trim() || null;
-    if (athleteId && !athleteName) {
+    let preferredDistanceUnit: DistanceUnit | null = null;
+    if (athleteId) {
       try {
         const athlete = await getTeamAthlete(athleteId);
-        athleteName = String(athlete?.display_name ?? "").trim() || null;
+        athleteName = String(athlete?.display_name ?? "").trim() || athleteName;
+        preferredDistanceUnit = normalizeOptionalDistanceUnit(athlete?.preferred_distance_unit);
       } catch {
-        athleteName = null;
+        preferredDistanceUnit = null;
       }
     }
-    return { teamId: activeContext.teamId, athleteId, athleteName };
+    return { teamId: activeContext.teamId, athleteId, athleteName, preferredDistanceUnit };
   }
 
   const [selected, teamId] = await Promise.all([
@@ -38,16 +42,18 @@ async function resolveFresh(): Promise<AthleteSessionContext> {
   const athleteId = String(claimedAthleteId ?? fallbackSelected).trim() || null;
 
   let athleteName: string | null = null;
+  let preferredDistanceUnit: DistanceUnit | null = null;
   if (athleteId) {
     try {
       const athlete = await getTeamAthlete(athleteId);
       athleteName = String(athlete?.display_name ?? "").trim() || null;
+      preferredDistanceUnit = normalizeOptionalDistanceUnit(athlete?.preferred_distance_unit);
     } catch {
       athleteName = null;
     }
   }
 
-  return { teamId, athleteId, athleteName };
+  return { teamId, athleteId, athleteName, preferredDistanceUnit };
 }
 
 export async function resolveAthleteSessionContext(forceRefresh: boolean = false): Promise<AthleteSessionContext> {

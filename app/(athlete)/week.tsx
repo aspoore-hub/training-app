@@ -10,7 +10,13 @@ import { loadJSON, saveJSON } from "../../lib/storage";
 import { resolveAthleteSessionContext } from "../../lib/athleteSession";
 import { ATHLETE_CALENDAR_VIEW_STATE_KEY, type AthleteCalendarViewState } from "../../lib/athleteCalendarView";
 import { loadRosterNameMapForTeam } from "../../lib/rosterNameMap";
-import { distanceUnitLabel, loadDistanceUnit, type DistanceUnit } from "../../lib/units";
+import {
+  convertDistance,
+  distanceUnitLabel,
+  getAthleteDistanceUnit,
+  loadDistanceUnit,
+  type DistanceUnit,
+} from "../../lib/units";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../lib/pace";
 import { loadAthletePaceOverrides, resolveAthletePaceSeconds, type AthletePaceOverrides } from "../../lib/athletePace";
 import type { AthleteWorkout, MileageValue, WeekStartDay, WorkoutCategory } from "../../lib/types";
@@ -18,7 +24,6 @@ import { CATEGORIES_KEY, categoryColorByName, normalizeCategories } from "../../
 import {
   getWeekStartISO,
   getWeekIndex,
-  formatMileage,
   formatSum,
   parseMileageInput,
   sumMileage,
@@ -31,6 +36,7 @@ import { loadCoachWeekLabels, loadWeekStartSetting, type CoachWeekLabels } from 
 import { getWeekLabelTone, getWeekLabelToneColors } from "../../lib/weekLabelStyle";
 import { SegmentedViewToggle } from "../../components/shared/SegmentedViewToggle";
 import { splitDisplayNameForEdit } from "../../lib/athleteName";
+import { formatMileageValueForUnit } from "../../lib/athleteWorkoutDisplay";
 
 const SELECTED_KEY = "training_app_selected_athlete_v1";
 
@@ -330,6 +336,7 @@ export default function AthleteWeekView() {
   const [teamWeekRows, setTeamWeekRows] = useState<TeamWorkoutRow[]>([]);
   const [rosterNameById, setRosterNameById] = useState<Map<string, string>>(new Map());
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
+  const [teamDistanceUnit, setTeamDistanceUnit] = useState<DistanceUnit>("mi");
   const [paceSecPerMile, setPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
   const [athletePaceOverrides, setAthletePaceOverrides] = useState<AthletePaceOverrides>({});
   const lastLoadRef = useRef<{ key: string; ts: number }>({ key: "", ts: 0 });
@@ -376,7 +383,7 @@ export default function AthleteWeekView() {
       loadCoachWeekLabels(),
     ]);
 
-    const athleteSession = await resolveAthleteSessionContext();
+    const athleteSession = await resolveAthleteSessionContext(true);
     const teamId = athleteSession.teamId;
     const rosterMap = await loadRosterNameMapForTeam(teamId);
     if (!isLatestLoad()) return;
@@ -387,7 +394,8 @@ export default function AthleteWeekView() {
     const selectedName = selectedId ? String(athleteSession.athleteName ?? "").trim() || null : null;
     setSelectedAthleteLabel(selectedName);
 
-    setDistanceUnit(unit);
+    setTeamDistanceUnit(unit);
+    setDistanceUnit(getAthleteDistanceUnit(athleteSession, unit));
     setPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
     setAthletePaceOverrides(paceOverrides ?? {});
     setCategories(normalizeCategories(storedCategories));
@@ -519,13 +527,16 @@ export default function AthleteWeekView() {
       xt = addSecs(xt, toXTSecRange(pm));
     }
     const miles = sumMileage(runningValues, effectivePaceSecPerMile);
-    const runningCore = formatSum(miles);
+    const runningCore = formatSum({
+      min: convertDistance(miles.min, teamDistanceUnit, distanceUnit),
+      max: convertDistance(miles.max, teamDistanceUnit, distanceUnit),
+    });
 
     return {
       milesLabel: runningCore ? `${runningCore} ${distanceUnitLabel(distanceUnit)}` : "",
       xtLabel: formatXTTotalCoachStyle(xt),
     };
-  }, [distanceUnit, effectivePaceSecPerMile, mileageByDaySession]);
+  }, [distanceUnit, effectivePaceSecPerMile, mileageByDaySession, teamDistanceUnit]);
 
   const workoutsByDate = useMemo(() => {
     const map = new Map<string, AthleteWorkout[]>();
@@ -687,8 +698,8 @@ export default function AthleteWeekView() {
               const amValue = mileageByDaySession.get(`${weekIdx}:AM`);
               const pmValue = mileageByDaySession.get(`${weekIdx}:PM`);
               const isNCAAOffDay = !!ncaaOffByDay.get(weekIdx);
-              const amText = formatMileage(amValue);
-              const pmText = formatMileage(pmValue);
+              const amText = formatMileageValueForUnit(amValue, teamDistanceUnit, distanceUnit);
+              const pmText = formatMileageValueForUnit(pmValue, teamDistanceUnit, distanceUnit);
               const workouts = workoutsByDate.get(dRow.dateISO) ?? [];
               const dayHasBuiltInOff = workouts.some((w) => workoutCategoryNames(w).some((name) => isBuiltInOffCategory(name)));
               const amWorkouts = workouts.filter((w) => String((w as any)?.session ?? "PM").toUpperCase() === "AM");
@@ -697,8 +708,8 @@ export default function AthleteWeekView() {
               const hasPMLoad = hasPositiveTrainingAssignment(pmValue);
               const showAMBlock = isNCAAOffDay || hasAMLoad || amWorkouts.length > 0;
               const showPMBlock = isNCAAOffDay || hasPMLoad || pmWorkouts.length > 0;
-              const amPlanned = isNCAAOffDay ? "Off day" : amText || "0 mi";
-              const pmPlanned = isNCAAOffDay ? "Off day" : pmText || "0 mi";
+              const amPlanned = isNCAAOffDay ? "Off day" : amText || `0 ${distanceUnitLabel(distanceUnit)}`;
+              const pmPlanned = isNCAAOffDay ? "Off day" : pmText || `0 ${distanceUnitLabel(distanceUnit)}`;
 
               return (
                 <Pressable
@@ -780,7 +791,9 @@ export default function AthleteWeekView() {
 
                           if (isChoiceMileageValue(section.value)) {
                             const optionValues = Array.isArray((section.value as any).options) ? (section.value as any).options : [];
-                            const optionTexts = optionValues.map((option: MileageValue) => formatMileage(option)).filter((text: string) => Boolean(String(text ?? "").trim()));
+                            const optionTexts = optionValues
+                              .map((option: MileageValue) => formatMileageValueForUnit(option, teamDistanceUnit, distanceUnit))
+                              .filter((text: string) => Boolean(String(text ?? "").trim()));
                             if (optionTexts.length > 0) {
                               return (
                                 <View style={styles.sessionChoiceValueRow}>

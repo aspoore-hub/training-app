@@ -45,6 +45,7 @@ export type TeamAthlete = {
   left_at?: string | null;
   team_start_date?: string | null;
   team_end_date?: string | null;
+  preferred_distance_unit?: "mi" | "km" | null;
 };
 
 export type TeamAthleteRosterStatus = "active" | "inactive" | "graduated" | "transferred" | "archived";
@@ -742,7 +743,7 @@ async function refreshRoster(opts?: { force?: boolean; throwOnError?: boolean })
 
     const { data, error } = await supabase
       .from("team_athletes")
-      .select("id, team_id, display_name, email, claimed_user_id, first_name, last_name, roster_status, left_at, team_start_date, team_end_date")
+      .select("id, team_id, display_name, email, claimed_user_id, first_name, last_name, roster_status, left_at, team_start_date, team_end_date, preferred_distance_unit")
       .eq("team_id", teamId)
       .order("last_name", { ascending: true, nullsFirst: true })
       .order("first_name", { ascending: true, nullsFirst: true });
@@ -791,6 +792,7 @@ async function updateAthlete(
     email?: string | null;
     team_start_date?: string | null;
     team_end_date?: string | null;
+    preferred_distance_unit?: "mi" | "km" | null;
   }
 ) {
   incLoading();
@@ -813,6 +815,7 @@ async function updateAthlete(
       email?: string | null;
       team_start_date?: string | null;
       team_end_date?: string | null;
+      preferred_distance_unit?: "mi" | "km" | null;
     } = {};
     if ("first_name" in patch) update.first_name = patch.first_name?.trim() || null;
     if ("last_name" in patch) update.last_name = patch.last_name?.trim() || null;
@@ -820,6 +823,11 @@ async function updateAthlete(
     if ("email" in patch) update.email = patch.email ?? null;
     if ("team_start_date" in patch) update.team_start_date = patch.team_start_date ?? null;
     if ("team_end_date" in patch) update.team_end_date = patch.team_end_date ?? null;
+    if ("preferred_distance_unit" in patch) {
+      update.preferred_distance_unit = patch.preferred_distance_unit === "mi" || patch.preferred_distance_unit === "km"
+        ? patch.preferred_distance_unit
+        : null;
+    }
 
     const { error } = await supabase
       .from("team_athletes")

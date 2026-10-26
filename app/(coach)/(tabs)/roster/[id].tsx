@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Platform, ScrollView, View } from "react-native";
+import { Alert, Platform, Pressable, ScrollView, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 
@@ -35,10 +35,17 @@ import { hasMileageFeedback, hasWorkoutFeedback, parseNumericLike } from "../../
 import { loadWeekStartSetting } from "../../../../lib/settings";
 import { getWeekIndex, getWeekStartISO, parseISODate, toISODate } from "../../../../lib/mileagePlan";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../../../lib/pace";
+import { loadAthletePaceOverrides, resolveAthletePaceSeconds } from "../../../../lib/athletePace";
 import { formatParsedWorkoutEntry, parseWorkoutEntryValue, workoutEntryMilesRange, workoutEntryXTRange } from "../../../../lib/workoutEntryParser";
 import type { WeekStartDay } from "../../../../lib/types";
 import { canEditRoster, getCurrentTeamRole, type TeamRole } from "../../../../lib/teamPermissions";
 import { getAthleteDisplayName, getAthleteFirstName, getAthleteLastName } from "../../../../lib/athleteName";
+import {
+  convertDistance,
+  formatDistanceForUnit,
+  loadDistanceUnit,
+  type DistanceUnit,
+} from "../../../../lib/units";
 
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
@@ -71,18 +78,17 @@ function normalizeSession(value: string | undefined): "AM" | "PM" {
   return String(value ?? "PM").toUpperCase() === "AM" ? "AM" : "PM";
 }
 
-function formatMilesRange(minMiles: number, maxMiles: number): string {
-  const min = Math.round(minMiles * 10) / 10;
-  const max = Math.round(maxMiles * 10) / 10;
+function formatDistanceRange(minDistance: number, maxDistance: number, unit: DistanceUnit): string {
+  const min = Math.round(minDistance * 10) / 10;
+  const max = Math.round(maxDistance * 10) / 10;
   if (min === 0 && max === 0) return "—";
-  if (min === max) return `${min} mi`;
-  return `${min}-${max} mi`;
+  if (min === max) return formatDistanceForUnit(min, unit, { decimalPlaces: 1 });
+  return `${formatDistanceForUnit(min, unit, { decimalPlaces: 1, includeUnit: false })}-${formatDistanceForUnit(max, unit, { decimalPlaces: 1 })}`;
 }
 
-function formatMilesValue(value: number): string {
+function formatCompletedDistanceValue(value: number, unit: DistanceUnit): string {
   if (!Number.isFinite(value) || value <= 0) return "—";
-  const rounded = Math.round(value * 10) / 10;
-  return `${rounded} mi`;
+  return formatDistanceForUnit(convertDistance(value, "mi", unit), unit, { decimalPlaces: 1 });
 }
 
 function formatXTRangeMinutes(minSec: number, maxSec: number): string {
@@ -243,6 +249,7 @@ export default function CoachEditTeamAthlete() {
   const [email, setEmail] = useState("");
   const [teamStartDate, setTeamStartDate] = useState("");
   const [teamEndDate, setTeamEndDate] = useState("");
+  const [preferredDistanceUnit, setPreferredDistanceUnit] = useState<DistanceUnit | null>(null);
   const [claimed, setClaimed] = useState(false);
   const [loginAccessMessage, setLoginAccessMessage] = useState<string | null>(null);
   const [loginAccessTone, setLoginAccessTone] = useState<"success" | "mutedText" | "danger">("mutedText");
@@ -257,10 +264,23 @@ export default function CoachEditTeamAthlete() {
   const [seasonTrainingError, setSeasonTrainingError] = useState<string | null>(null);
   const [seasonTrainingWeekStartsOn, setSeasonTrainingWeekStartsOn] = useState<WeekStartDay>(1);
   const [seasonTrainingPaceSecPerMile, setSeasonTrainingPaceSecPerMile] = useState<number>(DEFAULT_PACE_SEC);
+  const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [seasonTrainingWorkoutRows, setSeasonTrainingWorkoutRows] = useState<TeamWorkoutRow[]>([]);
   const [seasonTrainingMileageFeedback, setSeasonTrainingMileageFeedback] = useState<MileageSessionFeedback[]>([]);
   const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
   const readOnlyRoster = !canEditRoster(currentTeamRole);
+
+  useEffect(() => {
+    let active = true;
+    loadDistanceUnit()
+      .then((unit) => {
+        if (active) setDistanceUnit(unit);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // ---- IMPORTANT: prevent navigation loops on web (idempotent nav) ----
   const didNavigateRef = useRef(false);
@@ -337,6 +357,11 @@ export default function CoachEditTeamAthlete() {
         setEmail(String(a.email ?? ""));
         setTeamStartDate(String(a.team_start_date ?? ""));
         setTeamEndDate(String(a.team_end_date ?? ""));
+        setPreferredDistanceUnit(
+          a.preferred_distance_unit === "mi" || a.preferred_distance_unit === "km"
+            ? a.preferred_distance_unit
+            : null
+        );
         setClaimed(!!a.claimed_user_id);
         setLoginAccessMessage(!!a.claimed_user_id ? "Linked" : null);
         setLoginAccessTone(!!a.claimed_user_id ? "success" : "mutedText");
@@ -459,15 +484,20 @@ export default function CoachEditTeamAthlete() {
         setSeasonTrainingWeekStartsOn(weekStartResult.normalized === "sunday" ? 0 : 1);
       } catch {}
       try {
-        const pace = await loadPaceSecondsPerMile();
+        const [pace, paceOverrides] = await Promise.all([
+          loadPaceSecondsPerMile(),
+          loadAthletePaceOverrides(),
+        ]);
         if (!active) return;
-        setSeasonTrainingPaceSecPerMile(pace ?? DEFAULT_PACE_SEC);
+        setSeasonTrainingPaceSecPerMile(
+          resolveAthletePaceSeconds(athleteId, paceOverrides, pace ?? DEFAULT_PACE_SEC)
+        );
       } catch {}
     })();
     return () => {
       active = false;
     };
-  }, []);
+  }, [athleteId]);
 
   useEffect(() => {
     if (!athleteId || !selectedTrainingResolvedWindow) {
@@ -572,7 +602,7 @@ export default function CoachEditTeamAthlete() {
       );
       const distancePlan =
         typeof row.planned_distance === "number" && Number.isFinite(row.planned_distance)
-          ? `${Math.round(row.planned_distance * 100) / 100} ${String(row.planned_distance_unit ?? "mi").toLowerCase()}`
+          ? `${Math.round(row.planned_distance * 100) / 100} ${String(row.planned_distance_unit ?? distanceUnit).toLowerCase()}`
           : "";
       rows.push({
         key: `workout:${key}:${row.id}`,
@@ -621,6 +651,7 @@ export default function CoachEditTeamAthlete() {
     });
   }, [
     athleteId,
+    distanceUnit,
     s.mileageCellsByWeek,
     seasonTrainingMileageFeedback,
     selectedTrainingResolvedWindow,
@@ -1038,6 +1069,7 @@ export default function CoachEditTeamAthlete() {
         email: cleanEmail || null,
         team_start_date: start || null,
         team_end_date: end || null,
+        preferred_distance_unit: preferredDistanceUnit,
       });
       if (start && start !== previousTeamStartDate) {
         await teamDataStore.actions.applyDefaultPriorSeasonExclusionsForAthlete(athleteId, start);
@@ -1355,6 +1387,43 @@ export default function CoachEditTeamAthlete() {
           keyboardType="email-address"
           editable={!readOnlyRoster}
         />
+        <View style={{ gap: 7 }}>
+          <AppText variant="caption" color="mutedText">Distance unit preference</AppText>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+            {([
+              { value: null, label: "Team default" },
+              { value: "mi" as const, label: "Miles" },
+              { value: "km" as const, label: "Kilometers" },
+            ]).map((option) => {
+              const selected = preferredDistanceUnit === option.value;
+              return (
+                <Pressable
+                  key={option.value ?? "team-default"}
+                  disabled={readOnlyRoster}
+                  onPress={() => setPreferredDistanceUnit(option.value)}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: selected, disabled: readOnlyRoster }}
+                  style={{
+                    borderWidth: 1,
+                    borderColor: selected ? "#111827" : "#cbd5e1",
+                    backgroundColor: selected ? "#111827" : "#ffffff",
+                    borderRadius: 999,
+                    paddingHorizontal: 12,
+                    paddingVertical: 8,
+                    opacity: readOnlyRoster ? 0.65 : 1,
+                  }}
+                >
+                  <AppText variant="caption" style={{ color: selected ? "#ffffff" : "#334155", fontWeight: "800" }}>
+                    {option.label}
+                  </AppText>
+                </Pressable>
+              );
+            })}
+          </View>
+          <AppText variant="caption" color="mutedText">
+            Used for athlete workout display and athlete-entered logs. Coach reports still normalize to team settings.
+          </AppText>
+        </View>
         <Divider />
         <View style={{ gap: 4 }}>
           <AppText variant="sub">Team Tenure</AppText>
@@ -1747,12 +1816,12 @@ export default function CoachEditTeamAthlete() {
           <>
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
               <View style={{ minWidth: 140, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, padding: 8 }}>
-                <AppText variant="caption" color="mutedText">Planned miles</AppText>
-                <AppText variant="sub">{formatMilesRange(seasonTrainingTotals.plannedMilesMin, seasonTrainingTotals.plannedMilesMax)}</AppText>
+                <AppText variant="caption" color="mutedText">Planned distance</AppText>
+                <AppText variant="sub">{formatDistanceRange(seasonTrainingTotals.plannedMilesMin, seasonTrainingTotals.plannedMilesMax, distanceUnit)}</AppText>
               </View>
               <View style={{ minWidth: 140, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, padding: 8 }}>
-                <AppText variant="caption" color="mutedText">Completed miles</AppText>
-                <AppText variant="sub">{formatMilesValue(seasonTrainingTotals.completedMiles)}</AppText>
+                <AppText variant="caption" color="mutedText">Completed distance</AppText>
+                <AppText variant="sub">{formatCompletedDistanceValue(seasonTrainingTotals.completedMiles, distanceUnit)}</AppText>
               </View>
               <View style={{ minWidth: 140, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, padding: 8 }}>
                 <AppText variant="caption" color="mutedText">Planned XT</AppText>
@@ -1793,7 +1862,7 @@ export default function CoachEditTeamAthlete() {
                       {formatWeekLabel(week.weekStartISO)}
                     </AppText>
                     <AppText variant="caption" color="mutedText">
-                      Planned {formatMilesRange(week.plannedMilesMin, week.plannedMilesMax)} · Completed {formatMilesValue(week.completedMiles)}
+                      Planned {formatDistanceRange(week.plannedMilesMin, week.plannedMilesMax, distanceUnit)} · Completed {formatCompletedDistanceValue(week.completedMiles, distanceUnit)}
                     </AppText>
                     <AppText variant="caption" color="mutedText">
                       XT {formatXTRangeMinutes(week.plannedXTSecMin, week.plannedXTSecMax)} · Workouts {week.workoutCount}
@@ -1827,7 +1896,7 @@ export default function CoachEditTeamAthlete() {
                       {row.dateISO} · {row.session} · {row.sourceTitle}
                     </AppText>
                     <AppText variant="caption" color="mutedText">
-                      Prescribed: {row.prescribedText ? row.prescribedText : "—"} · Completed: {formatMilesValue(parseNumericLike(row.completedMiles) ?? 0)}
+                      Prescribed: {row.prescribedText ? row.prescribedText : "—"} · Completed: {formatCompletedDistanceValue(parseNumericLike(row.completedMiles) ?? 0, distanceUnit)}
                     </AppText>
                     <AppText variant="caption" color={row.hasFeedback ? "success" : "mutedText"}>
                       {row.hasFeedback ? "Feedback submitted" : "No feedback"}

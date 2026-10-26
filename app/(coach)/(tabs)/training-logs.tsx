@@ -22,6 +22,12 @@ import { isActiveTrainingGroupMembership, teamDataStore } from "../../../lib/tea
 import { formatParsedWorkoutEntry, parseWorkoutEntryValue } from "../../../lib/workoutEntryParser";
 import type { WeekStartDay } from "../../../lib/types";
 import { loadCoachDateCursor, saveCoachDateCursorForDate } from "../../../lib/coachDateCursor";
+import {
+  convertDistance,
+  formatDistanceForUnit,
+  loadDistanceUnit,
+  type DistanceUnit,
+} from "../../../lib/units";
 
 type FeedbackFilter = "submitted" | "missing" | "all";
 type ViewMode = "day" | "week" | "month";
@@ -212,14 +218,10 @@ function formatUpdatedAtLabel(updatedAt: number | null): string | null {
   return new Date(updatedAt).toLocaleString();
 }
 
-function formatCompletedLabel(row: TrainingLogRow): string {
+function formatCompletedLabel(row: TrainingLogRow, unit: DistanceUnit): string {
   const parts: string[] = [];
   if (typeof row.completedMiles === "number" && Number.isFinite(row.completedMiles)) {
-    const rounded = Math.round(row.completedMiles * 100) / 100;
-    const miles = Number.isInteger(rounded)
-      ? String(rounded)
-      : String(rounded).replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "");
-    parts.push(`${miles} mi`);
+    parts.push(formatDistanceForUnit(convertDistance(row.completedMiles, "mi", unit), unit));
   }
   if (row.completedTime) parts.push(row.completedTime);
   return parts.length > 0 ? parts.join(" • ") : "—";
@@ -367,6 +369,7 @@ export default function CoachTrainingLogsTab() {
   const [anchorDateISO, setAnchorDateISO] = useState(() => toISODate(new Date()));
   const [loading, setLoading] = useState(true);
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartDay>(1);
+  const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>("mi");
   const [viewMode, setViewMode] = useState<ViewMode>("day");
   const [roster, setRoster] = useState<TeamRosterAthlete[]>([]);
   const [workoutRows, setWorkoutRows] = useState<TeamWorkoutRow[]>([]);
@@ -434,9 +437,13 @@ export default function CoachTrainingLogsTab() {
   const loadPageData = useCallback(async () => {
     setLoading(true);
     try {
-      const weekStartResult = await loadWeekStartSetting();
+      const [weekStartResult, loadedDistanceUnit] = await Promise.all([
+        loadWeekStartSetting(),
+        loadDistanceUnit(),
+      ]);
       const nextWeekStartsOn: WeekStartDay = weekStartResult.normalized === "sunday" ? 0 : 1;
       setWeekStartsOn(nextWeekStartsOn);
+      setDistanceUnit(loadedDistanceUnit);
 
       const startISO =
         viewMode === "day"
@@ -705,7 +712,7 @@ export default function CoachTrainingLogsTab() {
         : "";
       const distancePlan =
         typeof row.planned_distance === "number" && Number.isFinite(row.planned_distance)
-          ? `${Math.round(row.planned_distance * 100) / 100} ${String(row.planned_distance_unit ?? "mi").toLowerCase()}`
+          ? `${Math.round(row.planned_distance * 100) / 100} ${String(row.planned_distance_unit ?? distanceUnit).toLowerCase()}`
           : "";
       const prescribedText = String(mileagePrescribed || distancePlan).trim() || null;
       const workoutHasFeedback = hasWorkoutFeedback(row);
@@ -856,6 +863,7 @@ export default function CoachTrainingLogsTab() {
     return { submittedLogRows, missingPrescribedRows };
   }, [
     dailyLogEntries,
+    distanceUnit,
     mileageFeedback,
     roster,
     rosterNameById,
@@ -1203,7 +1211,7 @@ export default function CoachTrainingLogsTab() {
             >
               <Text style={{ fontSize: 15, fontWeight: "900", color: "#0f172a" }}>{group.athleteName}</Text>
               {group.rows.map((row) => {
-                const completedLabel = formatCompletedLabel(row);
+                const completedLabel = formatCompletedLabel(row, distanceUnit);
                 const sessionLabel = row.session ? `${row.session} • ${formatSourceLabel(row.sourceType)}` : formatSourceLabel(row.sourceType);
                 return (
                   <Pressable
@@ -2421,7 +2429,7 @@ export default function CoachTrainingLogsTab() {
                 <View style={{ gap: 2 }}>
                   <Text style={{ fontSize: 11, fontWeight: "900", color: "#64748b" }}>Completed distance</Text>
                   <Text style={{ fontSize: 13, color: "#1f2937" }}>
-                    {Math.round(detailRow.completedMiles * 100) / 100} mi
+                    {formatDistanceForUnit(convertDistance(detailRow.completedMiles, "mi", distanceUnit), distanceUnit)}
                   </Text>
                 </View>
               ) : null}

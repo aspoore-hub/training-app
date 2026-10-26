@@ -17,7 +17,7 @@ import { useAppTheme } from "../../../components/ui/useAppTheme";
 import { isActiveTrainingGroupMembership, isAthleteExcludedFromSeason, teamDataStore } from "../../../lib/teamDataStore";
 import type { WeekStartDay } from "../../../lib/types";
 import { DEFAULT_PACE_SEC, loadPaceSecondsPerMile } from "../../../lib/pace";
-import type { DistanceUnit } from "../../../lib/units";
+import { convertDistance, distanceUnitLabel, type DistanceUnit } from "../../../lib/units";
 import { loadAthletePaceOverrides, resolveAthletePaceSeconds, type AthletePaceOverrides } from "../../../lib/athletePace";
 import { useResponsive } from "../../../lib/useResponsive";
 import { loadAthleteDailyLogEntries, type AthleteDailyLogEntry } from "../../../lib/athleteDailyLogEntries";
@@ -2118,6 +2118,8 @@ export default function CoachMileageTab() {
         const [
           nextCoachSettings,
           nextWeekLabels,
+          nextPace,
+          nextAthletePaceOverrides,
         ] = await Promise.all([
           shouldRefreshMeta
             ? loadCoreCoachSettings().catch((error) => {
@@ -2131,6 +2133,14 @@ export default function CoachMileageTab() {
                 return {};
               })
             : Promise.resolve(null),
+          loadPaceSecondsPerMile().catch((error) => {
+            console.warn("[coach-mileage] loadPaceSecondsPerMile on focus failed", error);
+            return null;
+          }),
+          loadAthletePaceOverrides().catch((error) => {
+            console.warn("[coach-mileage] loadAthletePaceOverrides on focus failed", error);
+            return null;
+          }),
           teamDataStore.actions.refreshRoster().catch((error) => {
             console.warn("[coach-mileage] refreshRoster on focus failed", error);
           }),
@@ -2146,6 +2156,12 @@ export default function CoachMileageTab() {
           console.log("[coach-mileage] settings reloaded", {
             distanceUnit: nextCoachSettings.distanceUnit,
           });
+        }
+        if (nextPace != null) {
+          setPaceSecPerMile(nextPace);
+        }
+        if (nextAthletePaceOverrides != null) {
+          setAthletePaceOverrides(nextAthletePaceOverrides);
         }
         if (nextWeekLabels) {
           setWeekLabelsByStart(nextWeekLabels ?? {});
@@ -3381,9 +3397,10 @@ export default function CoachMileageTab() {
       if (!isDateAllowedForAthlete(athleteId, dateISO)) return;
       const miles = parseNumericLike(milesRaw);
       if (miles == null || !Number.isFinite(miles) || miles <= 0) return;
+      const teamDistance = convertDistance(miles, "mi", distanceUnit);
       const weekISO = getWeekStartISO(dateISO, weekStartsOn);
       if (!weekSet.has(weekISO)) return;
-      addRangeTotal(athleteId, weekISO, { min: miles, max: miles });
+      addRangeTotal(athleteId, weekISO, { min: teamDistance, max: teamDistance });
     };
 
     if (seasonMileageMetric === "planned") {
@@ -3456,6 +3473,7 @@ export default function CoachMileageTab() {
     });
   }, [
     athletePaceOverrides,
+    distanceUnit,
     paceSecPerMile,
     resolveSeasonMileageWindowForAthlete,
     s.mileageCellsByWeek,
@@ -4277,7 +4295,7 @@ export default function CoachMileageTab() {
               </Text>
             </Pressable>
             <Text style={{ marginTop: 2, fontSize: fontTiny, fontWeight: "800", color: colors.mutedText }}>
-              {seasonMileageMetric === "planned" ? "Planned miles" : "Submitted miles"}
+              {seasonMileageMetric === "planned" ? "Planned" : "Submitted"} {distanceUnitLabel(distanceUnit)}
             </Text>
           </View>
           {seasonMileageWeekStarts.map((weekISO) => (
@@ -4482,7 +4500,7 @@ export default function CoachMileageTab() {
       <Text style={{ marginTop: 12, fontSize: 12, color: colors.mutedText, fontWeight: "700" }}>
         {seasonMileageMetric === "planned"
           ? "This view shows planned mileage from coach mileage cells. Cross-training time is not converted into mileage."
-          : "This view shows submitted completed miles from athlete workout feedback, mileage logs, and extra run entries. Cross-training time is not converted into mileage."}
+          : `This view shows submitted completed distance from athlete workout feedback, mileage logs, and extra run entries in ${distanceUnitLabel(distanceUnit)}. Cross-training time is not converted into mileage.`}
       </Text>
     </View>
   );
