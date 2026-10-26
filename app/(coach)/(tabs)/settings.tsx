@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Image, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, Image, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { useFocusEffect, useRouter } from "expo-router";
 import { DateField } from "../../../components/ui/DateField";
@@ -7,6 +7,7 @@ import { TeamLogoCropper } from "../../../components/branding/TeamLogoCropper";
 import { supabase } from "../../../lib/supabase";
 import {
   createCoachInvite,
+  getCurrentTeamId,
   listCoachInvites,
   listTeamStaffMembers,
   removeTeamStaffMember,
@@ -97,6 +98,15 @@ function countNonEmptyPracticeDefaults(defaults: PracticeTimeDefaults): number {
   return count;
 }
 
+async function loadSettingsResource<T>(resource: string, load: () => Promise<T>): Promise<T> {
+  try {
+    return await load();
+  } catch (error) {
+    console.error("[settings-screen] resource load failed", { resource, error });
+    throw error;
+  }
+}
+
 function round2(n: number) {
   if (!Number.isFinite(n)) return n;
   return Math.round(n * 100) / 100;
@@ -178,7 +188,10 @@ export default function CoachSettingsTab() {
   const [feedbackStartDateText, setFeedbackStartDateText] = useState("");
   const [feedbackWindowMenuOpen, setFeedbackWindowMenuOpen] = useState(false);
   const [currentTeamRole, setCurrentTeamRole] = useState<TeamRole | null>(null);
-  const settingsReadOnly = normalizeTeamRole(currentTeamRole) === "viewer";
+  const settingsReadOnly = currentTeamRole === "viewer";
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsDataReady, setSettingsDataReady] = useState(false);
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [staffMembers, setStaffMembers] = useState<TeamStaffMember[]>([]);
   const [coachInvites, setCoachInvites] = useState<TeamCoachInvite[]>([]);
   const [coachInviteFirstName, setCoachInviteFirstName] = useState("");
@@ -212,18 +225,18 @@ export default function CoachSettingsTab() {
   const [seasonEndDateText, setSeasonEndDateText] = useState("");
   const [seasonColorText, setSeasonColorText] = useState("");
 
-  const loadStaffAccess = useCallback(async () => {
-    const role = await getCurrentTeamRole();
+  const loadStaffAccess = useCallback(async (teamId?: string | null) => {
+    const role = await loadSettingsResource("staff permission", () => getCurrentTeamRole(teamId));
     setCurrentTeamRole(role);
     if (!role) {
       setStaffMembers([]);
       setCoachInvites([]);
-      return;
+      throw new Error("The signed-in account does not have access to the selected team.");
     }
-    const members = await listTeamStaffMembers();
+    const members = await loadSettingsResource("staff roster", listTeamStaffMembers);
     setStaffMembers(members);
     if (canManageCoaches(role)) {
-      const invites = await listCoachInvites();
+      const invites = await loadSettingsResource("coach invites", listCoachInvites);
       setCoachInvites(invites);
     } else {
       setCoachInvites([]);
@@ -232,21 +245,47 @@ export default function CoachSettingsTab() {
 
   const loadSettingsScreenData = useCallback(
     async (isActive?: () => boolean) => {
+      let resolvedTeamId = "";
+      setSettingsLoading(true);
+      setSettingsDataReady(false);
+      setSettingsLoadError(null);
       try {
+        resolvedTeamId = String(await getCurrentTeamId()).trim();
+        if (!resolvedTeamId) throw new Error("No active team context is selected.");
+        const resolvedRole = await loadSettingsResource("team permission", () => getCurrentTeamRole(resolvedTeamId));
+        if (!resolvedRole) throw new Error("The signed-in account does not have access to the selected team.");
+        if (isActive && !isActive()) return;
+        setCurrentTeamRole(resolvedRole);
+        console.log("[settings-screen] context resolved", {
+          teamId: resolvedTeamId,
+          role: resolvedRole,
+        });
+
         const [paceSec, coreSettings, loadedRoster, loadedOverrides, weekStartResult, feedbackFlagSettings, loadedBranding] = await Promise.all([
-          loadPaceSecondsPerMile(),
-          loadCoreCoachSettings(),
-          getSortableRoster(),
-          loadAthletePaceOverrides(),
-          loadWeekStartSetting(),
-          loadFeedbackFlagSettings(),
-          loadTeamBranding(),
+          loadSettingsResource("default pace", loadPaceSecondsPerMile),
+          loadSettingsResource("app preferences", loadCoreCoachSettings),
+          loadSettingsResource("roster", () => getSortableRoster(resolvedTeamId)),
+          loadSettingsResource("athlete pace overrides", loadAthletePaceOverrides),
+          loadSettingsResource("week start", loadWeekStartSetting),
+          loadSettingsResource("feedback flags", loadFeedbackFlagSettings),
+          loadSettingsResource("team branding", () => loadTeamBranding(resolvedTeamId)),
         ]);
-        await Promise.all([
+        const [seasonsResult, seasonOverridesResult] = await Promise.all([
           teamDataStore.actions.loadTeamSeasons(true),
           teamDataStore.actions.loadAthleteSeasonOverrides(true),
         ]);
-        const defaults = await loadPracticeTimeDefaults();
+        if (seasonsResult.error) {
+          console.error("[settings-screen] resource load failed", { resource: "seasons", error: seasonsResult.error });
+          throw seasonsResult.error;
+        }
+        if (seasonOverridesResult.error) {
+          console.error("[settings-screen] resource load failed", {
+            resource: "athlete season overrides",
+            error: seasonOverridesResult.error,
+          });
+          throw seasonOverridesResult.error;
+        }
+        const defaults = await loadSettingsResource("default practice times", loadPracticeTimeDefaults);
         if (isActive && !isActive()) return;
 
         console.log("[settings] practice defaults loaded", {
@@ -271,7 +310,6 @@ export default function CoachSettingsTab() {
         setFeedbackStartDateText(String(feedbackFlagSettings.startDateISO ?? ""));
         setTeamBranding(loadedBranding);
         setTeamNameText(loadedBranding.name);
-        await loadStaffAccess();
         setTeamSeasons(Array.isArray(teamDataStore.getState().teamSeasons) ? teamDataStore.getState().teamSeasons : []);
         setAthletePaceOverrides(loadedOverrides);
         setPracticeDefaults(defaults);
@@ -282,23 +320,24 @@ export default function CoachSettingsTab() {
           textById[athlete.id] = Number.isFinite(value) ? formatPace(value) : "";
         }
         setAthletePaceTextById(textById);
+        await loadStaffAccess(resolvedTeamId);
+        if (isActive && !isActive()) return;
+        setSettingsDataReady(true);
       } catch (error: any) {
         if (isActive && !isActive()) return;
         const message = error instanceof Error ? error.message : String(error ?? "Unknown settings load error");
-        console.error("[settings-screen] load failed", error);
+        console.error("[settings-screen] load failed", {
+          teamId: resolvedTeamId || null,
+          error,
+        });
+        setSettingsLoadError(message);
         Alert.alert("Settings load failed", message);
+      } finally {
+        if (!isActive || isActive()) setSettingsLoading(false);
       }
     },
     [loadStaffAccess]
   );
-
-  useEffect(() => {
-    let cancelled = false;
-    void loadSettingsScreenData(() => !cancelled);
-    return () => {
-      cancelled = true;
-    };
-  }, [loadSettingsScreenData]);
 
   useFocusEffect(
     useCallback(() => {
@@ -935,6 +974,21 @@ export default function CoachSettingsTab() {
 
         <Text style={styles.cardHint}>PNG, JPG, or WebP. Max 2 MB.</Text>
         {brandingStatus ? <Text style={brandingStatus.includes("failed") || brandingStatus.includes("required") ? styles.errorText : styles.successText}>{brandingStatus}</Text> : null}
+      </View>
+    );
+  }
+
+  if (!settingsDataReady) {
+    return (
+      <View style={[styles.container, { alignItems: "center", justifyContent: "center", gap: 12, padding: 24 }]}>
+        {settingsLoading ? <ActivityIndicator /> : null}
+        <Text style={styles.title}>{settingsLoading ? "Loading settings..." : "Settings could not be loaded"}</Text>
+        {settingsLoadError ? <Text style={[styles.cardHint, { textAlign: "center" }]}>{settingsLoadError}</Text> : null}
+        {!settingsLoading ? (
+          <Pressable onPress={() => void loadSettingsScreenData()} style={styles.utilityBtn}>
+            <Text style={styles.utilityBtnText}>Retry</Text>
+          </Pressable>
+        ) : null}
       </View>
     );
   }

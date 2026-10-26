@@ -1,6 +1,14 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { supabase } from "./supabase";
 import { normalizeTeamRole, type TeamRole } from "./teamPermissions";
+import {
+  ACTIVE_CONTEXT_ATHLETE_ID_KEY,
+  ACTIVE_CONTEXT_ID_KEY,
+  ACTIVE_CONTEXT_KIND_KEY,
+  ACTIVE_CONTEXT_ROLE_KEY,
+  ACTIVE_CONTEXT_TEAM_ID_KEY,
+  readPersistedActiveAccountContext,
+} from "./activeAccountContextStorage";
 
 export type AccountContextKind = "coach" | "athlete";
 export type AccountContextRole = TeamRole | "athlete";
@@ -17,11 +25,6 @@ export type AccountContext = {
   isDefault?: boolean;
 };
 
-const ACTIVE_CONTEXT_ID_KEY = "training_app_active_account_context_id_v1";
-const ACTIVE_CONTEXT_KIND_KEY = "training_app_active_account_context_kind_v1";
-const ACTIVE_CONTEXT_TEAM_ID_KEY = "training_app_active_account_team_id_v1";
-const ACTIVE_CONTEXT_ROLE_KEY = "training_app_active_account_role_v1";
-const ACTIVE_CONTEXT_ATHLETE_ID_KEY = "training_app_active_account_athlete_id_v1";
 const SELECTED_ATHLETE_KEY = "training_app_selected_athlete_v1";
 const DEBUG_ACCOUNT_CONTEXTS = typeof __DEV__ !== "undefined" ? __DEV__ : false;
 
@@ -257,19 +260,13 @@ export async function listAccountContextsForCurrentUser(): Promise<AccountContex
 }
 
 export async function getActiveAccountContext(): Promise<AccountContext | null> {
-  const [id, kind, teamId, role, athleteId] = await AsyncStorage.multiGet([
-    ACTIVE_CONTEXT_ID_KEY,
-    ACTIVE_CONTEXT_KIND_KEY,
-    ACTIVE_CONTEXT_TEAM_ID_KEY,
-    ACTIVE_CONTEXT_ROLE_KEY,
-    ACTIVE_CONTEXT_ATHLETE_ID_KEY,
-  ]);
-  const contextId = String(id?.[1] ?? "").trim();
-  const contextKind = String(kind?.[1] ?? "").trim() as AccountContextKind;
-  const contextTeamId = String(teamId?.[1] ?? "").trim();
-  const contextRole = String(role?.[1] ?? "").trim() as AccountContextRole;
-  const contextAthleteId = String(athleteId?.[1] ?? "").trim();
-  if (!contextId || !contextTeamId || (contextKind !== "coach" && contextKind !== "athlete")) return null;
+  const persisted = await readPersistedActiveAccountContext();
+  if (!persisted) return null;
+  const contextId = persisted.id;
+  const contextKind = persisted.kind as AccountContextKind;
+  const contextTeamId = persisted.teamId;
+  const contextRole = persisted.role as AccountContextRole;
+  const contextAthleteId = persisted.athleteId;
   if (contextKind === "coach" && !["owner", "editor", "viewer"].includes(contextRole)) return null;
   if (contextKind === "athlete" && !contextAthleteId) return null;
   return {

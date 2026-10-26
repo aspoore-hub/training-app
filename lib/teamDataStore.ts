@@ -32,6 +32,7 @@ import {
   type TeamSeasonRow,
 } from "./seasonsCloud";
 import { compareNames, sortSeasonsForDisplay } from "./sortHelpers";
+import { getPersistedActiveTeamId } from "./activeAccountContextStorage";
 
 export type TeamAthlete = {
   id: string;
@@ -138,12 +139,13 @@ type MileageWeekLoadResult = {
   cells: TeamMileageCellRow[];
   flags: MileageDayFlagRow[];
 };
+type TeamDataLoadResult = { error: unknown | null };
 
 const inFlightMileageWeekByKey = new Map<string, Promise<MileageWeekLoadResult>>();
 const inFlightVisibleMileageWeekByKey = new Map<string, Promise<MileageWeekLoadResult>>();
 const inFlightTrainingGroupsByKey = new Map<string, Promise<void>>();
-const inFlightTeamSeasonsByKey = new Map<string, Promise<void>>();
-const inFlightAthleteSeasonOverridesByKey = new Map<string, Promise<void>>();
+const inFlightTeamSeasonsByKey = new Map<string, Promise<TeamDataLoadResult>>();
+const inFlightAthleteSeasonOverridesByKey = new Map<string, Promise<TeamDataLoadResult>>();
 const inFlightSharedCoachFiltersByKey = new Map<string, Promise<void>>();
 
 function teamScopedLoadKey(suffix = "") {
@@ -522,6 +524,15 @@ async function ensureSessionAndTeam() {
       });
     }
   };
+
+  const activeTeamId = await getPersistedActiveTeamId();
+  if (activeTeamId) {
+    setState({ ready: true, userId, teamId: activeTeamId });
+    await persistCachedTeamIdForUser(userId, activeTeamId);
+    await hydrateLocalTeamCaches(activeTeamId);
+    lastVerifiedTeamContext = { userId, teamId: activeTeamId, atMs: Date.now() };
+    return { userId, teamId: activeTeamId };
+  }
 
   const cachedTeamId = await loadCachedTeamIdForUser(userId);
   if (cachedTeamId) {
@@ -1536,19 +1547,19 @@ function sortTeamSeasons(rows: TeamSeason[]): TeamSeason[] {
   return sortSeasonsForDisplay(rows);
 }
 
-async function loadTeamSeasons(force = false) {
+async function loadTeamSeasons(force = false): Promise<TeamDataLoadResult> {
   const inFlightKey = teamScopedLoadKey(force ? "team-seasons:force" : "team-seasons");
   const existing = inFlightTeamSeasonsByKey.get(inFlightKey);
   if (existing) return existing;
-  const promise = (async () => {
+  const promise: Promise<TeamDataLoadResult> = (async () => {
   incLoading();
   try {
     const { teamId } = await ensureSessionAndTeam();
     if (!teamId) {
       setState({ teamSeasons: [], teamSeasonsLoaded: true });
-      return;
+      return { error: null };
     }
-    if (!force && state.teamSeasonsLoaded) return;
+    if (!force && state.teamSeasonsLoaded) return { error: null };
     const rows = await listTeamSeasons();
     const sortedSeasons = sortTeamSeasons(Array.isArray(rows) ? rows : []);
     setState({
@@ -1572,15 +1583,17 @@ async function loadTeamSeasons(force = false) {
       const defaultSeasonId = resolveDefaultCurrentSeasonId(toDateOnlyISO(new Date()), sortedSeasons);
       await setSharedSelectedSeasonId(defaultSeasonId);
     }
+    return { error: null };
   } catch (e) {
     setError(e);
+    return { error: e };
   } finally {
     decLoading();
   }
   })();
   inFlightTeamSeasonsByKey.set(inFlightKey, promise);
   try {
-    await promise;
+    return await promise;
   } finally {
     inFlightTeamSeasonsByKey.delete(inFlightKey);
   }
@@ -1620,34 +1633,36 @@ function defaultPriorSeasonIdsForTeamStartDate(teamStartDate: string, seasons: T
   return priorSeasons.map((season) => String(season.id ?? "").trim()).filter(Boolean);
 }
 
-async function loadAthleteSeasonOverrides(force = false) {
+async function loadAthleteSeasonOverrides(force = false): Promise<TeamDataLoadResult> {
   const inFlightKey = teamScopedLoadKey(force ? "athlete-season-overrides:force" : "athlete-season-overrides");
   const existing = inFlightAthleteSeasonOverridesByKey.get(inFlightKey);
   if (existing) return existing;
-  const promise = (async () => {
+  const promise: Promise<TeamDataLoadResult> = (async () => {
   incLoading();
   try {
     const { teamId } = await ensureSessionAndTeam();
     if (!teamId) {
       setState({ athleteSeasonOverrides: [], athleteSeasonOverridesLoaded: true });
-      return;
+      return { error: null };
     }
-    if (!force && state.athleteSeasonOverridesLoaded) return;
+    if (!force && state.athleteSeasonOverridesLoaded) return { error: null };
     const rows = await listTeamAthleteSeasonOverrides();
     setState({
       athleteSeasonOverrides: Array.isArray(rows) ? rows : [],
       athleteSeasonOverridesLoaded: true,
       lastError: null,
     });
+    return { error: null };
   } catch (e) {
     setError(e);
+    return { error: e };
   } finally {
     decLoading();
   }
   })();
   inFlightAthleteSeasonOverridesByKey.set(inFlightKey, promise);
   try {
-    await promise;
+    return await promise;
   } finally {
     inFlightAthleteSeasonOverridesByKey.delete(inFlightKey);
   }

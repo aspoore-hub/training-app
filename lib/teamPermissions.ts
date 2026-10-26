@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import { getPersistedActiveTeamId } from "./activeAccountContextStorage";
 
 export type TeamRole = "owner" | "editor" | "viewer";
 export type TeamMemberRoleValue = TeamRole | "coach" | "admin" | "member" | string | null | undefined;
@@ -95,7 +96,9 @@ async function getProfileTeamId(userId: string): Promise<string | null> {
 export async function getCurrentTeamRole(teamId?: string | null): Promise<TeamRole | null> {
   const userId = await getSessionUserId();
   if (!userId) return null;
-  const resolvedTeamId = teamId ?? await getProfileTeamId(userId);
+  const resolvedTeamId = String(
+    teamId ?? (await getPersistedActiveTeamId()) ?? (await getProfileTeamId(userId)) ?? ""
+  ).trim();
   if (!resolvedTeamId) return null;
 
   const { data: team, error: teamError } = await supabase
@@ -124,4 +127,3 @@ export async function requireTeamPermission(permission: TeamPermission, teamId?:
   }
   return role;
 }
-
